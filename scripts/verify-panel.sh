@@ -43,9 +43,6 @@ check_focus_kept() {
     fi
 }
 
-# Both posted-click sections leave the panel closed for the toggle pin check
-# further down, and either mode can skip without ever posting the click that
-# would have closed it.
 close_panel_if_open() {
     [[ "$(proc 'to return count of windows')" == "0" ]] && return
     proc 'to click menu bar item 1 of menu bar 2' >/dev/null
@@ -147,13 +144,8 @@ else
     proc 'to click menu bar item 1 of menu bar 2' >/dev/null
     wait_for_windows 1
     check "panel is open before the outside click" "1" "$(proc 'to return count of windows')"
-    # The mode re-reads the panel's rect itself. The geometry above only gates
-    # whether to run at all: a menu bar that moved mid-measurement can move
-    # again mid-click.
     swift "$(dirname "$0")/menu-bar-tracking-check.swift" outside-click "$app_pid" \
         || failures=$((failures + 1))
-    # An outside click legitimately changes which app is in front, so the one
-    # thing to assert is the one that holds either way.
     check "sherpa did not activate over the outside click" "no" \
         "$([[ "$(frontmost)" == "sherpa" ]] && echo yes || echo no)"
     close_panel_if_open
@@ -180,10 +172,9 @@ echo "menu bar over a fullscreen app"
 swift "$(dirname "$0")/menu-bar-tracking-check.swift" toggle "$app_pid" || failures=$((failures + 1))
 
 # Not checked here: right-click on the icon opens the Quit Sherpa menu. The
-# Accessibility API exposes no right-click on a status item, and the posted
-# CGEvents the outside-click mode now uses could drive one, but the quit menu is
-# outside the scope of the change that brought them in. Confirm it by hand once
-# after changing the click routing.
+# Accessibility API exposes no right-click on a status item, though the posted
+# CGEvents the clicking modes use could drive one. Confirm it by hand once after
+# changing the click routing.
 
 mkdir -p "$DERIVED/shots"
 proc 'to click menu bar item 1 of menu bar 2' >/dev/null

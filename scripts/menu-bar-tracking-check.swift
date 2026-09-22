@@ -25,9 +25,8 @@ import AppKit
 // The clicking modes post CGEvents. System Events' click is an accessibility
 // press on whichever element sits at a point, not a mouse event, and a global
 // monitor is never called for one, so the modes above exercise nothing about
-// the monitor. They also bring the window they click, because no pixel of the
-// main display is left uncovered by the person's own windows: there is no bare
-// desktop to click and their editor is not ours to click into.
+// the monitor. They bring the window they click, because no pixel of the main
+// display is left uncovered by the person's own windows.
 
 enum Mode: String {
     case toggle
@@ -43,10 +42,6 @@ guard let pid = arguments.dropFirst().first.flatMap(Int32.init) else {
     exit(1)
 }
 
-// A running NSApplication, not a bare RunLoop: this process puts a window of
-// its own on screen, and AppKit only services one from the application's event
-// loop. Accessory so that window costs the person no Dock icon and no app
-// switcher entry.
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 app.finishLaunching()
@@ -64,8 +59,6 @@ func toAccessibility(_ frame: CGRect) -> CGRect {
     CGRect(x: frame.minX, y: primary.height - frame.maxY, width: frame.width, height: frame.height)
 }
 
-/// The display `point` is on. The menu bar follows the pointer between displays,
-/// so neither the panel nor the icon is reliably on the primary one.
 func display(containing point: CGPoint) -> CGRect {
     NSScreen.screens.map { toAccessibility($0.frame) }.first { $0.contains(point) }
         ?? toAccessibility(primary)
@@ -93,8 +86,6 @@ func osascript(_ source: String) -> String {
     return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
-// Addressed by process id for the same reason the shell script is: a copy
-// launched from Xcode is also called sherpa.
 func driven(_ command: String) -> String {
     osascript(
         "tell application \"System Events\" to tell (first process whose unix id is \(pid)) to \(command)"
@@ -121,9 +112,6 @@ func postClick(at point: CGPoint) {
     }
 }
 
-/// A window of the check's own, put where the person has nothing, so an outside
-/// click lands somewhere it can do no harm. Non-activating so it pulls the front
-/// app away no more than the click already does.
 func showClickTarget(centredAt point: CGPoint) -> NSPanel {
     let side: CGFloat = 60
     let centre = toAppKit(point)
@@ -139,10 +127,9 @@ func showClickTarget(centredAt point: CGPoint) -> NSPanel {
     return target
 }
 
-/// Read here, immediately before the click that uses it, rather than handed in
-/// by the shell: the menu bar follows the pointer between displays, so a rect
-/// measured before an earlier open can describe a place the panel no longer is,
-/// and a click posted there lands on the person's own windows instead.
+/// Read immediately before the click that uses it, never handed in by the
+/// shell: the menu bar follows the pointer between displays, so a rect measured
+/// an open or two earlier can describe a place the panel no longer is.
 func rect(of element: String) -> CGRect? {
     let numbers = (driven("return position of \(element)") + "," + driven("return size of \(element)"))
         .split(separator: ",")
@@ -159,9 +146,8 @@ func quitApp() {
 
 let window: TimeInterval = 1.5
 
-// Through the application's event loop and never usleep: distributed
-// notifications and posted mouse events both arrive on the run loop, so a
-// blocked main thread reads exactly like a feature that does not work.
+// Through the event loop and never usleep: notifications and posted clicks both
+// arrive on the run loop, so a blocked main thread reads as a broken feature.
 func settle(_ seconds: TimeInterval) {
     let deadline = Date().addingTimeInterval(seconds)
     while let event = app.nextEvent(matching: .any, until: deadline, inMode: .default, dequeue: true) {
@@ -217,8 +203,6 @@ case .outsideClick:
     guard let panelRect = rect(of: "window 1") else {
         unmeasurable("the panel closed before the check clicked it, someone is using the machine")
     }
-    // Clear of the panel on the vertical axis alone, so nothing about where the
-    // panel sits horizontally can end up putting the target underneath it.
     let screen = display(containing: CGPoint(x: panelRect.midX, y: panelRect.midY))
     let targetPoint = CGPoint(x: screen.midX, y: (panelRect.maxY + screen.maxY) / 2)
     let target = showClickTarget(centredAt: targetPoint)
@@ -235,7 +219,6 @@ case .outsideClick:
         print("  FAIL a real click inside the panel closed it, recorded \(inside)")
         exit(1)
     }
-    // Hiding and re-showing would leave the window count alone and record this.
     guard inside.first != "end" else {
         print("  FAIL a real click inside the panel released the pin, recorded \(inside)")
         exit(1)
@@ -251,8 +234,6 @@ case .outsideClick:
         print("  FAIL a click outside the panel broadcast \(outside), expected end")
         exit(1)
     }
-    // The window count reads the same whether the pin came back once, not at
-    // all, or twice, and two strand the menu bar for every app on the system.
     guard outside.dropFirst().first != "end" else {
         print("  FAIL a click outside the panel released the pin twice, recorded \(outside)")
         exit(1)
@@ -266,13 +247,11 @@ case .outsideClick:
     }
     print("  ok   a real click outside closes the panel and releases the pin exactly once")
 case .iconClick:
-    // The regression test that stands in for the filtering the monitor
-    // deliberately does not do. If a future macOS starts delivering our own
-    // status item clicks to our own global monitor, the monitor hides the panel
-    // and the button action re-shows it, so the panel ends open and the
-    // recording reads ["end", "begin"]. The toggle mode cannot catch that,
-    // because it drives the icon through an accessibility press that no monitor
-    // ever sees.
+    // Stands in for the filtering the monitor deliberately does not do. If our
+    // own status item click ever reaches our own global monitor, the monitor
+    // hides the panel and the button action re-shows it, so the panel ends open
+    // having recorded ["end", "begin"]. The toggle mode cannot see that, because
+    // an accessibility press is not a mouse event.
     guard rect(of: "window 1") != nil else {
         unmeasurable("the panel closed before the check clicked the icon, someone is using the machine")
     }

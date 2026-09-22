@@ -5,9 +5,8 @@ import SwiftUI
 final class MenuBarController: NSObject {
     private let statusItem: NSStatusItem
     private let panel: FloatingPanel
-    // Assigned, never read. Not a visibility flag: panel.isVisible stays the
-    // single source of truth for that, and this answers a different question,
-    // namely what the app currently owes the system.
+    // Assigned, never read. Not a second visibility flag: panel.isVisible stays
+    // the single source of truth for that, and this answers what the app owes.
     private var presentation: PanelPresentation?
 
     init(state: AppState) {
@@ -71,9 +70,8 @@ final class MenuBarController: NSObject {
         let origin = PanelAnchor.origin(for: size, under: buttonFrame, within: screen.visibleFrame)
         panel.setFrameOrigin(origin)
 
-        // Claimed here rather than at the top of the method so a guard that
-        // bails out above can never leave a pin claimed, or a monitor
-        // installed, with no panel to hand either back.
+        // Below the guards, so one that bails out cannot leave a pin claimed or
+        // a monitor installed with no panel to hand either back.
         presentation = PanelPresentation { [weak self] in self?.hidePanel() }
         // orderFrontRegardless, not makeKeyAndOrderFront: AppKit can suppress a
         // plain order-front for an app that is not active, and this app never
@@ -81,9 +79,6 @@ final class MenuBarController: NSObject {
         panel.orderFrontRegardless()
     }
 
-    // Runs more than once per show whenever a global mouse event is already in
-    // flight as the panel goes away. Both statements are no-ops the second time
-    // round, so the pin is still released exactly once without a guard saying so.
     private func hidePanel() {
         // orderOut, not close(): close() tears down the hosting view (and the
         // SwiftUI state inside it); orderOut just hides it for the next show.
