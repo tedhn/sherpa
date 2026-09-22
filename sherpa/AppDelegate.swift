@@ -12,6 +12,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             accessibilityDescription: "Sherpa"
         )
 
+        let menu = NSMenu()
+        menu.addItem(
+            withTitle: "Quit Sherpa",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+        item.menu = menu
+
         statusItem = item
     }
 }
