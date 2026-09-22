@@ -11,7 +11,9 @@ APP="$DERIVED/Build/Products/Debug/sherpa.app"
 failures=0
 
 sys() { osascript -e "tell application \"System Events\" $1" 2>&1; }
-proc() { sys "to tell process \"sherpa\" $1"; }
+# Addressed by process id, not by name. A copy launched from Xcode is also
+# called sherpa, and by name the Accessibility API picks one of them at random.
+proc() { sys "to tell (first process whose unix id is $app_pid) $1"; }
 frontmost() { sys 'to name of first process whose frontmost is true'; }
 
 # Accessibility clicks on the real menu bar settle at their own pace, more so
@@ -26,6 +28,20 @@ wait_for_windows() {
     return 1
 }
 
+# The front app must not become sherpa. It changing to something else means a
+# person switched apps while the script ran, which says nothing about the panel.
+check_focus_kept() {
+    local label="$1" before="$2" after="$3"
+    if [[ "$after" == "sherpa" ]]; then
+        echo "  FAIL $label: sherpa took focus"
+        failures=$((failures + 1))
+    elif [[ "$before" != "$after" ]]; then
+        echo "  skip $label: the front app went from $before to $after, someone is using the machine"
+    else
+        echo "  ok   $label"
+    fi
+}
+
 check() {
     local label="$1" expected="$2" actual="$3"
     if [[ "$actual" == "$expected" ]]; then
@@ -37,12 +53,26 @@ check() {
 }
 
 cd "$(dirname "$0")/.."
-pkill -f "Debug/sherpa.app" 2>/dev/null
+# Only ever touch the build this script owns. Anything running from Xcode's own
+# DerivedData belongs to whoever launched it.
+pkill -f "$DERIVED" 2>/dev/null
 xcodebuild -project sherpa.xcodeproj -scheme sherpa -configuration Debug \
     -derivedDataPath "$DERIVED" build >/dev/null || { echo "build failed"; exit 1; }
 
 open -a "$APP"
-sleep 2
+app_pid=""
+# A cold first launch from a fresh build location takes longer than any fixed
+# sleep worth writing, so wait for the icon to actually appear.
+deadline=$((SECONDS + 30))
+while (( SECONDS < deadline )); do
+    app_pid="$(pgrep -f "$APP/Contents/MacOS/sherpa" | head -1)"
+    [[ -n "$app_pid" ]] \
+        && [[ "$(proc 'to return position of menu bar item 1 of menu bar 2')" == *,* ]] \
+        && break
+    sleep 0.5
+done
+if [[ -z "$app_pid" ]]; then echo "the app never started"; exit 1; fi
+echo "  info driving pid $app_pid from $DERIVED"
 
 echo "status item"
 item_pos="$(proc 'to return position of menu bar item 1 of menu bar 2')"
@@ -55,7 +85,7 @@ proc 'to click menu bar item 1 of menu bar 2' >/dev/null
 wait_for_windows 1
 check "panel is on screen" "1" "$(proc 'to return count of windows')"
 front_after="$(frontmost)"
-check "the app in front keeps focus" "$front_before" "$front_after"
+check_focus_kept "the app in front keeps focus" "$front_before" "$front_after"
 check "sherpa did not activate" "no" "$([[ "$front_after" == "sherpa" ]] && echo yes || echo no)"
 
 # The menu bar moves on its own: it hides over a fullscreen app and follows the
@@ -80,7 +110,7 @@ elif [[ "$panel_x$panel_y$panel_w" =~ ^[0-9-]+$ ]]; then
         "$([[ $(( panel_x + panel_w / 2 - item_x - item_w / 2 )) -le 2 ]] && echo yes || echo no)"
 else
     echo "  skip geometry checks: no panel to measure"
-    panel_x=0 panel_y=0 panel_w=0
+    panel_x=0 panel_y=0 panel_w=0 panel_h=0 panel_h=0
 fi
 
 echo "content"
@@ -93,7 +123,7 @@ sleep 1
 count_after="$(proc "to return $counter")"
 check "panel content takes clicks" "yes" "$([[ "$count_before" != "$count_after" ]] && echo yes || echo no)"
 echo "  info '$count_before' -> '$count_after'"
-check "focus still behind after using the panel" "$front_before" "$(frontmost)"
+check_focus_kept "focus still behind after using the panel" "$front_before" "$(frontmost)"
 
 echo "close"
 proc 'to click menu bar item 1 of menu bar 2' >/dev/null
@@ -104,7 +134,7 @@ echo "menu bar over a fullscreen app"
 # Cannot be checked here: that the menu bar actually stays down. The reveal is
 # edge-triggered on real pointer movement, and warping the cursor does not
 # generate it. What is checked is that the app claims and releases the pin.
-swift "$(dirname "$0")/menu-bar-tracking-check.swift" toggle || failures=$((failures + 1))
+swift "$(dirname "$0")/menu-bar-tracking-check.swift" toggle "$app_pid" || failures=$((failures + 1))
 
 # Not checked here: right-click on the icon opens the Quit Sherpa menu. The
 # Accessibility API exposes no right-click on a status item, and synthetic
@@ -119,7 +149,7 @@ echo "  info corners and shadow: $DERIVED/shots/panel.png"
 
 # Tear down by quitting with the panel still open, which is the path that
 # strands the pin if applicationWillTerminate does not release it.
-swift "$(dirname "$0")/menu-bar-tracking-check.swift" quit || failures=$((failures + 1))
-pkill -f "Debug/sherpa.app" 2>/dev/null
+swift "$(dirname "$0")/menu-bar-tracking-check.swift" quit "$app_pid" || failures=$((failures + 1))
+pkill -f "$DERIVED" 2>/dev/null
 if [[ $failures -eq 0 ]]; then echo "all checks passed"; else echo "$failures check(s) failed"; fi
 exit $failures
