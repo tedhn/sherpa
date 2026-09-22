@@ -19,8 +19,13 @@ struct ContentView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
         }
-        .padding(40)
-        .frame(minWidth: 320, minHeight: 240)
+        .padding(20)
+        // A borderless window proposes no size to SwiftUI, so fittingSize
+        // needs one axis pinned; width is it. The corners are drawn here, not
+        // by the window — the window frame stays rectangular, and its
+        // transparent corner pixels are what the panel's hasShadow traces.
+        .frame(width: 280)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 

@@ -1,25 +1,14 @@
 import AppKit
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    // Held as a stored property: a local variable here would deallocate
-    // the item when the method returns, and the icon would vanish.
-    private var statusItem: NSStatusItem?
+    // Owned here, not by MenuBarController: the model outlives any one panel.
+    private let state = AppState()
+    // Held as a stored property: a local variable would deallocate when this
+    // method returns, taking the status item (and its icon) down with it.
+    private var menuBar: MenuBarController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.image = NSImage(
-            systemSymbolName: "mountain.2.fill",
-            accessibilityDescription: "Sherpa"
-        )
-
-        let menu = NSMenu()
-        menu.addItem(
-            withTitle: "Quit Sherpa",
-            action: #selector(NSApplication.terminate(_:)),
-            keyEquivalent: "q"
-        )
-        item.menu = menu
-
-        statusItem = item
+        menuBar = MenuBarController(state: state)
     }
 }
