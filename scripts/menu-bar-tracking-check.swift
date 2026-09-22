@@ -19,6 +19,8 @@ import AppKit
 //   outside-click  panel open. Posts a real mouse click at the panel's centre
 //                  and then one on a window of its own, and expects only the
 //                  second to close the panel.
+//   icon-click     panel open. Posts a real mouse click on the status item and
+//                  expects the panel closed having recorded exactly one end.
 //
 // The clicking modes post CGEvents. System Events' click is an accessibility
 // press on whichever element sits at a point, not a mouse event, and a global
@@ -31,6 +33,7 @@ enum Mode: String {
     case toggle
     case quit
     case outsideClick = "outside-click"
+    case iconClick = "icon-click"
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())
@@ -262,4 +265,42 @@ case .outsideClick:
         unmeasurable("another app opened a menu mid-check, recorded \(outside) then \(afterwards)")
     }
     print("  ok   a real click outside closes the panel and releases the pin exactly once")
+case .iconClick:
+    // The regression test that stands in for the filtering the monitor
+    // deliberately does not do. If a future macOS starts delivering our own
+    // status item clicks to our own global monitor, the monitor hides the panel
+    // and the button action re-shows it, so the panel ends open and the
+    // recording reads ["end", "begin"]. The toggle mode cannot catch that,
+    // because it drives the icon through an accessibility press that no monitor
+    // ever sees.
+    guard rect(of: "window 1") != nil else {
+        unmeasurable("the panel closed before the check clicked the icon, someone is using the machine")
+    }
+    guard let itemRect = rect(of: "menu bar item 1 of menu bar 2") else {
+        unmeasurable("the status item could not be measured, so there is nothing to aim at")
+    }
+    let centre = CGPoint(x: itemRect.midX, y: itemRect.midY)
+    let cursor = CGEvent(source: nil)?.location ?? centre
+    // The menu bar tracks the pointer, and a click posted at an item the pointer
+    // is not over misses it, so the cursor goes there first and back afterwards.
+    let clicking = record {
+        CGWarpMouseCursorPosition(centre)
+        settle(0.3)
+        postClick(at: centre)
+    }
+    CGWarpMouseCursorPosition(cursor)
+    let afterClicking = windowCount()
+
+    guard afterClicking == "0" else {
+        print("  FAIL a real click on the icon left the panel open, recorded \(clicking)")
+        exit(1)
+    }
+    guard clicking.first == "end" else {
+        print("  FAIL a real click on the icon broadcast \(clicking), expected end")
+        exit(1)
+    }
+    guard clicking == ["end"] else {
+        unmeasurable("another app opened a menu mid-check, recorded \(clicking)")
+    }
+    print("  ok   a real click on the icon closes the panel and releases the pin once")
 }

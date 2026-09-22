@@ -43,6 +43,15 @@ check_focus_kept() {
     fi
 }
 
+# Both posted-click sections leave the panel closed for the toggle pin check
+# further down, and either mode can skip without ever posting the click that
+# would have closed it.
+close_panel_if_open() {
+    [[ "$(proc 'to return count of windows')" == "0" ]] && return
+    proc 'to click menu bar item 1 of menu bar 2' >/dev/null
+    wait_for_windows 0
+}
+
 check() {
     local label="$1" expected="$2" actual="$3"
     if [[ "$actual" == "$expected" ]]; then
@@ -147,13 +156,21 @@ else
     # thing to assert is the one that holds either way.
     check "sherpa did not activate over the outside click" "no" \
         "$([[ "$(frontmost)" == "sherpa" ]] && echo yes || echo no)"
-    # The mode above can skip without ever posting a click, so the panel is put
-    # back to closed here rather than assumed closed by the click it may not
-    # have made.
-    if [[ "$(proc 'to return count of windows')" != "0" ]]; then
-        proc 'to click menu bar item 1 of menu bar 2' >/dev/null
-        wait_for_windows 0
-    fi
+    close_panel_if_open
+fi
+
+echo "icon click"
+if [[ $panel_w -eq 0 ]]; then
+    echo "  skip icon click: the geometry to aim at was not measured"
+else
+    proc 'to click menu bar item 1 of menu bar 2' >/dev/null
+    wait_for_windows 1
+    check "panel is open before the icon click" "1" "$(proc 'to return count of windows')"
+    swift "$(dirname "$0")/menu-bar-tracking-check.swift" icon-click "$app_pid" \
+        || failures=$((failures + 1))
+    check "sherpa did not activate over the icon click" "no" \
+        "$([[ "$(frontmost)" == "sherpa" ]] && echo yes || echo no)"
+    close_panel_if_open
 fi
 
 echo "menu bar over a fullscreen app"

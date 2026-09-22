@@ -19,7 +19,9 @@ final class PanelPresentation {
         // AppKit never calls a global monitor for an event delivered to our own
         // app, which measurably covers both a click on this panel and a click
         // on our own status item, so "the global monitor fired" already means
-        // "outside" and any frame test would be dead code.
+        // "outside" and any frame test would be dead code. The day that stops
+        // being true, the icon-click mode in scripts/menu-bar-tracking-check.swift
+        // is what says so.
         //
         // A nil token is a documented outcome rather than an error: the panel
         // still shows and the pin is still balanced, and only dismissal is lost.
