@@ -14,6 +14,18 @@ sys() { osascript -e "tell application \"System Events\" $1" 2>&1; }
 proc() { sys "to tell process \"sherpa\" $1"; }
 frontmost() { sys 'to name of first process whose frontmost is true'; }
 
+# Accessibility clicks on the real menu bar settle at their own pace, more so
+# while the bar is mid-animation, so poll for the state instead of sleeping a
+# fixed amount and hoping.
+wait_for_windows() {
+    local expected="$1" deadline=$((SECONDS + 5))
+    while (( SECONDS < deadline )); do
+        [[ "$(proc 'to return count of windows')" == "$expected" ]] && return 0
+        sleep 0.25
+    done
+    return 1
+}
+
 check() {
     local label="$1" expected="$2" actual="$3"
     if [[ "$actual" == "$expected" ]]; then
@@ -40,17 +52,26 @@ check "no panel before the first click" "0" "$(proc 'to return count of windows'
 echo "open"
 front_before="$(frontmost)"
 proc 'to click menu bar item 1 of menu bar 2' >/dev/null
-sleep 1
+wait_for_windows 1
 check "panel is on screen" "1" "$(proc 'to return count of windows')"
 front_after="$(frontmost)"
 check "the app in front keeps focus" "$front_before" "$front_after"
 check "sherpa did not activate" "no" "$([[ "$front_after" == "sherpa" ]] && echo yes || echo no)"
 
-read -r item_x item_y <<<"${item_pos//,/ }"
+# The menu bar moves on its own: it hides over a fullscreen app and follows the
+# pointer between displays. Bracket the panel reading with two icon readings and
+# only compare when the icon held still, so a bar that moved mid-measurement
+# reports as unmeasured instead of as a failure.
+item_before="$(proc 'to return position of menu bar item 1 of menu bar 2')"
 read -r item_w item_h <<<"$(proc 'to return size of menu bar item 1 of menu bar 2' | tr ',' ' ')"
 read -r panel_x panel_y <<<"$(proc 'to return position of window 1' | tr ',' ' ')"
 read -r panel_w panel_h <<<"$(proc 'to return size of window 1' | tr ',' ' ')"
-if [[ "$panel_x$panel_y$panel_w" =~ ^[0-9-]+$ ]]; then
+item_after="$(proc 'to return position of menu bar item 1 of menu bar 2')"
+read -r item_x item_y <<<"${item_after//,/ }"
+if [[ "$item_before" != "$item_after" ]]; then
+    echo "  skip geometry checks: the menu bar moved from $item_before to $item_after mid-measurement"
+    panel_x=0 panel_y=0 panel_w=0
+elif [[ "$panel_x$panel_y$panel_w" =~ ^[0-9-]+$ ]]; then
     echo "  info icon at $item_x,$item_y sized ${item_w}x${item_h}; panel at $panel_x,$panel_y sized ${panel_w}x${panel_h}"
     # Accessibility reports a top-left origin with y growing downward, so a
     # panel below the icon has the larger y.
@@ -76,14 +97,14 @@ check "focus still behind after using the panel" "$front_before" "$(frontmost)"
 
 echo "close"
 proc 'to click menu bar item 1 of menu bar 2' >/dev/null
-sleep 1
+wait_for_windows 0
 check "a second click closes the panel" "0" "$(proc 'to return count of windows')"
 
 echo "menu bar over a fullscreen app"
 # Cannot be checked here: that the menu bar actually stays down. The reveal is
 # edge-triggered on real pointer movement, and warping the cursor does not
 # generate it. What is checked is that the app claims and releases the pin.
-swift "$(dirname "$0")/menu-bar-tracking-check.swift" || failures=$((failures + 1))
+swift "$(dirname "$0")/menu-bar-tracking-check.swift" toggle || failures=$((failures + 1))
 
 # Not checked here: right-click on the icon opens the Quit Sherpa menu. The
 # Accessibility API exposes no right-click on a status item, and synthetic
@@ -92,10 +113,13 @@ swift "$(dirname "$0")/menu-bar-tracking-check.swift" || failures=$((failures + 
 
 mkdir -p "$DERIVED/shots"
 proc 'to click menu bar item 1 of menu bar 2' >/dev/null
-sleep 1
+wait_for_windows 1
 screencapture -x -R"$((panel_x - 40)),$((panel_y - 40)),$((panel_w + 80)),$((panel_h + 80))" "$DERIVED/shots/panel.png"
 echo "  info corners and shadow: $DERIVED/shots/panel.png"
 
+# Tear down by quitting with the panel still open, which is the path that
+# strands the pin if applicationWillTerminate does not release it.
+swift "$(dirname "$0")/menu-bar-tracking-check.swift" quit || failures=$((failures + 1))
 pkill -f "Debug/sherpa.app" 2>/dev/null
 if [[ $failures -eq 0 ]]; then echo "all checks passed"; else echo "$failures check(s) failed"; fi
 exit $failures

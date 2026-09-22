@@ -1,34 +1,49 @@
 import AppKit
 
-// Opens and closes the panel and records the menu-bar tracking notifications
-// the app broadcasts. macOS pins the menu bar over a fullscreen app for as
-// long as a menu is tracking, and these are the notifications it keys on, so
-// the panel has to claim and release the same pin.
+// Records the menu-bar tracking notifications the app broadcasts. macOS pins
+// the menu bar over a fullscreen app for as long as a menu is tracking, and
+// these are the notifications it keys on, so the panel has to claim and release
+// the same pin. The pin lives in another process, so an unreleased one strands
+// the menu bar for every app on the system.
 //
-// Assumes sherpa is already running with the panel closed. Prints the
-// recorded sequence and exits non-zero if it is not begin then end.
+// Two modes, both assuming sherpa is running.
+//   toggle  panel closed. Opens it, closes it, expects begin then end.
+//   quit    panel open. Quits the app, expects end.
 
-let beginTracking = Notification.Name("com.apple.HIToolbox.beginMenuTrackingNotification")
-let endTracking = Notification.Name("com.apple.HIToolbox.endMenuTrackingNotification")
+enum Mode: String {
+    case toggle
+    case quit
+}
+
+let mode = Mode(rawValue: CommandLine.arguments.dropFirst().first ?? "toggle") ?? .toggle
 
 var recorded: [String] = []
-for (name, label) in [(beginTracking, "begin"), (endTracking, "end")] {
+for (name, label) in [("begin", "begin"), ("end", "end")] {
     DistributedNotificationCenter.default().addObserver(
-        forName: name, object: nil, queue: .main
+        forName: Notification.Name("com.apple.HIToolbox.\(name)MenuTrackingNotification"),
+        object: nil,
+        queue: .main
     ) { _ in recorded.append(label) }
 }
 
-func clickStatusItem() {
+func run(_ arguments: [String]) {
     let osascript = Process()
     osascript.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-    osascript.arguments = [
-        "-e",
-        "tell application \"System Events\" to tell process \"sherpa\" to click menu bar item 1 of menu bar 2",
-    ]
+    osascript.arguments = arguments
     osascript.standardOutput = FileHandle.nullDevice
     osascript.standardError = FileHandle.nullDevice
     try? osascript.run()
     osascript.waitUntilExit()
+}
+
+func clickStatusItem() {
+    run(["-e", "tell application \"System Events\" to tell process \"sherpa\" to click menu bar item 1 of menu bar 2"])
+}
+
+// The quit Apple event, not a signal. SIGTERM skips applicationWillTerminate,
+// which is exactly the path that would strand the pin.
+func quitApp() {
+    run(["-e", "tell application id \"my.rooftop.sherpa\" to quit"])
 }
 
 func settle(_ seconds: TimeInterval) {
@@ -38,17 +53,27 @@ func settle(_ seconds: TimeInterval) {
 settle(0.5)
 recorded.removeAll()
 
-clickStatusItem()
-settle(1.5)
-let afterOpen = recorded
+let expected: [String]
+switch mode {
+case .toggle:
+    clickStatusItem()
+    settle(1.5)
+    guard recorded == ["begin"] else {
+        print("  FAIL opening the panel must broadcast begin, got \(recorded)")
+        exit(1)
+    }
+    clickStatusItem()
+    settle(1.5)
+    expected = ["begin", "end"]
+case .quit:
+    quitApp()
+    settle(2.0)
+    expected = ["end"]
+}
 
-clickStatusItem()
-settle(1.5)
-let afterClose = recorded
-
-print("  info sequence: \(recorded.isEmpty ? "(nothing broadcast)" : recorded.joined(separator: ", "))")
-guard afterOpen == ["begin"], afterClose == ["begin", "end"] else {
-    print("  FAIL opening the panel must broadcast begin, closing must broadcast end")
+print("  info \(mode.rawValue) sequence: \(recorded.isEmpty ? "(nothing broadcast)" : recorded.joined(separator: ", "))")
+guard recorded == expected else {
+    print("  FAIL expected \(expected), got \(recorded)")
     exit(1)
 }
-print("  ok   the panel claims and releases the menu bar pin")
+print("  ok   \(mode == .toggle ? "opening and closing the panel claims and releases the pin" : "quitting with the panel open releases the pin")")
