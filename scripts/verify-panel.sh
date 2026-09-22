@@ -1,7 +1,8 @@
 #!/bin/bash
 # Drives the built app through the Accessibility API and asserts what the panel
 # is supposed to do: open under the status item, leave the app in front active,
-# accept clicks on its own content, and close on a second click.
+# accept clicks on its own content, close on a second click, and close when a
+# real mouse click lands anywhere else.
 #
 # The terminal running this needs Accessibility permission.
 set -uo pipefail
@@ -130,6 +131,31 @@ proc 'to click menu bar item 1 of menu bar 2' >/dev/null
 wait_for_windows 0
 check "a second click closes the panel" "0" "$(proc 'to return count of windows')"
 
+echo "outside click"
+if [[ $panel_w -eq 0 ]]; then
+    echo "  skip outside click: the geometry to aim at was not measured"
+else
+    proc 'to click menu bar item 1 of menu bar 2' >/dev/null
+    wait_for_windows 1
+    check "panel is open before the outside click" "1" "$(proc 'to return count of windows')"
+    # The mode re-reads the panel's rect itself. The geometry above only gates
+    # whether to run at all: a menu bar that moved mid-measurement can move
+    # again mid-click.
+    swift "$(dirname "$0")/menu-bar-tracking-check.swift" outside-click "$app_pid" \
+        || failures=$((failures + 1))
+    # An outside click legitimately changes which app is in front, so the one
+    # thing to assert is the one that holds either way.
+    check "sherpa did not activate over the outside click" "no" \
+        "$([[ "$(frontmost)" == "sherpa" ]] && echo yes || echo no)"
+    # The mode above can skip without ever posting a click, so the panel is put
+    # back to closed here rather than assumed closed by the click it may not
+    # have made.
+    if [[ "$(proc 'to return count of windows')" != "0" ]]; then
+        proc 'to click menu bar item 1 of menu bar 2' >/dev/null
+        wait_for_windows 0
+    fi
+fi
+
 echo "menu bar over a fullscreen app"
 # Cannot be checked here: that the menu bar actually stays down. The reveal is
 # edge-triggered on real pointer movement, and warping the cursor does not
@@ -137,9 +163,10 @@ echo "menu bar over a fullscreen app"
 swift "$(dirname "$0")/menu-bar-tracking-check.swift" toggle "$app_pid" || failures=$((failures + 1))
 
 # Not checked here: right-click on the icon opens the Quit Sherpa menu. The
-# Accessibility API exposes no right-click on a status item, and synthetic
-# CGEvents need event-posting permission this script cannot assume. Confirm it
-# by hand once after changing the click routing.
+# Accessibility API exposes no right-click on a status item, and the posted
+# CGEvents the outside-click mode now uses could drive one, but the quit menu is
+# outside the scope of the change that brought them in. Confirm it by hand once
+# after changing the click routing.
 
 mkdir -p "$DERIVED/shots"
 proc 'to click menu bar item 1 of menu bar 2' >/dev/null
