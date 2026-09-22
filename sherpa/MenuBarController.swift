@@ -11,6 +11,13 @@ final class MenuBarController: NSObject {
         panel = FloatingPanel(contentView: NSHostingView(rootView: ContentView(state: state)))
         super.init()
 
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationWillTerminate),
+            name: NSApplication.willTerminateNotification,
+            object: nil
+        )
+
         guard let button = statusItem.button else { return }
         button.image = NSImage(systemSymbolName: "mountain.2.fill", accessibilityDescription: "Sherpa")
         button.target = self
@@ -21,6 +28,16 @@ final class MenuBarController: NSObject {
         // statusItem.menu is deliberately left unset: assigning one makes
         // AppKit pop it on click and skip the action entirely, which is the
         // opposite of the left-click-toggles-panel behavior this exists for.
+    }
+
+    // The panel can still be open at quit, and the menu bar pin outlives this
+    // process. FluidMenuBarExtra releases its pin from windowDidResignKey, which
+    // is not an option here. becomesKeyOnlyIfNeeded plus orderFrontRegardless
+    // means the panel usually never becomes key, so it never resigns key either.
+    @objc private func applicationWillTerminate(_ notification: Notification) {
+        if panel.isVisible {
+            MenuBarReveal.release()
+        }
     }
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
@@ -51,6 +68,10 @@ final class MenuBarController: NSObject {
         let buttonFrame = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
         let origin = PanelAnchor.origin(for: size, under: buttonFrame, within: screen.visibleFrame)
         panel.setFrameOrigin(origin)
+
+        // Held here rather than at the top of the method so a guard that bails
+        // out above can never leave the pin claimed with no panel to release it.
+        MenuBarReveal.hold()
         // orderFrontRegardless, not makeKeyAndOrderFront: AppKit can suppress a
         // plain order-front for an app that is not active, and this app never
         // activates. Making the panel key here would pull focus as well.
@@ -61,6 +82,7 @@ final class MenuBarController: NSObject {
         // orderOut, not close(): close() tears down the hosting view (and the
         // SwiftUI state inside it); orderOut just hides it for the next show.
         panel.orderOut(nil)
+        MenuBarReveal.release()
     }
 
     private func showQuitMenu(from button: NSStatusBarButton) {
