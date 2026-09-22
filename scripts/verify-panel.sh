@@ -79,6 +79,12 @@ proc 'to click menu bar item 1 of menu bar 2' >/dev/null
 sleep 1
 check "a second click closes the panel" "0" "$(proc 'to return count of windows')"
 
+echo "menu bar over a fullscreen app"
+# Cannot be checked here: that the menu bar actually stays down. The reveal is
+# edge-triggered on real pointer movement, and warping the cursor does not
+# generate it. What is checked is that the app claims and releases the pin.
+swift "$(dirname "$0")/menu-bar-tracking-check.swift" || failures=$((failures + 1))
+
 # Not checked here: right-click on the icon opens the Quit Sherpa menu. The
 # Accessibility API exposes no right-click on a status item, and synthetic
 # CGEvents need event-posting permission this script cannot assume. Confirm it
