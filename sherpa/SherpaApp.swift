@@ -9,11 +9,11 @@ import SwiftUI
 
 @main
 struct SherpaApp: App {
-    @StateObject private var state = AppState()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup {
-            ContentView(state: state)
+        Settings {
+            EmptyView()
         }
     }
 }
