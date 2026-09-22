@@ -9,9 +9,11 @@ import SwiftUI
 
 @main
 struct SherpaApp: App {
+    @StateObject private var state = AppState()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(state: state)
         }
     }
 }

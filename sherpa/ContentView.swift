@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ContentView: View {
-    @State private var clickCount = 0
+    @ObservedObject var state: AppState
 
     var body: some View {
         VStack(spacing: 16) {
@@ -9,12 +9,12 @@ struct ContentView: View {
                 .font(.largeTitle)
                 .fontWeight(.bold)
 
-            Text("Clicks: \(clickCount)")
+            Text("Clicks: \(state.clickCount)")
                 .font(.title2)
                 .foregroundStyle(.secondary)
 
             Button("Click me") {
-                clickCount += 1
+                state.registerClick()
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
@@ -25,5 +25,5 @@ struct ContentView: View {
 }
 
 #Preview {
-    ContentView()
+    ContentView(state: AppState())
 }
