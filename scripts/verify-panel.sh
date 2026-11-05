@@ -87,6 +87,22 @@ swiftc -parse-as-library -o "$DERIVED/assemblyai-check" \
     sherpa/AssemblyAI.swift scripts/assemblyai-check.swift >/dev/null \
     && "$DERIVED/assemblyai-check" || failures=$((failures + 1))
 
+echo "transcription"
+app_swift_flags=(
+    -swift-version 5 -default-isolation=MainActor -target arm64-apple-macos14.2 -D DEBUG
+    -enable-upcoming-feature DisableOutwardActorInference
+    -enable-upcoming-feature GlobalActorIsolatedTypesUsability
+    -enable-upcoming-feature InferIsolatedConformances
+    -enable-upcoming-feature InferSendableFromCaptures
+    -enable-upcoming-feature MemberImportVisibility
+    -enable-upcoming-feature NonisolatedNonsendingByDefault
+)
+swiftc -o "$DERIVED/fake-assemblyai" scripts/fake-assemblyai.swift >/dev/null \
+    && swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/transcription-check" \
+        sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Transcription.swift \
+        scripts/transcription-check.swift >/dev/null \
+    && "$DERIVED/transcription-check" "$DERIVED/fake-assemblyai" || failures=$((failures + 1))
+
 open -a "$APP"
 app_pid=""
 # A cold first launch from a fresh build location takes longer than any fixed

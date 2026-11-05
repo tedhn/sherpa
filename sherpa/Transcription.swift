@@ -1,0 +1,161 @@
+import AVFoundation
+import os
+
+private nonisolated let logger = Logger(subsystem: "my.rooftop.sherpa", category: "transcription")
+
+private let sampleRate = Int(SpeechConverter.format.sampleRate)
+
+typealias SpeechStream = AsyncStream<Data>
+
+final class Transcriber {
+    struct Configuration {
+        var key: String?
+        var endpoints: AssemblyAI.Endpoints
+
+        static var current: Configuration {
+            let planted = (Bundle.main.object(forInfoDictionaryKey: "AssemblyAIAPIKey") as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            var configuration = Configuration(
+                key: planted.isEmpty || planted.hasPrefix("$(") ? nil : planted,
+                endpoints: .production
+            )
+            #if DEBUG
+            let defaults = UserDefaults.standard
+            // Read as strings, since url(forKey:) takes a plain string for a path.
+            configuration.endpoints = AssemblyAI.Endpoints(
+                token: defaults.string(forKey: "AssemblyAITokenURL").flatMap(URL.init(string:)) ?? configuration.endpoints.token,
+                socket: defaults.string(forKey: "AssemblyAISocketURL").flatMap(URL.init(string:)) ?? configuration.endpoints.socket
+            )
+            if let key = defaults.string(forKey: "AssemblyAIAPIKey") { configuration.key = key }
+            #endif
+            return configuration
+        }
+    }
+
+    private enum Stage: String { case minting, connecting, streaming, closing }
+
+    private let configuration: Configuration
+    private let urlSession = URLSession(configuration: .default)
+    private var sessionCount = 0
+
+    init(configuration: Configuration = .current) {
+        self.configuration = configuration
+    }
+
+    func transcribe(_ speech: SpeechStream) async {
+        sessionCount += 1
+        let session = sessionCount
+        let began = ContinuousClock.now
+        var stage = Stage.minting
+        var socket: URLSessionWebSocketTask?
+        defer { socket?.cancel(with: .normalClosure, reason: nil) }
+        do {
+            let token = try await token()
+            stage = .connecting
+            let task = urlSession.webSocketTask(with: configuration.endpoints.socketURL(token: token, sampleRate: sampleRate))
+            socket = task
+            task.resume()
+            try await within(.seconds(5), cancelling: task) { try await awaitBegin(on: task) }
+            logger.notice("transcription opened session=\(session) after=\(began.duration(to: .now) / .seconds(1), format: .fixed(precision: 3))")
+
+            stage = .streaming
+            let listening = Task { try await listen(on: task, session: session) }
+            let sent = try await speak(speech, on: task)
+
+            stage = .closing
+            let serverSeconds = try await within(.seconds(5), cancelling: task) { try await listening.value }
+            logger.notice("""
+                transcription ended session=\(session) sent=\(sent.seconds, format: .fixed(precision: 3)) \
+                frames=\(sent.frames) server=\(serverSeconds, format: .fixed(precision: 3)) \
+                after=\(began.duration(to: .now) / .seconds(1), format: .fixed(precision: 3))
+                """)
+        } catch {
+            let failure = AssemblyAI.Failure(error, closeCode: socket?.closeCode.rawValue ?? 0, closeReason: socket?.closeReason)
+            logger.log(
+                level: failure == .noAPIKey ? .default : .error,
+                "transcription failed session=\(session) stage=\(stage.rawValue, privacy: .public) \(failure.logFields, privacy: .public)"
+            )
+        }
+    }
+
+    private func token() async throws -> String {
+        guard let key = configuration.key else { throw AssemblyAI.Failure.noAPIKey }
+        let (body, response) = try await urlSession.data(for: AssemblyAI.tokenRequest(key: key, at: configuration.endpoints.token))
+        return try AssemblyAI.token(status: (response as? HTTPURLResponse)?.statusCode ?? 0, body: body)
+    }
+}
+
+private func awaitBegin(on socket: URLSessionWebSocketTask) async throws {
+    switch AssemblyAI.ServerEvent(json: try await socket.receive().payload) {
+    case .began: return
+    case .error(let code, let reason): throw AssemblyAI.Failure.serverError(code: code, reason: reason)
+    default: throw AssemblyAI.Failure.transport("the first message was not Begin")
+    }
+}
+
+private func listen(on socket: URLSessionWebSocketTask, session: Int) async throws -> Double {
+    while true {
+        switch AssemblyAI.ServerEvent(json: try await socket.receive().payload) {
+        case .turn(let turn):
+            logger.debug("heard session=\(session) turn=\(turn.order) formatted=\(turn.isFormatted) end=\(turn.endsTurn) text=\(turn.text, privacy: .public)")
+        case .terminated(let audioSeconds):
+            return audioSeconds
+        case .error(let code, let reason):
+            throw AssemblyAI.Failure.serverError(code: code, reason: reason)
+        case .malformed(let type):
+            logger.error("transcription ignored session=\(session) malformed=\(type ?? "not JSON", privacy: .public)")
+        case .began, .ignored:
+            break
+        }
+    }
+}
+
+private func speak(_ speech: SpeechStream, on socket: URLSessionWebSocketTask) async throws -> (seconds: Double, frames: Int) {
+    var framer = AssemblyAI.Framer(sampleRate: sampleRate)
+    var bytes = 0
+    var frames = 0
+    func send(_ frame: Data) async throws {
+        try await socket.send(.data(frame))
+        bytes += frame.count
+        frames += 1
+    }
+    for await pcm in speech {
+        for frame in framer.take(pcm) { try await send(frame) }
+    }
+    if let tail = framer.finish() { try await send(tail) }
+    try await socket.send(.string(AssemblyAI.Control.terminate.rawValue))
+    return (Double(bytes) / Double(sampleRate * 2), frames)
+}
+
+// A timeout cancels the socket, because that, not task cancellation, is what
+// makes the operation's pending receive() return so the group can finish.
+private func within<T: Sendable>(
+    _ limit: Duration,
+    cancelling socket: URLSessionWebSocketTask,
+    _ operation: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask { try await operation() }
+        group.addTask {
+            try await Task.sleep(for: limit)
+            throw AssemblyAI.Failure.timedOut
+        }
+        defer { group.cancelAll() }
+        do {
+            return try await group.next()!
+        } catch AssemblyAI.Failure.timedOut {
+            socket.cancel(with: .goingAway, reason: nil)
+            throw AssemblyAI.Failure.timedOut
+        }
+    }
+}
+
+private extension URLSessionWebSocketTask.Message {
+    var payload: Data {
+        switch self {
+        case .string(let text): Data(text.utf8)
+        case .data(let data): data
+        @unknown default: Data()
+        }
+    }
+}
