@@ -169,6 +169,13 @@ final class LogTail: @unchecked Sendable {
         lock.withLock { messages.dropFirst(count).first { $0.hasPrefix("hold ended") } }
     }
 
+    func savedPath(after count: Int) -> String? {
+        lock.withLock {
+            messages.dropFirst(count).first { $0.hasPrefix("wav saved") }
+                .flatMap { line in line.range(of: "path=").map { String(line[$0.upperBound...]) } }
+        }
+    }
+
     func loudest(after count: Int) -> Double? {
         lock.withLock {
             messages.dropFirst(count)
@@ -225,6 +232,66 @@ func checkMeter(_ label: String, _ hold: Hold, samples: [Double], released: Doub
         print("  ok   \(label): the bar is empty after the mouse-up")
     } else {
         fail("\(label): after the mouse-up the bar read \(released.map { "\($0)" } ?? "nothing"), expected 0")
+    }
+}
+
+func afinfo(_ path: String) -> String {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/afinfo")
+    process.arguments = [path]
+    let output = Pipe()
+    process.standardOutput = output
+    process.standardError = FileHandle.nullDevice
+    try? process.run()
+    let data = output.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    return String(decoding: data, as: UTF8.self)
+}
+
+func loudestWindowDBFS(_ samples: [Int16]) -> Double {
+    let window = 1600
+    var squares = [Double](repeating: 0, count: samples.count + 1)
+    for (index, sample) in samples.enumerated() { squares[index + 1] = squares[index] + Double(sample) * Double(sample) }
+    var loudest = 0.0
+    for start in stride(from: 0, through: max(samples.count - window, 0), by: 160) {
+        let end = min(start + window, samples.count)
+        loudest = max(loudest, ((squares[end] - squares[start]) / Double(end - start)).squareRoot())
+    }
+    return 20 * log10(max(loudest / 32768, 1e-6))
+}
+
+func checkWAV(_ label: String, _ kind: Hold, frames: Double, rate: Double, loudest: Double?, logged: Int) {
+    _ = wait(upTo: 2) { tail.savedPath(after: logged) != nil }
+    guard let path = tail.savedPath(after: logged) else {
+        fail("\(label): no 'wav saved' line in the log")
+        return
+    }
+    let info = afinfo(path)
+    let required = ["File type ID:   WAVE", "Data format:     1 ch,  16000 Hz, Int16", "audio data file offset: 44"]
+    let missing = required.filter { !info.contains($0) }
+    let duration = info.components(separatedBy: "estimated duration: ").dropFirst().first
+        .flatMap { $0.split(separator: " ").first }.flatMap { Double($0) }
+    let expected = frames / rate
+    guard missing.isEmpty, let duration, abs(duration - expected) <= 0.05 else {
+        let reported = duration.map { String(format: "%.3f", $0) } ?? "none"
+        fail("\(label): afinfo on \(path) lacked \(missing), duration \(reported) s against \(String(format: "%.3f", expected)) s from the tap")
+        return
+    }
+    print("  ok   \(label): last-hold.wav is PCM16 mono 16 kHz with a 44-byte header, \(String(format: "%.2f", duration)) s")
+
+    guard let data = FileManager.default.contents(atPath: path), data.count > 44 else {
+        fail("\(label): \(path) has no samples after the header")
+        return
+    }
+    let samples = data.dropFirst(44).withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }
+    let saved = loudestWindowDBFS(samples)
+    let tapped = loudest.map { String(format: "%.1f dBFS", $0) } ?? "no buffer lines"
+    print("  info \(label): the loudest 100 ms of the file is \(String(format: "%.1f", saved)) dBFS, the loudest tap buffer \(tapped)")
+    guard kind != .draggedOff else { return }
+    if let loudest, abs(saved - loudest) <= 3 {
+        print("  ok   \(label): the file is as loud as the tap, within 3 dB")
+    } else {
+        fail("\(label): the file's loudest 100 ms is \(String(format: "%.1f", saved)) dBFS, expected within 3 dB of the tap's \(tapped)")
     }
 }
 
@@ -328,7 +395,9 @@ func hold(_ label: String, _ kind: Hold) {
     } else {
         fail("\(label): \(Int(buffers)) buffers and ratio \(String(format: "%.2f", ratio)), expected at least 3 and 0.7 to 1.1")
     }
-    checkMeter(label, kind, samples: samples, released: released, loudest: tail.loudest(after: logged))
+    let loudest = tail.loudest(after: logged)
+    checkMeter(label, kind, samples: samples, released: released, loudest: loudest)
+    checkWAV(label, kind, frames: frames, rate: rate, loudest: loudest, logged: logged)
 }
 
 hold("plain hold", .still)
