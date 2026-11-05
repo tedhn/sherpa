@@ -66,6 +66,12 @@ pkill -f "$DERIVED" 2>/dev/null
 xcodebuild -project sherpa.xcodeproj -scheme sherpa -configuration Debug \
     -derivedDataPath "$DERIVED" build >/dev/null || { echo "build failed"; exit 1; }
 
+echo "build"
+check "signature carries the audio-input entitlement" "yes" \
+    "$(codesign -d --entitlements - --xml "$APP" 2>/dev/null | grep -q com.apple.security.device.audio-input && echo yes || echo no)"
+check "Info.plist explains the microphone" "Sherpa hears you only while you hold to talk." \
+    "$(plutil -extract NSMicrophoneUsageDescription raw "$APP/Contents/Info.plist" 2>&1)"
+
 open -a "$APP"
 app_pid=""
 # A cold first launch from a fresh build location takes longer than any fixed
