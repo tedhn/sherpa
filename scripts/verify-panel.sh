@@ -72,6 +72,11 @@ check "signature carries the audio-input entitlement" "yes" \
 check "Info.plist explains the microphone" "Sherpa hears you only while you hold to talk." \
     "$(plutil -extract NSMicrophoneUsageDescription raw "$APP/Contents/Info.plist" 2>&1)"
 
+echo "level meter"
+swiftc -parse-as-library -o "$DERIVED/level-meter-check" \
+    sherpa/LevelMeter.swift scripts/level-meter-check.swift >/dev/null \
+    && "$DERIVED/level-meter-check" || failures=$((failures + 1))
+
 open -a "$APP"
 app_pid=""
 # A cold first launch from a fresh build location takes longer than any fixed
