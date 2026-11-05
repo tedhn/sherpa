@@ -82,6 +82,11 @@ swiftc -parse-as-library -o "$DERIVED/speech-audio-check" \
     sherpa/SpeechAudio.swift scripts/speech-audio-check.swift >/dev/null \
     && "$DERIVED/speech-audio-check" || failures=$((failures + 1))
 
+echo "assemblyai"
+swiftc -parse-as-library -o "$DERIVED/assemblyai-check" \
+    sherpa/AssemblyAI.swift scripts/assemblyai-check.swift >/dev/null \
+    && "$DERIVED/assemblyai-check" || failures=$((failures + 1))
+
 open -a "$APP"
 app_pid=""
 # A cold first launch from a fresh build location takes longer than any fixed
