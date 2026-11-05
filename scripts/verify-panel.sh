@@ -1,8 +1,8 @@
 #!/bin/bash
 # Drives the built app through the Accessibility API and asserts what the panel
 # is supposed to do: open under the status item, leave the app in front active,
-# close on a second click, and close when a real mouse click lands anywhere
-# else.
+# record the microphone while the talk control is held, close on a second click,
+# and close when a real mouse click lands anywhere else.
 #
 # The terminal running this needs Accessibility permission.
 set -uo pipefail
@@ -125,6 +125,10 @@ else
     echo "  skip geometry checks: no panel to measure"
     panel_x=0 panel_y=0 panel_w=0 panel_h=0 panel_h=0
 fi
+
+echo "hold to talk"
+swift "$(dirname "$0")/hold-to-talk-check.swift" "$app_pid" || failures=$((failures + 1))
+check_focus_kept "focus still behind after using the panel" "$front_before" "$(frontmost)"
 
 echo "close"
 proc 'to click menu bar item 1 of menu bar 2' >/dev/null

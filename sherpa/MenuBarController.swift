@@ -5,12 +5,14 @@ import SwiftUI
 final class MenuBarController: NSObject {
     private let statusItem: NSStatusItem
     private let panel: FloatingPanel
+    private let state: AppState
     // Assigned, never read. Not a second visibility flag: panel.isVisible stays
     // the single source of truth for that, and this answers what the app owes.
     private var presentation: PanelPresentation?
 
     init(state: AppState) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        self.state = state
         panel = FloatingPanel(contentView: NSHostingView(rootView: ContentView(state: state)))
         super.init()
 
@@ -72,11 +74,16 @@ final class MenuBarController: NSObject {
 
         // Below the guards, so one that bails out cannot leave a pin claimed or
         // a monitor installed with no panel to hand either back.
-        presentation = PanelPresentation { [weak self] in self?.hidePanel() }
+        presentation = PanelPresentation { [weak self] in self?.outsideClick() }
         // orderFrontRegardless, not makeKeyAndOrderFront: AppKit can suppress a
         // plain order-front for an app that is not active, and this app never
         // activates. Making the panel key here would pull focus as well.
         panel.orderFrontRegardless()
+    }
+
+    private func outsideClick() {
+        if case .askingForAccess = state.microphone { return }
+        hidePanel()
     }
 
     private func hidePanel() {
