@@ -8,16 +8,6 @@ struct ContentView: View {
             Text("Sherpa")
                 .font(.largeTitle)
                 .fontWeight(.bold)
-
-            Text("Clicks: \(state.clickCount)")
-                .font(.title2)
-                .foregroundStyle(.secondary)
-
-            Button("Click me") {
-                state.registerClick()
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
         }
         .padding(20)
         // A borderless window proposes no size to SwiftUI, so fittingSize
