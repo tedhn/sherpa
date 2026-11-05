@@ -103,7 +103,24 @@ swiftc -o "$DERIVED/fake-assemblyai" scripts/fake-assemblyai.swift >/dev/null \
         scripts/transcription-check.swift >/dev/null \
     && "$DERIVED/transcription-check" "$DERIVED/fake-assemblyai" || failures=$((failures + 1))
 
-open -a "$APP"
+fake_ports="$DERIVED/fake-assemblyai.ports"
+fake_capture="$DERIVED/fake-assemblyai.pcm"
+rm -f "$fake_ports"
+"$DERIVED/fake-assemblyai" "$fake_ports" "$fake_capture" >/dev/null &
+fake_pid=$!
+trap 'kill "$fake_pid" 2>/dev/null' EXIT
+deadline=$((SECONDS + 10))
+while [[ ! -s "$fake_ports" ]] && (( SECONDS < deadline )); do sleep 0.1; done
+if [[ -s "$fake_ports" ]]; then
+    read -r token_field socket_field < "$fake_ports"
+    open -a "$APP" --args -AssemblyAITokenURL "${token_field#token=}" \
+        -AssemblyAISocketURL "${socket_field#socket=}" -AssemblyAIAPIKey fake
+else
+    echo "  FAIL the fake AssemblyAI never wrote its ports"
+    failures=$((failures + 1))
+    fake_capture=""
+    open -a "$APP"
+fi
 app_pid=""
 # A cold first launch from a fresh build location takes longer than any fixed
 # sleep worth writing, so wait for the icon to actually appear.
@@ -158,7 +175,8 @@ else
 fi
 
 echo "hold to talk"
-swift "$(dirname "$0")/hold-to-talk-check.swift" "$app_pid" || failures=$((failures + 1))
+swift "$(dirname "$0")/hold-to-talk-check.swift" "$app_pid" ${fake_capture:+"$fake_capture"} \
+    || failures=$((failures + 1))
 check_focus_kept "focus still behind after using the panel" "$front_before" "$(frontmost)"
 
 echo "close"
