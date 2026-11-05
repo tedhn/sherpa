@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Keeps API key values in Config/Secrets.xcconfig out of git.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+if git diff --cached --name-only | grep -Eq '(^|/)Secrets\.xcconfig$'; then
+  echo "pre-commit: Secrets.xcconfig is staged. Unstage it." >&2
+  exit 1
+fi
+
+secrets=Config/Secrets.xcconfig
+[ -f "$secrets" ] || exit 0
+added=$(git diff --cached -U0 | grep -E '^\+' | grep -vE '^\+\+\+' || true)
+status=0
+while IFS=' =' read -r name value; do
+  case "$name" in ''|//*) continue ;; esac
+  [ -n "$value" ] || continue
+  if grep -qF -- "$value" <<<"$added"; then
+    echo "pre-commit: staged changes contain the value of $name. Remove it." >&2
+    status=1
+  fi
+done <"$secrets"
+exit $status

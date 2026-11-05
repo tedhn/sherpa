@@ -1,0 +1,3 @@
+// The ? lets a fresh clone without Secrets.xcconfig still build, with empty keys.
+#include? "Secrets.xcconfig"
+INFOPLIST_FILE = Config/Info.plist

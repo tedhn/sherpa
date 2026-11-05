@@ -8,6 +8,10 @@
 
 /* Begin PBXFileReference section */
 		9F64C61A30613103004917FF /* sherpa.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = sherpa.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		9F64C63130613104004917FF /* Sherpa.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Sherpa.xcconfig; sourceTree = "<group>"; };
+		9F64C63330613104004917FF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		9F64C63430613104004917FF /* Secrets.example.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Secrets.example.xcconfig; sourceTree = "<group>"; };
+		9F64C63530613104004917FF /* Secrets.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Secrets.xcconfig; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -32,6 +36,7 @@
 		9F64C61130613103004917FF = {
 			isa = PBXGroup;
 			children = (
+				9F64C63230613104004917FF /* Config */,
 				9F64C61C30613103004917FF /* sherpa */,
 				9F64C61B30613103004917FF /* Products */,
 			);
@@ -43,6 +48,17 @@
 				9F64C61A30613103004917FF /* sherpa.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		9F64C63230613104004917FF /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				9F64C63330613104004917FF /* Info.plist */,
+				9F64C63430613104004917FF /* Secrets.example.xcconfig */,
+				9F64C63530613104004917FF /* Secrets.xcconfig */,
+				9F64C63130613104004917FF /* Sherpa.xcconfig */,
+			);
+			path = Config;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -247,6 +263,7 @@
 		};
 		9F64C62630613104004917FF /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 9F64C63130613104004917FF /* Sherpa.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -295,6 +312,7 @@
 		};
 		9F64C62730613104004917FF /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 9F64C63130613104004917FF /* Sherpa.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
