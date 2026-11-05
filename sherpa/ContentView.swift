@@ -26,6 +26,10 @@ struct ContentView: View {
                 .accessibilityAddTraits(.isButton)
                 .accessibilityLabel("Hold to talk")
 
+            TimelineView(.animation(paused: !state.microphone.isListening)) { _ in
+                LevelBar(fill: state.microphone.level)
+            }
+
             Text(caption)
                 .font(.title3)
                 .foregroundStyle(.secondary)
@@ -41,6 +45,26 @@ struct ContentView: View {
         // transparent corner pixels are what the panel's hasShadow traces.
         .frame(width: 280)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+private struct LevelBar: View {
+    let fill: BarFill
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            Rectangle().fill(.quaternary)
+            Rectangle().fill(.red).frame(width: 160 * fill.fraction)
+        }
+        .frame(width: 160, height: 6)
+        .clipShape(Capsule())
+        .allowsHitTesting(false)
+        // A custom element's string value reads as `missing value` in System
+        // Events. A progress indicator reads as a number the harness compares.
+        .accessibilityRepresentation {
+            ProgressView(value: fill.fraction)
+                .accessibilityLabel("Input level")
+        }
     }
 }
 
