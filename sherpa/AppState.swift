@@ -10,6 +10,10 @@ enum MicrophonePhase {
     var isListening: Bool {
         if case .listening = self { true } else { false }
     }
+
+    var level: BarFill {
+        if case .listening(let capture) = self { capture.level } else { .empty }
+    }
 }
 
 @MainActor
