@@ -1,10 +1,53 @@
+import AVFoundation
 import Combine
+
+enum MicrophonePhase {
+    case ready
+    case askingForAccess
+    case listening(MicrophoneCapture)
+    case failed(MicrophoneProblem)
+
+    var isListening: Bool {
+        if case .listening = self { true } else { false }
+    }
+}
 
 @MainActor
 final class AppState: ObservableObject {
-    @Published private(set) var clickCount = 0
+    @Published private(set) var microphone: MicrophonePhase = .ready
 
-    func registerClick() {
-        clickCount += 1
+    func setHeld(_ held: Bool) {
+        switch (held, microphone) {
+        case (true, .ready), (true, .failed):
+            beginHold()
+        case (false, .listening):
+            microphone = .ready
+        case (true, .listening), (true, .askingForAccess), (false, _):
+            break
+        }
+    }
+
+    private func beginHold() {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            do throws(MicrophoneProblem) {
+                microphone = .listening(try MicrophoneCapture.start())
+            } catch {
+                microphone = .failed(error)
+            }
+        case .notDetermined:
+            microphone = .askingForAccess
+            Task {
+                let granted = await AVCaptureDevice.requestAccess(for: .audio)
+                guard case .askingForAccess = microphone else { return }
+                microphone = granted ? .ready : .failed(.accessDenied)
+            }
+        case .denied:
+            microphone = .failed(.accessDenied)
+        case .restricted:
+            microphone = .failed(.accessRestricted)
+        @unknown default:
+            microphone = .failed(.accessDenied)
+        }
     }
 }

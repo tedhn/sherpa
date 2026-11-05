@@ -1,8 +1,8 @@
 #!/bin/bash
 # Drives the built app through the Accessibility API and asserts what the panel
 # is supposed to do: open under the status item, leave the app in front active,
-# accept clicks on its own content, close on a second click, and close when a
-# real mouse click lands anywhere else.
+# record the microphone while the talk control is held, close on a second click,
+# and close when a real mouse click lands anywhere else.
 #
 # The terminal running this needs Accessibility permission.
 set -uo pipefail
@@ -66,6 +66,12 @@ pkill -f "$DERIVED" 2>/dev/null
 xcodebuild -project sherpa.xcodeproj -scheme sherpa -configuration Debug \
     -derivedDataPath "$DERIVED" build >/dev/null || { echo "build failed"; exit 1; }
 
+echo "build"
+check "signature carries the audio-input entitlement" "yes" \
+    "$(codesign -d --entitlements - --xml "$APP" 2>/dev/null | grep -q com.apple.security.device.audio-input && echo yes || echo no)"
+check "Info.plist explains the microphone" "Sherpa hears you only while you hold to talk." \
+    "$(plutil -extract NSMicrophoneUsageDescription raw "$APP/Contents/Info.plist" 2>&1)"
+
 open -a "$APP"
 app_pid=""
 # A cold first launch from a fresh build location takes longer than any fixed
@@ -120,16 +126,8 @@ else
     panel_x=0 panel_y=0 panel_w=0 panel_h=0 panel_h=0
 fi
 
-echo "content"
-# NSHostingView wraps the SwiftUI body in one AXGroup, so the labels and the
-# button sit a level below the window.
-counter='value of static text 2 of group 1 of window 1'
-count_before="$(proc "to return $counter")"
-proc 'to click button 1 of group 1 of window 1' >/dev/null
-sleep 1
-count_after="$(proc "to return $counter")"
-check "panel content takes clicks" "yes" "$([[ "$count_before" != "$count_after" ]] && echo yes || echo no)"
-echo "  info '$count_before' -> '$count_after'"
+echo "hold to talk"
+swift "$(dirname "$0")/hold-to-talk-check.swift" "$app_pid" || failures=$((failures + 1))
 check_focus_kept "focus still behind after using the panel" "$front_before" "$(frontmost)"
 
 echo "close"

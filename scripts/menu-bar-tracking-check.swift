@@ -16,7 +16,7 @@ import AppKit
 // name would pick one of them at random.
 //   toggle         panel closed. Opens it, closes it, expects begin then end.
 //   quit           panel open. Quits the app, expects end.
-//   outside-click  panel open. Posts a real mouse click at the panel's centre
+//   outside-click  panel open. Posts a real mouse click on the panel's title
 //                  and then one on a window of its own, and expects only the
 //                  second to close the panel.
 //   icon-click     panel open. Posts a real mouse click on the status item and
@@ -208,7 +208,10 @@ case .outsideClick:
     let target = showClickTarget(centredAt: targetPoint)
     settle(0.5)
 
-    let inside = record { postClick(at: CGPoint(x: panelRect.midX, y: panelRect.midY)) }
+    guard let titleRect = rect(of: "static text 1 of group 1 of window 1") else {
+        unmeasurable("the panel closed before the check clicked it, someone is using the machine")
+    }
+    let inside = record { postClick(at: CGPoint(x: titleRect.midX, y: titleRect.midY)) }
     let afterInside = windowCount()
     let outside = record { postClick(at: targetPoint) }
     let afterOutside = windowCount()
