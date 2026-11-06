@@ -60,6 +60,10 @@ nonisolated enum AssemblyAI {
         let text: String
         let isFormatted: Bool
         let endsTurn: Bool
+        // The last word's end, in milliseconds of the session's audio.
+        let audioEnd: Int?
+
+        fileprivate var rank: Int { endsTurn ? (isFormatted ? 2 : 1) : 0 }
     }
 
     enum ServerEvent: Equatable, Sendable {
@@ -90,7 +94,8 @@ nonisolated enum AssemblyAI {
                     order: turn.turn_order,
                     text: turn.transcript,
                     isFormatted: turn.turn_is_formatted,
-                    endsTurn: turn.end_of_turn
+                    endsTurn: turn.end_of_turn,
+                    audioEnd: turn.words?.last?.end
                 ))
             case "Termination":
                 guard let termination = try? decoder.decode(WireTermination.self, from: json) else {
@@ -111,7 +116,90 @@ nonisolated enum AssemblyAI {
     }
 
     enum Control: String {
+        case forceEndpoint = #"{"type":"ForceEndpoint"}"#
         case terminate = #"{"type":"Terminate"}"#
+    }
+
+    enum Final: Equatable, Sendable {
+        case heard(String)
+        case silence
+        case failed(Failure)
+    }
+
+    // `deliver` is the only writer of `delivered`, so exactly one final lands whichever of the
+    // answer, Termination, the fallback or a failure gets there first, and `shown` stays on it.
+    struct Transcript: Equatable, Sendable {
+        enum Shown: Equatable, Sendable {
+            case hearing(String)
+            case final(Final)
+        }
+
+        enum Finish: String, Sendable {
+            case endpoint, terminate
+        }
+
+        private var turns: [Int: Turn] = [:]
+        // The lowest order whose end_of_turn answers ForceEndpoint.
+        private var answeringFrom: Int?
+        private(set) var delivered: Final?
+        // How far the server's last word trailed the audio the client had sent when it arrived.
+        private(set) var lastLag: Int?
+
+        init() {}
+
+        var shown: Shown { delivered.map(Shown.final) ?? .hearing(text) }
+
+        var text: String {
+            turns.sorted { $0.key < $1.key }
+                .map { $0.value.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+        }
+
+        mutating func hear(_ turn: Turn, sentThrough: Int) -> Final? {
+            if let end = turn.audioEnd { lastLag = sentThrough - end }
+            // The server resends a turn whole under the same order, so replace it, unless the held
+            // one outranks it: a formatted end is never undone by a late unformatted twin.
+            if turns[turn.order].map({ $0.rank <= turn.rank }) ?? true {
+                turns[turn.order] = turn
+            }
+            // Measured: the answer is one end_of_turn at or above the turn open when ForceEndpoint
+            // went out. An unformatted one waits for its formatted twin.
+            guard let floor = answeringFrom, turn.endsTurn, turn.order >= floor,
+                  turn.isFormatted || turn.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { return nil }
+            return settle()
+        }
+
+        // Call it before the send, because the answer can land while the send is in flight.
+        mutating func forceEndpoint() {
+            guard answeringFrom == nil else { return }
+            answeringFrom = turns.max { $0.key < $1.key }.map { $0.value.endsTurn ? $0.key + 1 : $0.key } ?? 0
+        }
+
+        // Live partials trailed the sent audio by a median 300 ms, p90 380, max 740, a backlog by over 2000.
+        static let caughtUpLag = 600
+
+        // The server applies ForceEndpoint where its processing has reached, not after the audio
+        // still queued, so it is only safe once the last partial showed it keeping up. Terminate
+        // processes everything first.
+        func finish() -> Finish {
+            lastLag.map { $0 <= Self.caughtUpLag } == true ? .endpoint : .terminate
+        }
+
+        mutating func settle() -> Final? {
+            deliver(text.isEmpty ? .silence : .heard(text))
+        }
+
+        mutating func fail(_ failure: Failure) -> Final? {
+            deliver(.failed(failure))
+        }
+
+        private mutating func deliver(_ final: Final) -> Final? {
+            guard delivered == nil else { return nil }
+            delivered = final
+            return final
+        }
     }
 
     // The server documents 20 to 1000 ms; the node SDK says under 50 ms is
@@ -187,7 +275,9 @@ nonisolated enum AssemblyAI {
         let turn_is_formatted: Bool
         let end_of_turn: Bool
         let transcript: String
+        let words: [WireWord]?
     }
+    private struct WireWord: Decodable { let end: Int }
     private struct WireError: Decodable {
         let error_code: Int?
         let error: String
