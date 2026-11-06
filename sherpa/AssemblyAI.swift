@@ -23,20 +23,34 @@ nonisolated enum AssemblyAI {
         }
     }
 
+    static let tokenLifetime: Duration = .seconds(480)
+
+    // The lifetime only limits when a token can open a session, and an open
+    // session outlives it. The margin keeps a token from expiring mid-connect.
+    struct Token: Equatable, Sendable {
+        let value: String
+        let expires: ContinuousClock.Instant
+
+        func isUsable(at now: ContinuousClock.Instant) -> Bool {
+            expires - now > .seconds(30)
+        }
+    }
+
     static func tokenRequest(key: String, at url: URL) -> URLRequest {
         var request = URLRequest(url: url, timeoutInterval: 5)
         request.httpMethod = "POST"
         request.setValue(key, forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = Data(#"{"product":"streaming","expires_in_seconds":480}"#.utf8)
+        request.httpBody = Data(#"{"product":"streaming","expires_in_seconds":\#(tokenLifetime.components.seconds)}"#.utf8)
         return request
     }
 
-    static func token(status: Int, body: Data) throws(Failure) -> String {
+    // `mintedAt` is when the request was sent, so the expiry errs early.
+    static func token(status: Int, body: Data, mintedAt: ContinuousClock.Instant) throws(Failure) -> Token {
         guard status == 200, let reply = try? JSONDecoder().decode(TokenReply.self, from: body) else {
             throw .tokenRefused(status: status, detail: String(decoding: body.prefix(200), as: UTF8.self))
         }
-        return reply.token
+        return Token(value: reply.token, expires: mintedAt + tokenLifetime)
     }
 
     // Each Turn supersedes the previous one with the same `order`: render the
@@ -148,6 +162,11 @@ nonisolated enum AssemblyAI {
             } else {
                 self = .transport(error.localizedDescription)
             }
+        }
+
+        var isExpiredToken: Bool {
+            guard case .serverError(code: 1008, let reason) = self else { return false }
+            return reason.contains("Signature has expired")
         }
 
         var logFields: String {

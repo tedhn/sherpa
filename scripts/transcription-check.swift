@@ -43,6 +43,8 @@ nonisolated final class LogTail: @unchecked Sendable {
 struct Scenario {
     let name: String
     let expectedFailure: String?
+    var fake: String?
+    var sessions = 1
 }
 
 enum TapShape {
@@ -75,7 +77,9 @@ enum TranscriptionCheck {
         Scenario(name: "no-begin", expectedFailure: "stage=connecting reason=timedOut"),
         Scenario(name: "no-termination", expectedFailure: "stage=closing reason=timedOut"),
         Scenario(name: "token-401", expectedFailure: #"stage=minting reason=tokenRefused status=401 detail={"error":"Invalid API key"}"#),
-        Scenario(name: "no-key", expectedFailure: "stage=minting reason=noAPIKey"),
+        Scenario(name: "no-key", expectedFailure: "stage=minting reason=noAPIKey", fake: "ok"),
+        Scenario(name: "reuse", expectedFailure: nil, fake: "ok", sessions: 2),
+        Scenario(name: "expired-once", expectedFailure: nil, sessions: 2),
     ]
 
     static func main() async {
@@ -110,10 +114,12 @@ enum TranscriptionCheck {
         print("\(scenario.name)")
         let portFile = workspace.appending(path: "\(scenario.name).ports")
         let captureFile = workspace.appending(path: "\(scenario.name).pcm")
+        let stdoutFile = workspace.appending(path: "\(scenario.name).out")
+        FileManager.default.createFile(atPath: stdoutFile.path, contents: nil)
         let server = Process()
         server.executableURL = URL(fileURLWithPath: fake)
-        server.arguments = [portFile.path, captureFile.path, scenario.name == "no-key" ? "ok" : scenario.name]
-        server.standardOutput = FileHandle.nullDevice
+        server.arguments = [portFile.path, captureFile.path, scenario.fake ?? scenario.name]
+        server.standardOutput = try? FileHandle(forWritingTo: stdoutFile)
         do { try server.run() } catch {
             expect(false, "\(scenario.name): the fake did not start: \(error.localizedDescription)")
             return
@@ -124,9 +130,41 @@ enum TranscriptionCheck {
             return
         }
         let configuration = Transcriber.Configuration(key: scenario.name == "no-key" ? nil : "fake", endpoints: endpoints)
-        var run = await feed(tone(), to: Transcriber(configuration: configuration), tail: tail, prefill: 0, label: scenario.name)
-        run.captured = (try? Data(contentsOf: captureFile)) ?? Data()
-        assess(scenario, run)
+        let transcriber = Transcriber(configuration: configuration)
+        guard scenario.sessions == 2 else {
+            var run = await feed(tone(), to: transcriber, tail: tail, prefill: 0, label: scenario.name)
+            run.captured = (try? Data(contentsOf: captureFile)) ?? Data()
+            assess(scenario, run)
+            return
+        }
+
+        var first = await feed(tone(), to: transcriber, tail: tail, prefill: 0, label: "\(scenario.name) 1")
+        var second = await feed(Data(tone().reversed()), to: transcriber, tail: tail, prefill: 0, label: "\(scenario.name) 2")
+        let output = (try? String(contentsOf: stdoutFile, encoding: .utf8))?.split(separator: "\n").map(String.init) ?? []
+        let mints = output.filter { $0.hasPrefix("mint ") }.count
+        let heardBytes = output.compactMap { line in
+            line.hasSuffix(" bytes") && line.contains(" terminated ") ? line.split(separator: " ").dropLast().last.flatMap { Int($0) } : nil
+        }
+        let captured = (try? Data(contentsOf: captureFile)) ?? Data()
+        let split = heardBytes.first ?? 0
+        first.captured = captured.prefix(split)
+        second.captured = captured.dropFirst(split)
+        assess(Scenario(name: "\(scenario.name) session 1", expectedFailure: nil), first)
+        assess(Scenario(name: "\(scenario.name) session 2", expectedFailure: nil), second)
+
+        func opened(_ run: Run) -> [String] { run.lines.filter { $0.hasPrefix("transcription opened") } }
+        func retries(_ run: Run) -> [String] { run.lines.filter { $0.hasPrefix("transcription retry") } }
+        expect(opened(first).count == 1 && opened(first)[0].contains(" token=minted "), "\(scenario.name): session 1 opened with a minted token, got \(opened(first))")
+        let expectedRetries = scenario.name == "expired-once" ? ["transcription retry session=2 reason=expiredToken"] : []
+        expect(retries(first).isEmpty && retries(second) == expectedRetries, "\(scenario.name): session 2 retried \(expectedRetries.count) time(s), got \(retries(second))")
+        let secondToken = scenario.name == "expired-once" ? "minted" : "reused"
+        expect(opened(second).count == 1 && opened(second)[0].contains(" token=\(secondToken) "), "\(scenario.name): session 2 opened with a \(secondToken) token, got \(opened(second))")
+        if scenario.name == "expired-once", let retry = second.lines.firstIndex(where: { $0.hasPrefix("transcription retry") }),
+           let open = second.lines.firstIndex(where: { $0.hasPrefix("transcription opened") }) {
+            expect(retry < open, "\(scenario.name): the retry came before session 2 opened")
+        }
+        let expectedMints = scenario.name == "expired-once" ? 2 : 1
+        expect(mints == expectedMints, "\(scenario.name): the fake minted \(expectedMints) token(s), got \(mints)")
     }
 
     static func assess(_ scenario: Scenario, _ run: Run) {
@@ -180,7 +218,8 @@ enum TranscriptionCheck {
         }
         let configuration = Transcriber.Configuration(key: key, endpoints: .production)
         let oneSecondOfSilence = Data(count: 32_000)
-        let run = await feed(speech + oneSecondOfSilence, to: Transcriber(configuration: configuration), tail: tail, prefill: prefill, label: "live")
+        let transcriber = Transcriber(configuration: configuration)
+        let run = await feed(speech + oneSecondOfSilence, to: transcriber, tail: tail, prefill: prefill, label: "live")
         for line in run.lines where line.hasPrefix("transcription ") || line.hasPrefix("heard ") { print("  info \(line)") }
         let fedAt = run.lines.firstIndex { $0.hasPrefix("check fed") } ?? run.lines.count
         func text(_ line: String) -> String { line.components(separatedBy: " text=").dropFirst().joined(separator: " text=") }
@@ -197,6 +236,10 @@ enum TranscriptionCheck {
         )
         expect(!run.lines.contains { $0.contains("code=3007") }, "live: no 3007 input or rate violation")
         expect(run.lines.filter { $0.hasPrefix("transcription ended") }.count == 1, "live: one 'transcription ended' line")
+
+        let again = await feed(speech + oneSecondOfSilence, to: transcriber, tail: tail, prefill: 0, label: "live 2")
+        for line in again.lines where line.hasPrefix("transcription ") { print("  info \(line)") }
+        expect(again.lines.contains { $0.hasPrefix("transcription opened") && $0.contains(" token=reused ") }, "live: the second session reuses the token")
     }
 
     static func feed(_ pcm: Data, to transcriber: Transcriber, tail: LogTail, prefill: Double, label: String) async -> Run {

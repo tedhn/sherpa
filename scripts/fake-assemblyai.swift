@@ -2,7 +2,7 @@ import Foundation
 import Network
 
 enum Scenario: String {
-    case ok, close1008 = "close-1008", noBegin = "no-begin", noTermination = "no-termination", token401 = "token-401"
+    case ok, close1008 = "close-1008", noBegin = "no-begin", noTermination = "no-termination", token401 = "token-401", expiredOnce = "expired-once"
 }
 
 var positional: [String] = []
@@ -28,6 +28,8 @@ let capture = try FileHandle(forWritingTo: captureFile)
 setvbuf(stdout, nil, _IOLBF, 0)
 let queue = DispatchQueue(label: "fake-assemblyai")
 let bytesPerSecond = 32_000
+nonisolated(unsafe) var mints = 0
+let expiredText = "Unauthorized Connection: Signature has expired"
 
 func loopback() -> NWParameters {
     let parameters = NWParameters.tcp
@@ -83,7 +85,9 @@ final class TokenExchange {
         } else if !String(decoding: body, as: UTF8.self).contains(#""product":"streaming""#) {
             (status, answer) = ("400 Bad Request", ["error": "the body does not ask for a streaming token"])
         } else {
-            (status, answer) = ("200 OK", ["token": "fake-token", "expires_in_seconds": 480])
+            mints += 1
+            print("mint \(mints)")
+            (status, answer) = ("200 OK", ["token": "fake-token-\(mints)", "expires_in_seconds": 480])
         }
         let content = json(answer)
         let head = "HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(content.count)\r\nConnection: close\r\n\r\n"
@@ -101,20 +105,30 @@ final class StreamingSession {
     private var frames = 0
     private var bytes = 0
     private var closing = false
+    private let refuses: Bool
 
+    // Network.framework hands a server only the upgrade request's headers, not
+    // its URL, so the token cannot be read. The second connection counts as
+    // presenting the first token when no second mint happened before it.
     init(_ connection: NWConnection) {
         Self.count += 1
         id = Self.count
+        refuses = scenario == .expiredOnce && id == 2 && mints == 1
         self.connection = connection
         connection.stateUpdateHandler = { [self] state in
             guard case .ready = state else { return }
+            if refuses {
+                send(["type": "Error", "error_code": 1008, "error": expiredText])
+                close(.protocolCode(.policyViolation), expiredText)
+                return
+            }
             switch scenario {
             case .close1008:
                 send(["type": "Error", "error_code": 1008, "error": "Unauthorized Connection: Invalid API key"])
                 close(.protocolCode(.policyViolation), "Unauthorized Connection: Invalid API key")
             case .noBegin:
                 break
-            case .ok, .noTermination, .token401:
+            case .ok, .noTermination, .token401, .expiredOnce:
                 queue.asyncAfter(deadline: .now() + beginDelay) { [self] in
                     send(["type": "Begin", "id": "fake-\(id)", "expires_at": Int(Date().timeIntervalSince1970) + 480])
                 }
@@ -161,6 +175,7 @@ final class StreamingSession {
     }
 
     private func terminate() {
+        print("session \(id) terminated after \(frames) frames, \(bytes) bytes")
         send(["type": "Turn", "turn_order": 0, "turn_is_formatted": true, "end_of_turn": true, "transcript": "Frame \(frames)."])
         guard scenario != .noTermination else { return }
         send([

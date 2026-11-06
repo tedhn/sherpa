@@ -37,6 +37,7 @@ final class Transcriber {
     private let configuration: Configuration
     private let urlSession = URLSession(configuration: .default)
     private var sessionCount = 0
+    private var cachedToken: AssemblyAI.Token?
 
     init(configuration: Configuration = .current) {
         self.configuration = configuration
@@ -50,26 +51,44 @@ final class Transcriber {
         var socket: URLSessionWebSocketTask?
         defer { socket?.cancel(with: .normalClosure, reason: nil) }
         do {
-            let token = try await token()
+            var credential = try await token()
             stage = .connecting
-            let task = urlSession.webSocketTask(with: configuration.endpoints.socketURL(token: token, sampleRate: sampleRate))
+            var task = open(credential.value)
             socket = task
-            task.resume()
-            try await within(.seconds(5), cancelling: task) { try await awaitBegin(on: task) }
-            logger.notice("transcription opened session=\(session) after=\(began.duration(to: .now) / .seconds(1), format: .fixed(precision: 3))")
+            do {
+                try await awaitBegin(on: task)
+            } catch {
+                let failure = AssemblyAI.Failure(error, closeCode: task.closeCode.rawValue, closeReason: task.closeReason)
+                guard credential.reused, failure.isExpiredToken else { throw error }
+                cachedToken = nil
+                task.cancel(with: .normalClosure, reason: nil)
+                logger.notice("transcription retry session=\(session) reason=expiredToken")
+                stage = .minting
+                credential = try await token()
+                stage = .connecting
+                task = open(credential.value)
+                socket = task
+                try await awaitBegin(on: task)
+            }
+            logger.notice("""
+                transcription opened session=\(session) token=\(credential.reused ? "reused" : "minted", privacy: .public) \
+                after=\(began.duration(to: .now) / .seconds(1), format: .fixed(precision: 3))
+                """)
 
             stage = .streaming
-            let listening = Task { try await listen(on: task, session: session) }
-            let sent = try await speak(speech, on: task)
+            let live = task
+            let listening = Task { try await listen(on: live, session: session) }
+            let sent = try await speak(speech, on: live)
 
             stage = .closing
-            let serverSeconds = try await within(.seconds(5), cancelling: task) { try await listening.value }
+            let serverSeconds = try await within(.seconds(5), cancelling: live) { try await listening.value }
             logger.notice("""
                 transcription ended session=\(session) sent=\(sent.seconds, format: .fixed(precision: 3)) \
                 frames=\(sent.frames) server=\(serverSeconds, format: .fixed(precision: 3)) \
                 after=\(began.duration(to: .now) / .seconds(1), format: .fixed(precision: 3))
                 """)
         } catch {
+            if stage == .minting || stage == .connecting { cachedToken = nil }
             let failure = AssemblyAI.Failure(error, closeCode: socket?.closeCode.rawValue ?? 0, closeReason: socket?.closeReason)
             logger.log(
                 level: failure == .noAPIKey ? .default : .error,
@@ -78,18 +97,30 @@ final class Transcriber {
         }
     }
 
-    private func token() async throws -> String {
+    private func open(_ token: String) -> URLSessionWebSocketTask {
+        let task = urlSession.webSocketTask(with: configuration.endpoints.socketURL(token: token, sampleRate: sampleRate))
+        task.resume()
+        return task
+    }
+
+    private func token() async throws -> (value: String, reused: Bool) {
+        if let cached = cachedToken, cached.isUsable(at: .now) { return (cached.value, true) }
         guard let key = configuration.key else { throw AssemblyAI.Failure.noAPIKey }
+        let sentAt = ContinuousClock.now
         let (body, response) = try await urlSession.data(for: AssemblyAI.tokenRequest(key: key, at: configuration.endpoints.token))
-        return try AssemblyAI.token(status: (response as? HTTPURLResponse)?.statusCode ?? 0, body: body)
+        let minted = try AssemblyAI.token(status: (response as? HTTPURLResponse)?.statusCode ?? 0, body: body, mintedAt: sentAt)
+        cachedToken = minted
+        return (minted.value, false)
     }
 }
 
 private func awaitBegin(on socket: URLSessionWebSocketTask) async throws {
-    switch AssemblyAI.ServerEvent(json: try await socket.receive().payload) {
-    case .began: return
-    case .error(let code, let reason): throw AssemblyAI.Failure.serverError(code: code, reason: reason)
-    default: throw AssemblyAI.Failure.transport("the first message was not Begin")
+    try await within(.seconds(5), cancelling: socket) {
+        switch AssemblyAI.ServerEvent(json: try await socket.receive().payload) {
+        case .began: return
+        case .error(let code, let reason): throw AssemblyAI.Failure.serverError(code: code, reason: reason)
+        default: throw AssemblyAI.Failure.transport("the first message was not Begin")
+        }
     }
 }
 

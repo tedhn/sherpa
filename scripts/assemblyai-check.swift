@@ -42,18 +42,20 @@ enum AssemblyAICheck {
         expect(body == #"{"product":"streaming","expires_in_seconds":480}"#, "the token request asks for an 8-minute streaming token, got \(body ?? "nil")")
         expect(request.timeoutInterval == 5, "the token request gives up after 5 s")
 
-        expect(
-            (try? AssemblyAI.token(status: 200, body: json(#"{"token":"tmp-1","expires_in_seconds":480}"#))) == "tmp-1",
-            "a 200 reply yields its token"
-        )
+        let minted = ContinuousClock.now
+        let reply = try? AssemblyAI.token(status: 200, body: json(#"{"token":"tmp-1","expires_in_seconds":480}"#), mintedAt: minted)
+        expect(reply == AssemblyAI.Token(value: "tmp-1", expires: minted + .seconds(480)), "a 200 reply yields its token expiring 480 s after it was minted, got \(String(describing: reply))")
+        let now = ContinuousClock.now
+        expect(AssemblyAI.Token(value: "t", expires: now + .seconds(31)).isUsable(at: now), "a token with 31 s left is usable")
+        expect(!AssemblyAI.Token(value: "t", expires: now + .seconds(29)).isUsable(at: now), "a token with 29 s left is not usable")
         do {
-            _ = try AssemblyAI.token(status: 401, body: json(#"{"error":"Invalid API key"}"#))
+            _ = try AssemblyAI.token(status: 401, body: json(#"{"error":"Invalid API key"}"#), mintedAt: minted)
             expect(false, "a 401 reply throws")
         } catch {
             expect(error == .tokenRefused(status: 401, detail: #"{"error":"Invalid API key"}"#), "a 401 reply is tokenRefused with the body as detail, got \(error)")
         }
         do {
-            _ = try AssemblyAI.token(status: 500, body: Data(repeating: UInt8(ascii: "x"), count: 300))
+            _ = try AssemblyAI.token(status: 500, body: Data(repeating: UInt8(ascii: "x"), count: 300), mintedAt: minted)
             expect(false, "a 500 reply throws")
         } catch {
             expect(error == .tokenRefused(status: 500, detail: String(repeating: "x", count: 200)), "a refusal's detail stops at 200 bytes")
@@ -128,6 +130,11 @@ enum AssemblyAICheck {
         expect(offline == .transport("Could not connect to the server."), "a URLError with no close code is transport with its description, got \(offline)")
         let late = AssemblyAI.Failure(AssemblyAI.Failure.timedOut, closeCode: 1001, closeReason: nil)
         expect(late == .timedOut, "timedOut stays timedOut over the 1001 its own cancel set, got \(late)")
+
+        let expired = AssemblyAI.Failure.serverError(code: 1008, reason: "Unauthorized Connection: Signature has expired")
+        expect(expired.isExpiredToken, "the 1008 signature-expired refusal is an expired token")
+        expect(!unauthorized.isExpiredToken, "the 1008 invalid-key refusal is not an expired token")
+        expect(!AssemblyAI.Failure.timedOut.isExpiredToken, "timedOut is not an expired token")
 
         expect(unauthorized.logFields == "reason=serverError code=1008 detail=Unauthorized Connection: Invalid API key", "a server error renders its code then the reason, got \(unauthorized.logFields)")
         expect(AssemblyAI.Failure.noAPIKey.logFields == "reason=noAPIKey", "noAPIKey renders as one field")
