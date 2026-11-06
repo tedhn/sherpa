@@ -21,15 +21,21 @@ nonisolated struct FrameCounts: Sendable {
 nonisolated final class TapReceiver: Sendable {
     private struct Recording {
         let converter: SpeechConverter
+        let speech: SpeechStream.Continuation
         var pcm = Data()
+
+        mutating func record(_ pcm: Data) {
+            self.pcm.append(pcm)
+            if !pcm.isEmpty { speech.yield(pcm) }
+        }
     }
 
     private let counts = OSAllocatedUnfairLock(initialState: FrameCounts())
     private let meter = OSAllocatedUnfairLock(initialState: LevelMeter())
     private let recording: OSAllocatedUnfairLock<Recording>
 
-    init(converter: SpeechConverter) {
-        recording = OSAllocatedUnfairLock(uncheckedState: Recording(converter: converter))
+    init(converter: SpeechConverter, speech: SpeechStream.Continuation) {
+        recording = OSAllocatedUnfairLock(uncheckedState: Recording(converter: converter, speech: speech))
     }
 
     func receive(_ buffer: AVAudioPCMBuffer, at time: AVAudioTime) {
@@ -43,7 +49,9 @@ nonisolated final class TapReceiver: Sendable {
             return counts
         }
         meter.withLock { $0.hear(dBFS: dBFS, at: now) }
-        recording.withLockUnchecked { $0.pcm.append($0.converter.convert(buffer)) }
+        recording.withLockUnchecked { recording in
+            recording.record(recording.converter.convert(buffer))
+        }
         logger.debug("buffer n=\(total.buffers) frames=\(frames) total=\(total.frames) dBFS=\(dBFS, format: .fixed(precision: 1))")
     }
 
@@ -55,7 +63,8 @@ nonisolated final class TapReceiver: Sendable {
 
     func finishRecording() -> Data {
         recording.withLockUnchecked { recording in
-            recording.pcm.append(recording.converter.finish())
+            recording.record(recording.converter.finish())
+            recording.speech.finish()
             return recording.pcm
         }
     }
@@ -82,7 +91,7 @@ final class MicrophoneCapture {
     private let rate: Double
     private let started: ContinuousClock.Instant
 
-    static func start() throws(MicrophoneProblem) -> MicrophoneCapture {
+    static func start() throws(MicrophoneProblem) -> (capture: MicrophoneCapture, speech: SpeechStream) {
         let started = ContinuousClock.now
         let engine = AVAudioEngine()
         let input = engine.inputNode
@@ -97,7 +106,8 @@ final class MicrophoneCapture {
             logger.notice("hold failed reason=converter")
             throw .engineFailed
         }
-        let receiver = TapReceiver(converter: converter)
+        let (speech, continuation) = SpeechStream.makeStream(bufferingPolicy: .unbounded)
+        let receiver = TapReceiver(converter: converter, speech: continuation)
         // The tap delivers 100 to 400 ms per buffer whatever is asked, so ask
         // for the shortest.
         let tenthOfASecond = AVAudioFrameCount(format.sampleRate / 10)
@@ -110,7 +120,7 @@ final class MicrophoneCapture {
             throw .engineFailed
         }
         logger.notice("hold began rate=\(format.sampleRate, format: .fixed(precision: 0)) channels=\(format.channelCount)")
-        return MicrophoneCapture(engine: engine, receiver: receiver, rate: format.sampleRate, started: started)
+        return (MicrophoneCapture(engine: engine, receiver: receiver, rate: format.sampleRate, started: started), speech)
     }
 
     private init(engine: AVAudioEngine, receiver: TapReceiver, rate: Double, started: ContinuousClock.Instant) {
