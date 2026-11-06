@@ -87,6 +87,11 @@ swiftc -parse-as-library -o "$DERIVED/assemblyai-check" \
     sherpa/AssemblyAI.swift scripts/assemblyai-check.swift >/dev/null \
     && "$DERIVED/assemblyai-check" || failures=$((failures + 1))
 
+echo "dictation"
+swiftc -parse-as-library -o "$DERIVED/dictation-check" \
+    sherpa/AssemblyAI.swift sherpa/Dictation.swift scripts/dictation-check.swift >/dev/null \
+    && "$DERIVED/dictation-check" || failures=$((failures + 1))
+
 echo "transcription"
 app_swift_flags=(
     -swift-version 5 -default-isolation=MainActor -target arm64-apple-macos14.2 -D DEBUG

@@ -44,7 +44,7 @@ final class Transcription {
     }
 
     fileprivate func finish() -> Plan {
-        ledger?.want()
+        ledger?.want(notBefore: .now)
         let plan: Plan = ledger?.fire(at: .now) == true ? .endpoint : .terminate
         let lag = ledger?.lastLag.map { String(Int($0 / .milliseconds(1))) } ?? "none"
         logger.notice("""

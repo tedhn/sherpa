@@ -179,9 +179,8 @@ nonisolated enum AssemblyAI {
 
         private(set) var clock: Duration = .zero
         private(set) var lastLag: Duration?
-        private(set) var sealed: Int?
         private(set) var outstanding: Outstanding?
-        private(set) var wanted = false
+        private var wanted: ContinuousClock.Instant?
         // A worst-case bound on the audio the server holds unprocessed, as of `asOf`: each
         // frame adds its length, the server drains at least real time, and a word end shows
         // how far it has got.
@@ -193,7 +192,9 @@ nonisolated enum AssemblyAI {
             asOf = began
         }
 
-        var nextOrder: Int { sealed.map { $0 + 1 } ?? 0 }
+        // Turn orders count up across the whole session, so a turn this socket has already
+        // carried can never be the first of a new utterance.
+        var nextOrder: Int { latest.map { $0.order + 1 } ?? 0 }
 
         mutating func sent(_ audio: Duration, at now: ContinuousClock.Instant) {
             backlog = worst(at: now) + audio
@@ -221,24 +222,26 @@ nonisolated enum AssemblyAI {
             guard let floor = outstanding?.floor, turn.endsTurn, turn.order >= floor, turn.canAnswerEndpoint
             else { return false }
             outstanding = nil
-            sealed = turn.order
             return true
         }
 
-        mutating func want() { wanted = true }
+        mutating func want(notBefore instant: ContinuousClock.Instant) { wanted = instant }
 
-        mutating func unwant() { wanted = false }
+        mutating func unwant() { wanted = nil }
 
         // AssemblyAI applies ForceEndpoint where its processing has reached, not after audio
         // still queued, so it ends the wrong turn while the server is behind.
         var caughtUp: ContinuousClock.Instant { asOf + max(.zero, backlog - Self.caughtUpLag) }
 
-        var endpointDue: ContinuousClock.Instant? { wanted && outstanding == nil ? caughtUp : nil }
+        var endpointDue: ContinuousClock.Instant? {
+            guard let wanted, outstanding == nil else { return nil }
+            return max(wanted, caughtUp)
+        }
 
         // One ForceEndpoint outstanding at a time, so no answer is counted against the wrong one.
         mutating func fire(at now: ContinuousClock.Instant) -> Bool {
             guard let due = endpointDue, due <= now else { return false }
-            wanted = false
+            wanted = nil
             outstanding = Outstanding(floor: latest.map { $0.ended ? $0.order + 1 : $0.order } ?? 0, sentAt: now)
             return true
         }
