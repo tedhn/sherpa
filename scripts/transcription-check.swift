@@ -42,9 +42,16 @@ nonisolated final class LogTail: @unchecked Sendable {
 
 struct Scenario {
     let name: String
-    let expectedFailure: String?
-    var fake: String?
-    var sessions = 1
+    var fake: String? = nil
+    var fakeArguments: [String] = []
+    let finals: [AssemblyAI.Final]
+    let via: String
+    var plan: String? = nil
+    var deliveredWithin: ClosedRange<Double>? = nil
+    var failure: String? = nil
+    var lateTurn: String? = nil
+    var overlapping = false
+    var trailingSilence = 0.0
 }
 
 enum TapShape {
@@ -54,12 +61,26 @@ enum TapShape {
     static let converterTail = 440
 }
 
-struct Run {
-    let lines: [String]
+struct Held {
+    let transcription: Transcription
     let fed: Data
+    let fedAt: ContinuousClock.Instant
+    let firstLine: Int
+    let shownWhileFeeding: [AssemblyAI.Transcript.Shown]
     let streamTerminated: Bool
-    let returnedBeforeFeedEnded: Bool
+    let outcome: Task<(final: AssemblyAI.Final, deliveredAt: ContinuousClock.Instant, closedAt: ContinuousClock.Instant), Never>
+}
+
+struct Run {
+    let held: Held
+    let final: AssemblyAI.Final
+    let deliveredAfter: Double
+    let closedAfter: Double
+    let shownAfterDrain: AssemblyAI.Transcript.Shown
+    let window: [String]
     var captured = Data()
+
+    var lines: [String] { window.filter { $0.contains("session=\(held.transcription.number) ") } }
 }
 
 @main
@@ -71,15 +92,25 @@ enum TranscriptionCheck {
         if !ok { failures += 1 }
     }
 
+    static let heard = AssemblyAI.Final.heard("S1 frame 15. S1 frame 30.")
+    static let partial = AssemblyAI.Final.heard("S1 frame 15. S1 frame 30")
     static let scenarios = [
-        Scenario(name: "ok", expectedFailure: nil),
-        Scenario(name: "close-1008", expectedFailure: "stage=connecting reason=serverError code=1008 detail=Unauthorized Connection: Invalid API key"),
-        Scenario(name: "no-begin", expectedFailure: "stage=connecting reason=timedOut"),
-        Scenario(name: "no-termination", expectedFailure: "stage=closing reason=timedOut"),
-        Scenario(name: "token-401", expectedFailure: #"stage=minting reason=tokenRefused status=401 detail={"error":"Invalid API key"}"#),
-        Scenario(name: "no-key", expectedFailure: "stage=minting reason=noAPIKey", fake: "ok"),
-        Scenario(name: "reuse", expectedFailure: nil, fake: "ok", sessions: 2),
-        Scenario(name: "expired-once", expectedFailure: nil, sessions: 2),
+        Scenario(name: "ok", finals: [heard], via: "endpoint", plan: "endpoint", deliveredWithin: 0.1...1.0),
+        Scenario(name: "silent", finals: [.silence], via: "termination", plan: "terminate", deliveredWithin: 0...1.0),
+        Scenario(name: "backlog", fake: "ok", fakeArguments: ["--begin-delay", "2.5"], finals: [heard], via: "termination", plan: "terminate", deliveredWithin: 0...1.0),
+        Scenario(name: "catching-up", fake: "ok", fakeArguments: ["--begin-delay", "1.4"], finals: [heard], via: "termination", plan: "terminate", deliveredWithin: 0...1.0),
+        Scenario(name: "paused", fake: "ok", finals: [heard], via: "endpoint", plan: "endpoint", deliveredWithin: 0.1...1.0, trailingSilence: 1.0),
+        Scenario(name: "backlog-no-termination", fake: "no-termination", fakeArguments: ["--begin-delay", "2.5"], finals: [heard], via: "fallback", plan: "terminate", deliveredWithin: 4.9...5.5, failure: "stage=closing reason=timedOut"),
+        Scenario(name: "no-endpoint", finals: [partial], via: "fallback", plan: "endpoint", deliveredWithin: 2.7...3.3, lateTurn: "S1 frame 30."),
+        Scenario(name: "late-endpoint", fake: "ok", fakeArguments: ["--answer-delay", "3.5"], finals: [partial], via: "fallback", plan: "endpoint", deliveredWithin: 2.7...3.3, lateTurn: "S1 frame 30."),
+        Scenario(name: "no-termination", finals: [heard], via: "endpoint", plan: "endpoint", deliveredWithin: 0.1...1.0, failure: "stage=closing reason=timedOut"),
+        Scenario(name: "close-1008", finals: [.failed(.serverError(code: 1008, reason: "Unauthorized Connection: Invalid API key"))], via: "failure", failure: "stage=connecting reason=serverError code=1008 detail=Unauthorized Connection: Invalid API key"),
+        Scenario(name: "no-begin", finals: [.failed(.timedOut)], via: "failure", failure: "stage=connecting reason=timedOut"),
+        Scenario(name: "token-401", finals: [.failed(.tokenRefused(status: 401, detail: #"{"error":"Invalid API key"}"#))], via: "failure", failure: #"stage=minting reason=tokenRefused status=401 detail={"error":"Invalid API key"}"#),
+        Scenario(name: "no-key", fake: "ok", finals: [.failed(.noAPIKey)], via: "failure", failure: "stage=minting reason=noAPIKey"),
+        Scenario(name: "reuse", fake: "ok", finals: [heard, .heard("S2 frame 15. S2 frame 30.")], via: "endpoint", plan: "endpoint", deliveredWithin: 0.1...1.0),
+        Scenario(name: "expired-once", finals: [heard, .heard("S3 frame 15. S3 frame 30.")], via: "endpoint", plan: "endpoint", deliveredWithin: 0.1...1.0),
+        Scenario(name: "overlap", fake: "ok", fakeArguments: ["--answer-delay", "1.5"], finals: [heard, .heard("S2 frame 15. S2 frame 30.")], via: "endpoint", plan: "endpoint", deliveredWithin: 1.4...2.2, overlapping: true),
     ]
 
     static func main() async {
@@ -118,7 +149,7 @@ enum TranscriptionCheck {
         FileManager.default.createFile(atPath: stdoutFile.path, contents: nil)
         let server = Process()
         server.executableURL = URL(fileURLWithPath: fake)
-        server.arguments = [portFile.path, captureFile.path, scenario.fake ?? scenario.name]
+        server.arguments = [portFile.path, captureFile.path, scenario.fake ?? scenario.name] + scenario.fakeArguments
         server.standardOutput = try? FileHandle(forWritingTo: stdoutFile)
         do { try server.run() } catch {
             expect(false, "\(scenario.name): the fake did not start: \(error.localizedDescription)")
@@ -131,52 +162,103 @@ enum TranscriptionCheck {
         }
         let configuration = Transcriber.Configuration(key: scenario.name == "no-key" ? nil : "fake", endpoints: endpoints)
         let transcriber = Transcriber(configuration: configuration)
-        guard scenario.sessions == 2 else {
-            var run = await feed(tone(), to: transcriber, tail: tail, prefill: 0, label: scenario.name)
-            run.captured = (try? Data(contentsOf: captureFile)) ?? Data()
-            assess(scenario, run)
-            return
+        let feeds = [tone() + Data(count: Int(scenario.trailingSilence * 32_000)), Data(tone().reversed())]
+        var runs: [Run] = []
+        if scenario.overlapping {
+            let first = await hold(feeds[0], on: transcriber, prefill: 0, tail: tail)
+            let second = await hold(feeds[1], on: transcriber, prefill: 0, tail: tail)
+            runs = [await settle(first, tail: tail, label: "\(scenario.name) 1"), await settle(second, tail: tail, label: "\(scenario.name) 2")]
+        } else {
+            for index in scenario.finals.indices {
+                runs.append(await settle(await hold(feeds[index], on: transcriber, prefill: 0, tail: tail), tail: tail, label: "\(scenario.name) \(index + 1)"))
+            }
         }
 
-        var first = await feed(tone(), to: transcriber, tail: tail, prefill: 0, label: "\(scenario.name) 1")
-        var second = await feed(Data(tone().reversed()), to: transcriber, tail: tail, prefill: 0, label: "\(scenario.name) 2")
         let output = (try? String(contentsOf: stdoutFile, encoding: .utf8))?.split(separator: "\n").map(String.init) ?? []
-        let mints = output.filter { $0.hasPrefix("mint ") }.count
+        let captured = (try? Data(contentsOf: captureFile)) ?? Data()
+        guard runs.count == 2 else {
+            runs[0].captured = captured
+            assess(scenario.name, scenario, runs[0], expecting: scenario.finals[0])
+            return
+        }
         let heardBytes = output.compactMap { line in
             line.hasSuffix(" bytes") && line.contains(" terminated ") ? line.split(separator: " ").dropLast().last.flatMap { Int($0) } : nil
         }
-        let captured = (try? Data(contentsOf: captureFile)) ?? Data()
         let split = heardBytes.first ?? 0
-        first.captured = captured.prefix(split)
-        second.captured = captured.dropFirst(split)
-        assess(Scenario(name: "\(scenario.name) session 1", expectedFailure: nil), first)
-        assess(Scenario(name: "\(scenario.name) session 2", expectedFailure: nil), second)
+        runs[0].captured = captured.prefix(split)
+        runs[1].captured = captured.dropFirst(split)
+        assess("\(scenario.name) session 1", scenario, runs[0], expecting: scenario.finals[0])
+        assess("\(scenario.name) session 2", scenario, runs[1], expecting: scenario.finals[1])
 
-        func opened(_ run: Run) -> [String] { run.lines.filter { $0.hasPrefix("transcription opened") } }
-        func retries(_ run: Run) -> [String] { run.lines.filter { $0.hasPrefix("transcription retry") } }
+        let (first, second) = (runs[0].lines, runs[1].lines)
+        func opened(_ lines: [String]) -> [String] { lines.filter { $0.hasPrefix("transcription opened") } }
+        func retries(_ lines: [String]) -> [String] { lines.filter { $0.hasPrefix("transcription retry") } }
         expect(opened(first).count == 1 && opened(first)[0].contains(" token=minted "), "\(scenario.name): session 1 opened with a minted token, got \(opened(first))")
         let expectedRetries = scenario.name == "expired-once" ? ["transcription retry session=2 reason=expiredToken"] : []
         expect(retries(first).isEmpty && retries(second) == expectedRetries, "\(scenario.name): session 2 retried \(expectedRetries.count) time(s), got \(retries(second))")
         let secondToken = scenario.name == "expired-once" ? "minted" : "reused"
         expect(opened(second).count == 1 && opened(second)[0].contains(" token=\(secondToken) "), "\(scenario.name): session 2 opened with a \(secondToken) token, got \(opened(second))")
-        if scenario.name == "expired-once", let retry = second.lines.firstIndex(where: { $0.hasPrefix("transcription retry") }),
-           let open = second.lines.firstIndex(where: { $0.hasPrefix("transcription opened") }) {
+        if scenario.name == "expired-once", let retry = second.firstIndex(where: { $0.hasPrefix("transcription retry") }),
+           let open = second.firstIndex(where: { $0.hasPrefix("transcription opened") }) {
             expect(retry < open, "\(scenario.name): the retry came before session 2 opened")
         }
+        let mints = output.filter { $0.hasPrefix("mint ") }.count
         let expectedMints = scenario.name == "expired-once" ? 2 : 1
         expect(mints == expectedMints, "\(scenario.name): the fake minted \(expectedMints) token(s), got \(mints)")
+        if scenario.overlapping {
+            let window = runs[0].window
+            let firstFinal = window.firstIndex { $0.hasPrefix("transcription final session=1 ") } ?? -1
+            let secondOpened = window.firstIndex { $0.hasPrefix("transcription opened session=2 ") } ?? window.count
+            expect(secondOpened < firstFinal, "\(scenario.name): session 1's final landed after session 2 opened, at lines \(firstFinal) and \(secondOpened)")
+        }
     }
 
-    static func assess(_ scenario: Scenario, _ run: Run) {
-        let label = scenario.name
-        let ended = run.lines.filter { $0.hasPrefix("transcription ended") }
-        let failed = run.lines.filter { $0.hasPrefix("transcription failed") }
-        for line in run.lines where line.hasPrefix("transcription ") { print("  info \(line)") }
+    static func assess(_ label: String, _ scenario: Scenario, _ run: Run, expecting final: AssemblyAI.Final) {
+        let lines = run.lines
+        for line in lines where line.hasPrefix("transcription ") { print("  info \(line)") }
+        let words = if case .heard(let text) = final { text } else { "" }
 
-        guard let expected = scenario.expectedFailure else {
-            let fedAt = run.lines.firstIndex { $0.hasPrefix("check fed") } ?? run.lines.count
-            let heard = run.lines.prefix(fedAt).filter { $0.hasPrefix("heard ") }
-            expect(!heard.isEmpty, "\(label): \(heard.count) heard lines arrived before the feed finished")
+        expect(run.final == final, "\(label): delivered \(final), got \(run.final)")
+        let finals = lines.filter { $0.hasPrefix("transcription final ") }
+        expect(
+            finals.count == 1 && finals[0].contains(" via=\(scenario.via) ") && text(of: finals[0]) == words,
+            "\(label): one 'transcription final' line via \(scenario.via) with text '\(words)', got \(finals)"
+        )
+        if let within = scenario.deliveredWithin {
+            expect(within.contains(run.deliveredAfter), "\(label): delivered \(String(format: "%.3f", run.deliveredAfter)) s after the feed ended, expected \(within)")
+        }
+        expect(run.shownAfterDrain == .final(final), "\(label): once the session closed the record still shows the final, got \(run.shownAfterDrain)")
+        let plans = lines.filter { $0.hasPrefix("transcription finishing ") }.map { line in
+            line.split(separator: " ").first { $0.hasPrefix("plan=") }.map { String($0.dropFirst(5)) } ?? line
+        }
+        expect(plans == (scenario.plan.map { [$0] } ?? []), "\(label): finishing plan \(scenario.plan ?? "none"), got \(plans)")
+        if let plan = scenario.plan {
+            let terminatedAfter = plan == "endpoint" ? run.deliveredAfter : 0
+            expect(
+                run.closedAfter - terminatedAfter <= 5.5,
+                "\(label): the session let go \(String(format: "%.3f", run.closedAfter - terminatedAfter)) s after it sent Terminate, expected at most the 5 s drain"
+            )
+        }
+
+        let hearing = run.held.shownWhileFeeding.compactMap { shown -> String? in
+            if case .hearing(let text) = shown { text } else { nil }
+        }
+        if case .heard = final {
+            let prefix = words.prefix { $0 != " " } + " frame "
+            expect(hearing.allSatisfy { $0.isEmpty || $0.hasPrefix(prefix) }, "\(label): every sample while held was this session's words, \(prefix)..., got \(Set(hearing.map { $0.prefix(3) }))")
+            if scenario.plan == "endpoint" {
+                expect(hearing.contains { $0.hasPrefix(prefix) }, "\(label): words showed while held, the last sample read '\(hearing.last ?? "")'")
+            }
+        }
+        if let lateTurn = scenario.lateTurn {
+            let finalAt = lines.firstIndex { $0.hasPrefix("transcription final ") } ?? lines.count
+            let lateAt = lines.lastIndex { $0.hasPrefix("heard ") && $0.contains(" end=true ") && text(of: $0) == lateTurn } ?? -1
+            expect(finalAt < lateAt, "\(label): the server's end '\(lateTurn)' arrived after the fallback and changed nothing")
+        }
+
+        let ended = lines.filter { $0.hasPrefix("transcription ended") }
+        let failed = lines.filter { $0.hasPrefix("transcription failed") }
+        guard let expected = scenario.failure else {
             expect(ended.count == 1 && failed.isEmpty, "\(label): one 'transcription ended' line and no failure, got \(ended.count) and \(failed.count)")
             let numbers = ended.first.map { fields(of: $0) } ?? [:]
             expect(numbers["sent"] != nil && numbers["sent"] == numbers["server"], "\(label): the seconds sent match the seconds the server counted, \(numbers["sent"] ?? 0) and \(numbers["server"] ?? 0)")
@@ -186,18 +268,20 @@ enum TranscriptionCheck {
         let detail = failed.map { line in line.range(of: "stage=").map { String(line[$0.lowerBound...]) } ?? line }
         expect(detail == [expected], "\(label): exactly one failure line, \(expected), got \(detail)")
         expect(ended.isEmpty, "\(label): no 'transcription ended' line, got \(ended.count)")
-        if run.returnedBeforeFeedEnded {
-            expect(run.streamTerminated, "\(label): once the session gave up, the stream refused the rest of the feed")
+        let failedAt = run.held.shownWhileFeeding.firstIndex { if case .final(.failed) = $0 { true } else { false } }
+        if let failedAt, failedAt < run.held.shownWhileFeeding.count - 1 {
+            expect(run.held.streamTerminated, "\(label): once the session gave up, the stream refused the rest of the feed")
         }
         if label == "no-termination" { expectCapture(label, run) }
     }
 
     static func expectCapture(_ label: String, _ run: Run) {
-        let padding = run.captured.count - run.fed.count
-        let matches = run.captured.prefix(run.fed.count) == run.fed
-            && run.captured.dropFirst(run.fed.count).allSatisfy { $0 == 0 }
+        let fed = run.held.fed
+        let padding = run.captured.count - fed.count
+        let matches = run.captured.prefix(fed.count) == fed
+            && run.captured.dropFirst(fed.count).allSatisfy { $0 == 0 }
             && (0...1600).contains(padding)
-        expect(matches, "\(label): the fake received the \(run.fed.count) fed bytes in order plus \(padding) zero bytes of padding, \(run.captured.count) in all")
+        expect(matches, "\(label): the fake received the \(fed.count) fed bytes in order plus \(padding) zero bytes of padding, \(run.captured.count) in all")
     }
 
     static func checkLive(tail: LogTail, workspace: URL, prefill: Double) async {
@@ -206,44 +290,57 @@ enum TranscriptionCheck {
             expect(false, "live: ASSEMBLYAI_API_KEY is not set")
             return
         }
-        let wav = workspace.appending(path: "live.wav")
-        let say = Process()
-        say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
-        say.arguments = ["-o", wav.path, "--data-format=LEI16@16000", "one two three four five six seven eight nine ten"]
-        try? say.run()
-        say.waitUntilExit()
-        guard let speech = (try? Data(contentsOf: wav)).flatMap(pcm(inWAV:)) else {
-            expect(false, "live: say did not write a 16 kHz PCM16 WAV to \(wav.path)")
+        guard let first = said("Open the settings page.", into: workspace.appending(path: "first.wav")),
+              let second = said("Then click the blue button at the top.", into: workspace.appending(path: "second.wav"))
+        else {
+            expect(false, "live: say did not write 16 kHz PCM16 WAVs to \(workspace.path)")
             return
         }
-        let configuration = Transcriber.Configuration(key: key, endpoints: .production)
-        let oneSecondOfSilence = Data(count: 32_000)
-        let transcriber = Transcriber(configuration: configuration)
-        let run = await feed(speech + oneSecondOfSilence, to: transcriber, tail: tail, prefill: prefill, label: "live")
-        for line in run.lines where line.hasPrefix("transcription ") || line.hasPrefix("heard ") { print("  info \(line)") }
-        let fedAt = run.lines.firstIndex { $0.hasPrefix("check fed") } ?? run.lines.count
-        func text(_ line: String) -> String { line.components(separatedBy: " text=").dropFirst().joined(separator: " text=") }
-        let latencyIsMeasurable = prefill == 0
-        if latencyIsMeasurable {
-            let heardEarly = run.lines.prefix(fedAt).contains { $0.hasPrefix("heard ") && !text($0).isEmpty }
-            expect(heardEarly, "live: a heard line with text arrived before the feed finished")
+        let transcriber = Transcriber(configuration: Transcriber.Configuration(key: key, endpoints: .production))
+        let pause = Data(count: 48_000)
+        let spoken = await settle(await hold(first + pause + second, on: transcriber, prefill: prefill, tail: tail), tail: tail, label: "live")
+        for line in spoken.lines where line.hasPrefix("transcription ") || line.hasPrefix("heard ") { print("  info \(line)") }
+        let backlogged = prefill > 0
+        let (plan, via) = backlogged ? ("terminate", "termination") : ("endpoint", "endpoint")
+        expect(spoken.lines.contains { $0.hasPrefix("transcription finishing ") && $0.contains(" plan=\(plan) ") }, "live: the session finished by \(plan)")
+        expect(spoken.lines.contains { $0.hasPrefix("transcription final ") && $0.contains(" via=\(via) ") }, "live: the final came via \(via)")
+        if !backlogged {
+            expect(spoken.deliveredAfter <= 1.5, "live: the final arrived \(String(format: "%.3f", spoken.deliveredAfter)) s after the release, expected at most 1.5 s")
+            let early = spoken.held.shownWhileFeeding.contains { shown in
+                if case .hearing(let text) = shown { text.hasPrefix("Open the") } else { false }
+            }
+            expect(early, "live: 'Open the' showed while held")
         }
-        let last = run.lines.last { $0.hasPrefix("heard ") && $0.contains(" end=true ") && !text($0).isEmpty }
-        let spoken = last.map { text($0).lowercased().filter { $0.isLetter || $0.isNumber } }
-        expect(
-            spoken == "12345678910" || spoken == "onetwothreefourfivesixseveneightnineten",
-            "live: the last ended turn is the ten numbers, got \(spoken ?? "none")"
-        )
-        expect(!run.lines.contains { $0.contains("code=3007") }, "live: no 3007 input or rate violation")
-        expect(run.lines.filter { $0.hasPrefix("transcription ended") }.count == 1, "live: one 'transcription ended' line")
+        if case .heard(let sentence) = spoken.final {
+            let letters = sentence.lowercased().filter(\.isLetter)
+            expect(letters == "openthesettingspagethenclickthebluebuttonatthetop", "live: the final is both sentences, got '\(sentence)'")
+            expect(sentence.first?.isUppercase == true && sentence.hasSuffix(".") && sentence.contains(". "), "live: the final is punctuated as two sentences, got '\(sentence)'")
+        } else {
+            expect(false, "live: the final is both sentences, got \(spoken.final)")
+        }
+        expect(!spoken.lines.contains { $0.contains("code=3007") }, "live: no 3007 input or rate violation")
+        expect(spoken.lines.filter { $0.hasPrefix("transcription ended") }.count == 1, "live: one 'transcription ended' line")
 
-        let again = await feed(speech + oneSecondOfSilence, to: transcriber, tail: tail, prefill: 0, label: "live 2")
-        for line in again.lines where line.hasPrefix("transcription ") { print("  info \(line)") }
-        expect(again.lines.contains { $0.hasPrefix("transcription opened") && $0.contains(" token=reused ") }, "live: the second session reuses the token")
+        let quiet = await settle(await hold(Data(count: 64_000), on: transcriber, prefill: 0, tail: tail), tail: tail, label: "live silence")
+        for line in quiet.lines where line.hasPrefix("transcription ") { print("  info \(line)") }
+        expect(quiet.final == .silence, "live: 2 s of silence delivers silence, got \(quiet.final)")
+        expect(quiet.lines.contains { $0.hasPrefix("transcription opened") && $0.contains(" token=reused ") }, "live: the second session reuses the token")
     }
 
-    static func feed(_ pcm: Data, to transcriber: Transcriber, tail: LogTail, prefill: Double, label: String) async -> Run {
-        let first = tail.lines.count
+    static func said(_ text: String, into wav: URL) -> Data? {
+        let say = Process()
+        say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+        say.arguments = ["-o", wav.path, "--data-format=LEI16@16000", text]
+        try? say.run()
+        say.waitUntilExit()
+        return (try? Data(contentsOf: wav)).flatMap { pcm(inWAV: $0) }
+    }
+
+    // Feeds pcm at the tap's pace and returns once the stream is finished,
+    // without waiting for the final, so the next hold can begin while this
+    // one finishes.
+    static func hold(_ pcm: Data, on transcriber: Transcriber, prefill: Double, tail: LogTail) async -> Held {
+        let firstLine = tail.lines.count
         var chunks = [pcm.prefix(TapShape.firstChunk)]
         var offset = TapShape.firstChunk
         while offset < pcm.count - TapShape.converterTail {
@@ -252,35 +349,66 @@ enum TranscriptionCheck {
         }
         chunks.append(pcm.suffix(TapShape.converterTail))
 
-        let (session, continuation) = start(transcriber, after: prefill)
-        let watchdog = Task {
-            try await Task.sleep(for: .seconds(30))
-            print("  FAIL \(label): the session was still running 30 s after it began")
-            exit(1)
-        }
+        let (starting, continuation) = start(transcriber, after: prefill)
+        // During a prefill there is no record yet, and no words could show.
+        let sampled = prefill == 0 ? await starting.value : nil
+        let early = sampled.map(outcome(of:))
+        var shown: [AssemblyAI.Transcript.Shown] = []
         var streamTerminated = false
         let began = ContinuousClock.now
         for (index, chunk) in chunks.enumerated() {
             try? await Task.sleep(until: began + .milliseconds(100 * index), clock: .continuous)
             if case .terminated = continuation.yield(Data(chunk)) { streamTerminated = true }
+            if let sampled { shown.append(sampled.shown) }
         }
         continuation.finish()
         let fedAt = ContinuousClock.now
         marker.notice("check fed bytes=\(pcm.count)")
-        let returnedAt = await session.value
-        watchdog.cancel()
-        _ = await markAndWaitForTail(tail, "check done \(label)")
-        return Run(lines: Array(tail.lines.dropFirst(first)), fed: pcm, streamTerminated: streamTerminated, returnedBeforeFeedEnded: returnedAt < fedAt)
+        let transcription = await starting.value
+        return Held(
+            transcription: transcription, fed: pcm, fedAt: fedAt, firstLine: firstLine,
+            shownWhileFeeding: shown, streamTerminated: streamTerminated, outcome: early ?? outcome(of: transcription)
+        )
     }
 
-    static func start(_ transcriber: Transcriber, after prefill: Double) -> (Task<ContinuousClock.Instant, Never>, SpeechStream.Continuation) {
+    // Started as soon as the record exists, so the instants are right even when
+    // a later hold runs before this one is settled.
+    static func outcome(of transcription: Transcription) -> Task<(final: AssemblyAI.Final, deliveredAt: ContinuousClock.Instant, closedAt: ContinuousClock.Instant), Never> {
+        Task {
+            let final = await transcription.delivered
+            let deliveredAt = ContinuousClock.now
+            await transcription.closed()
+            return (final, deliveredAt, ContinuousClock.now)
+        }
+    }
+
+    static func settle(_ held: Held, tail: LogTail, label: String) async -> Run {
+        let watchdog = Task {
+            try await Task.sleep(for: .seconds(30))
+            print("  FAIL \(label): the session was still running 30 s after the feed ended")
+            exit(1)
+        }
+        let outcome = await held.outcome.value
+        watchdog.cancel()
+        _ = await markAndWaitForTail(tail, "check done \(label)")
+        return Run(
+            held: held, final: outcome.final, deliveredAfter: held.fedAt.duration(to: outcome.deliveredAt) / .seconds(1),
+            closedAfter: held.fedAt.duration(to: outcome.closedAt) / .seconds(1),
+            shownAfterDrain: held.transcription.shown, window: Array(tail.lines.dropFirst(held.firstLine))
+        )
+    }
+
+    static func start(_ transcriber: Transcriber, after prefill: Double) -> (Task<Transcription, Never>, SpeechStream.Continuation) {
         let (speech, continuation) = SpeechStream.makeStream(bufferingPolicy: .unbounded)
         let session = Task {
-            try? await Task.sleep(for: .seconds(prefill))
-            await transcriber.transcribe(speech)
-            return ContinuousClock.now
+            if prefill > 0 { try? await Task.sleep(for: .seconds(prefill)) }
+            return transcriber.transcribe(speech)
         }
         return (session, continuation)
+    }
+
+    static func text(of line: String) -> String {
+        line.components(separatedBy: " text=").dropFirst().joined(separator: " text=")
     }
 
     static func fields(of line: String) -> [String: Double] {

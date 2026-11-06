@@ -19,6 +19,8 @@ enum MicrophonePhase {
 @MainActor
 final class AppState: ObservableObject {
     @Published private(set) var microphone: MicrophonePhase = .ready
+    // The newest hold's, the only one the panel shows. A press replaces it.
+    @Published private(set) var transcription: Transcription?
     private let transcriber = Transcriber()
 
     func setHeld(_ held: Bool) {
@@ -33,12 +35,15 @@ final class AppState: ObservableObject {
     }
 
     private func beginHold() {
+        transcription = nil
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             do throws(MicrophoneProblem) {
                 let (capture, speech) = try MicrophoneCapture.start()
                 microphone = .listening(capture)
-                Task { await transcriber.transcribe(speech) }
+                transcription = transcriber.transcribe(speech)
+                // Task 19 sends the final to Claude, unless a newer hold has replaced this one:
+                //     guard case .heard(let sentence) = await hold.delivered, hold === transcription
             } catch {
                 microphone = .failed(error)
             }
