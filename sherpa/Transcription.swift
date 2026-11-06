@@ -6,8 +6,6 @@ private nonisolated let logger = Logger(subsystem: "my.rooftop.sherpa", category
 
 private let sampleRate = Int(SpeechConverter.format.sampleRate)
 
-private let fallbackDelay: Duration = .milliseconds(2800)
-
 private let drainLimit: Duration = .seconds(5)
 
 typealias SpeechStream = AsyncStream<Data>
@@ -16,11 +14,11 @@ typealias SpeechStream = AsyncStream<Data>
 final class Transcription {
     let number: Int
 
-    var shown: AssemblyAI.Transcript.Shown { transcript.shown }
+    var shown: AssemblyAI.Transcript.Shown { final.map(AssemblyAI.Transcript.Shown.final) ?? .hearing(transcript.text) }
 
     var delivered: AssemblyAI.Final {
         get async {
-            if let final = transcript.delivered { return final }
+            if let final { return final }
             return await withCheckedContinuation { awaitingDelivery.append($0) }
         }
     }
@@ -30,8 +28,9 @@ final class Transcription {
     }
 
     private var transcript = AssemblyAI.Transcript()
+    private var final: AssemblyAI.Final?
     fileprivate let began = ContinuousClock.now
-    @ObservationIgnored fileprivate var sentThrough: Duration = .zero
+    @ObservationIgnored fileprivate var ledger: AssemblyAI.Ledger?
     @ObservationIgnored fileprivate var session: Task<Void, Never>?
     @ObservationIgnored private var awaitingDelivery: [CheckedContinuation<AssemblyAI.Final, Never>] = []
 
@@ -40,12 +39,14 @@ final class Transcription {
     }
 
     fileprivate func hear(_ turn: AssemblyAI.Turn) {
-        announce(transcript.hear(turn, sentThrough: sentThrough), via: .endpoint)
+        transcript.hear(turn)
+        if ledger?.hear(turn, at: .now) == true { announce(transcript.final, via: .endpoint) }
     }
 
-    fileprivate func finish() -> AssemblyAI.Transcript.Finish {
-        let plan = transcript.finish()
-        let lag = transcript.lastLag.map { String(Int($0 / .milliseconds(1))) } ?? "none"
+    fileprivate func finish() -> Plan {
+        ledger?.want()
+        let plan: Plan = ledger?.fire(at: .now) == true ? .endpoint : .terminate
+        let lag = ledger?.lastLag.map { String(Int($0 / .milliseconds(1))) } ?? "none"
         logger.notice("""
             transcription finishing session=\(self.number) plan=\(plan.rawValue, privacy: .public) \
             lag=\(lag, privacy: .public)
@@ -53,26 +54,25 @@ final class Transcription {
         return plan
     }
 
-    fileprivate func expectEndpointAnswer() {
-        transcript.expectEndpointAnswer()
-    }
-
     fileprivate func terminated() {
-        announce(transcript.settle(), via: .termination)
+        announce(transcript.final, via: .termination)
     }
 
     fileprivate func settle() {
-        announce(transcript.settle(), via: .fallback)
+        announce(transcript.final, via: .fallback)
     }
 
     fileprivate func fail(_ failure: AssemblyAI.Failure) {
-        announce(transcript.fail(failure), via: .failure)
+        announce(.failed(failure), via: .failure)
     }
+
+    fileprivate enum Plan: String { case endpoint, terminate }
 
     private enum Via: String { case endpoint, termination, fallback, failure }
 
-    private func announce(_ final: AssemblyAI.Final?, via: Via) {
-        guard let final else { return }
+    private func announce(_ final: AssemblyAI.Final, via: Via) {
+        guard self.final == nil else { return }
+        self.final = final
         let words = if case .heard(let text) = final { text } else { "" }
         logger.notice("""
             transcription final session=\(self.number) via=\(via.rawValue, privacy: .public) \
@@ -159,6 +159,7 @@ final class Transcriber {
                 after=\(began.duration(to: .now) / .seconds(1), format: .fixed(precision: 3))
                 """)
 
+            transcription.ledger = AssemblyAI.Ledger(began: .now)
             stage = .streaming
             let live = task
             let listening = Task { try await listen(on: live, into: transcription) }
@@ -168,8 +169,7 @@ final class Transcriber {
             switch transcription.finish() {
             case .endpoint:
                 stage = .finishing
-                transcription.expectEndpointAnswer()
-                try await send(.forceEndpoint, on: live, settlingAt: .now + fallbackDelay, for: transcription)
+                try await send(.forceEndpoint, on: live, settlingAt: .now + AssemblyAI.Ledger.answerLimit, for: transcription)
                 stage = .closing
                 try await live.send(.string(AssemblyAI.Control.terminate.rawValue))
                 drainEnds = .now + drainLimit
@@ -266,25 +266,16 @@ private func speak(_ speech: SpeechStream, on socket: URLSessionWebSocketTask, c
     var framer = AssemblyAI.Framer(sampleRate: sampleRate)
     var bytes = 0
     var frames = 0
-    var fed = 0
-    var real = 0
     func send(_ frame: Data) async throws {
         try await socket.send(.data(frame))
         bytes += frame.count
         frames += 1
+        transcription.ledger?.sent(.microseconds(frame.count * 1_000_000 / (sampleRate * 2)), at: .now)
     }
     for await pcm in speech {
-        fed += pcm.count
-        for frame in framer.take(pcm) {
-            try await send(frame)
-            real += frame.count
-            transcription.sentThrough = .milliseconds(real * 1000 / (sampleRate * 2))
-        }
+        for frame in framer.take(pcm) { try await send(frame) }
     }
-    if let tail = framer.finish() {
-        try await send(tail)
-        transcription.sentThrough = .milliseconds(fed * 1000 / (sampleRate * 2))
-    }
+    if let tail = framer.finish() { try await send(tail) }
     return (Double(bytes) / Double(sampleRate * 2), frames)
 }
 
