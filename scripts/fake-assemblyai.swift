@@ -2,24 +2,41 @@ import Foundation
 import Network
 
 enum Scenario: String {
-    case ok, close1008 = "close-1008", noBegin = "no-begin", noTermination = "no-termination", token401 = "token-401", expiredOnce = "expired-once"
+    case ok, silent, noEndpoint = "no-endpoint", close1008 = "close-1008", noBegin = "no-begin",
+         noTermination = "no-termination", token401 = "token-401", expiredOnce = "expired-once"
 }
 
 var positional: [String] = []
 var beginDelay = 0.8
+var answerDelay = 0.25
+var scenarioFile: URL?
 var remaining = CommandLine.arguments.dropFirst()[...]
 while let argument = remaining.popFirst() {
     if argument == "--begin-delay", let value = remaining.popFirst().flatMap(Double.init) {
         beginDelay = value
+    } else if argument == "--answer-delay", let value = remaining.popFirst().flatMap(Double.init) {
+        answerDelay = value
+    } else if argument == "--scenario-file", let path = remaining.popFirst() {
+        scenarioFile = URL(fileURLWithPath: path)
     } else {
         positional.append(argument)
     }
 }
 guard positional.count >= 2, let parsed = Scenario(rawValue: positional.count > 2 ? positional[2] : "ok") else {
-    FileHandle.standardError.write(Data("usage: fake-assemblyai <port-file> <capture-file> [scenario] [--begin-delay s]\n".utf8))
+    FileHandle.standardError.write(Data("usage: fake-assemblyai <port-file> <capture-file> [scenario] [--begin-delay s] [--answer-delay s] [--scenario-file path]\n".utf8))
     exit(2)
 }
-let scenario = parsed
+
+let defaultScenario = parsed
+
+extension Scenario {
+    // Read as each connection opens, so the in-app harness can change one
+    // hold's scenario without relaunching the app.
+    static var current: Scenario {
+        scenarioFile.flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+            .flatMap { Scenario(rawValue: $0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? defaultScenario
+    }
+}
 let portFile = URL(fileURLWithPath: positional[0])
 let captureFile = URL(fileURLWithPath: positional[1])
 FileManager.default.createFile(atPath: captureFile.path, contents: nil)
@@ -76,7 +93,7 @@ final class TokenExchange {
         guard body.count >= Int(headers["content-length"] ?? "0") ?? 0 else { return nil }
 
         let (status, answer): (String, [String: Any])
-        if scenario == .token401 {
+        if Scenario.current == .token401 {
             (status, answer) = ("401 Unauthorized", ["error": "Invalid API key"])
         } else if lines.first != "POST /v1/token HTTP/1.1" {
             (status, answer) = ("404 Not Found", ["error": "expected POST /v1/token, got \(lines.first ?? "")"])
@@ -95,17 +112,38 @@ final class TokenExchange {
     }
 }
 
+// Models the measured server: a cursor that starts 0.3 s after Begin and works
+// through the received audio at twice real time until it catches up, then
+// keeps pace. Turns come only from processed audio. ForceEndpoint takes effect
+// at the cursor, not after the queued audio, and processing then stalls until
+// Terminate, which processes the rest at once.
 final class StreamingSession {
     private static let closeFallback = 1.0
+    private static let processingDelay = 0.3
+    private static let processingSpeed = 2.0
+    private static let turnEndsAtFrame = 15
     private static var count = 0
 
     private let connection: NWConnection
     private let id: Int
+    private let scenario: Scenario
     private let opened = Date()
-    private var frames = 0
+    private var received: [Int] = []
+    private var silent: [Bool] = []
     private var bytes = 0
     private var closing = false
     private let refuses: Bool
+
+    private var processed = 0
+    private var processedBytes = 0
+    private var wordBytes = 0
+    private var cursorFree: Date?
+    private var stepping = false
+    private var stalled = false
+    private var order = 0
+    private var openText: String?
+    private var answerPending = false
+    private var terminateWaiting = false
 
     // Network.framework hands a server only the upgrade request's headers, not
     // its URL, so the token cannot be read. The second connection counts as
@@ -113,6 +151,7 @@ final class StreamingSession {
     init(_ connection: NWConnection) {
         Self.count += 1
         id = Self.count
+        scenario = Scenario.current
         refuses = scenario == .expiredOnce && id == 2 && mints == 1
         self.connection = connection
         connection.stateUpdateHandler = { [self] state in
@@ -128,9 +167,13 @@ final class StreamingSession {
                 close(.protocolCode(.policyViolation), "Unauthorized Connection: Invalid API key")
             case .noBegin:
                 break
-            case .ok, .noTermination, .token401, .expiredOnce:
+            case .ok, .silent, .noEndpoint, .noTermination, .token401, .expiredOnce:
                 queue.asyncAfter(deadline: .now() + beginDelay) { [self] in
                     send(["type": "Begin", "id": "fake-\(id)", "expires_at": Int(Date().timeIntervalSince1970) + 480])
+                    queue.asyncAfter(deadline: .now() + Self.processingDelay) { [self] in
+                        cursorFree = Date()
+                        step()
+                    }
                 }
             }
         }
@@ -148,6 +191,8 @@ final class StreamingSession {
             switch metadata.opcode {
             case .binary:
                 hear(content ?? Data())
+            case .text where content == Data(#"{"type":"ForceEndpoint"}"#.utf8):
+                forceEndpoint()
             case .text where content == Data(#"{"type":"Terminate"}"#.utf8):
                 terminate()
             case .close:
@@ -162,21 +207,69 @@ final class StreamingSession {
 
     private func hear(_ frame: Data) {
         try? capture.write(contentsOf: frame)
-        frames += 1
+        received.append(frame.count)
+        silent.append(frame.allSatisfy { $0 == 0 })
         bytes += frame.count
         guard frame.count % 2 == 0, (1600...32_000).contains(frame.count) else {
             let ms = frame.count * 1000 / bytesPerSecond
             close(.applicationCode(3007), "Input duration violation: \(ms) ms. Expected between 50 and 1000 ms")
             return
         }
-        if frames % 3 == 0 {
-            send(["type": "Turn", "turn_order": 0, "turn_is_formatted": false, "end_of_turn": false, "transcript": "frame \(frames)"])
+        step()
+    }
+
+    private func step() {
+        guard !stepping, !stalled, let free = cursorFree, processed < received.count else { return }
+        stepping = true
+        let seconds = Double(received[processed]) / Double(bytesPerSecond)
+        let due = max(Date(), free.addingTimeInterval(seconds / Self.processingSpeed))
+        queue.asyncAfter(deadline: .now() + due.timeIntervalSinceNow) { [self] in
+            stepping = false
+            guard !stalled else { return }
+            cursorFree = due
+            process()
+            step()
+        }
+    }
+
+    private func process() {
+        let isSilent = silent[processed]
+        processedBytes += received[processed]
+        if !isSilent { wordBytes = processedBytes }
+        processed += 1
+        guard scenario != .silent, !isSilent, processed % 3 == 0 else { return }
+        let text = "S\(id) frame \(processed)"
+        if processed == Self.turnEndsAtFrame {
+            sendTurn(text.lowercased(), formatted: false, end: true)
+            endOpenTurn(text)
+        } else {
+            sendTurn(text, formatted: true, end: false)
+            openText = text
+        }
+    }
+
+    private func forceEndpoint() {
+        print("session \(id) force-endpoint at frame \(processed) of \(received.count)")
+        stalled = true
+        guard scenario != .noEndpoint else { return }
+        answerPending = true
+        queue.asyncAfter(deadline: .now() + answerDelay) { [self] in
+            answerPending = false
+            endOpenTurn(openText)
+            if terminateWaiting { terminate() }
         }
     }
 
     private func terminate() {
-        print("session \(id) terminated after \(frames) frames, \(bytes) bytes")
-        send(["type": "Turn", "turn_order": 0, "turn_is_formatted": true, "end_of_turn": true, "transcript": "Frame \(frames)."])
+        guard !answerPending else {
+            terminateWaiting = true
+            return
+        }
+        print("session \(id) terminated after \(received.count) frames, \(bytes) bytes")
+        stalled = true
+        while processed < received.count { process() }
+        if openText != nil { endOpenTurn(openText) }
+        endOpenTurn(nil)
         guard scenario != .noTermination else { return }
         send([
             "type": "Termination",
@@ -184,6 +277,18 @@ final class StreamingSession {
             "session_duration_seconds": Date().timeIntervalSince(opened),
         ])
         close(.protocolCode(.normalClosure), "")
+    }
+
+    private func endOpenTurn(_ text: String?) {
+        sendTurn(text.map { $0 + "." } ?? "", formatted: true, end: true)
+        order += 1
+        openText = nil
+    }
+
+    private func sendTurn(_ text: String, formatted: Bool, end: Bool) {
+        let cursor = wordBytes * 1000 / bytesPerSecond
+        let words: [[String: Any]] = text.isEmpty ? [] : [["text": "frame", "start": max(0, cursor - 100), "end": cursor]]
+        send(["type": "Turn", "turn_order": order, "turn_is_formatted": formatted, "end_of_turn": end, "transcript": text, "words": words])
     }
 
     private func send(_ message: [String: Any]) {
@@ -204,7 +309,7 @@ final class StreamingSession {
     private func finish(_ how: String) {
         guard connection.state != .cancelled else { return }
         connection.cancel()
-        print("session \(id) \(how) after \(frames) frames, \(bytes) bytes")
+        print("session \(id) \(how) after \(received.count) frames, \(bytes) bytes")
     }
 }
 
