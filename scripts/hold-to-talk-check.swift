@@ -343,7 +343,7 @@ func checkPanel(_ label: String, logged: Int) {
         fail("\(label): expected one 'transcription final' line after the release, got \(delivered.count)")
         return
     }
-    let closedTurns = final.text.range(of: #"^S\d+ frame \d+\.( S\d+ frame \d+\.)?$"#, options: .regularExpression) != nil
+    let closedTurns = final.text.range(of: #"^S\d+ T\d+ frame \d+\.( S\d+ T\d+ frame \d+\.)*$"#, options: .regularExpression) != nil
     if ["endpoint", "termination"].contains(final.via), closedTurns {
         print("  ok   \(label): one final via \(final.via), every turn closed by its period: '\(final.text)'")
     } else {

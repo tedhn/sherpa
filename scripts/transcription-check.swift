@@ -92,8 +92,8 @@ enum TranscriptionCheck {
         if !ok { failures += 1 }
     }
 
-    static let heard = AssemblyAI.Final.heard("S1 frame 15. S1 frame 30.")
-    static let partial = AssemblyAI.Final.heard("S1 frame 15. S1 frame 30")
+    static let heard = AssemblyAI.Final.heard("S1 T0 frame 18. S1 T1 frame 30.")
+    static let partial = AssemblyAI.Final.heard("S1 T0 frame 18. S1 T1 frame 30")
     static let scenarios = [
         Scenario(name: "ok", finals: [heard], via: "endpoint", plan: "endpoint", deliveredWithin: 0.1...1.0),
         Scenario(name: "silent", finals: [.silence], via: "termination", plan: "terminate", deliveredWithin: 0...1.0),
@@ -101,16 +101,16 @@ enum TranscriptionCheck {
         Scenario(name: "catching-up", fake: "ok", fakeArguments: ["--begin-delay", "1.4"], finals: [heard], via: "termination", plan: "terminate", deliveredWithin: 0...1.0),
         Scenario(name: "paused", fake: "ok", finals: [heard], via: "endpoint", plan: "endpoint", deliveredWithin: 0.1...1.0, trailingSilence: 1.0),
         Scenario(name: "backlog-no-termination", fake: "no-termination", fakeArguments: ["--begin-delay", "2.5"], finals: [heard], via: "fallback", plan: "terminate", deliveredWithin: 4.9...5.5, failure: "stage=closing reason=timedOut"),
-        Scenario(name: "no-endpoint", finals: [partial], via: "fallback", plan: "endpoint", deliveredWithin: 2.7...3.3, lateTurn: "S1 frame 30."),
-        Scenario(name: "late-endpoint", fake: "ok", fakeArguments: ["--answer-delay", "3.5"], finals: [partial], via: "fallback", plan: "endpoint", deliveredWithin: 2.7...3.3, lateTurn: "S1 frame 30."),
+        Scenario(name: "no-endpoint", finals: [partial], via: "fallback", plan: "endpoint", deliveredWithin: 2.7...3.3, lateTurn: "S1 T1 frame 30."),
+        Scenario(name: "late-endpoint", fake: "ok", fakeArguments: ["--answer-delay", "3.5"], finals: [partial], via: "fallback", plan: "endpoint", deliveredWithin: 2.7...3.3, lateTurn: "S1 T1 frame 30."),
         Scenario(name: "no-termination", finals: [heard], via: "endpoint", plan: "endpoint", deliveredWithin: 0.1...1.0, failure: "stage=closing reason=timedOut"),
         Scenario(name: "close-1008", finals: [.failed(.serverError(code: 1008, reason: "Unauthorized Connection: Invalid API key"))], via: "failure", failure: "stage=connecting reason=serverError code=1008 detail=Unauthorized Connection: Invalid API key"),
         Scenario(name: "no-begin", finals: [.failed(.timedOut)], via: "failure", failure: "stage=connecting reason=timedOut"),
         Scenario(name: "token-401", finals: [.failed(.tokenRefused(status: 401, detail: #"{"error":"Invalid API key"}"#))], via: "failure", failure: #"stage=minting reason=tokenRefused status=401 detail={"error":"Invalid API key"}"#),
         Scenario(name: "no-key", fake: "ok", finals: [.failed(.noAPIKey)], via: "failure", failure: "stage=minting reason=noAPIKey"),
-        Scenario(name: "reuse", fake: "ok", finals: [heard, .heard("S2 frame 15. S2 frame 30.")], via: "endpoint", plan: "endpoint", deliveredWithin: 0.1...1.0),
-        Scenario(name: "expired-once", finals: [heard, .heard("S3 frame 15. S3 frame 30.")], via: "endpoint", plan: "endpoint", deliveredWithin: 0.1...1.0),
-        Scenario(name: "overlap", fake: "ok", fakeArguments: ["--answer-delay", "1.5"], finals: [heard, .heard("S2 frame 15. S2 frame 30.")], via: "endpoint", plan: "endpoint", deliveredWithin: 1.4...2.2, overlapping: true),
+        Scenario(name: "reuse", fake: "ok", finals: [heard, .heard("S2 T0 frame 18. S2 T1 frame 30.")], via: "endpoint", plan: "endpoint", deliveredWithin: 0.1...1.0),
+        Scenario(name: "expired-once", finals: [heard, .heard("S3 T0 frame 18. S3 T1 frame 30.")], via: "endpoint", plan: "endpoint", deliveredWithin: 0.1...1.0),
+        Scenario(name: "overlap", fake: "ok", fakeArguments: ["--answer-delay", "1.5"], finals: [heard, .heard("S2 T0 frame 18. S2 T1 frame 30.")], via: "endpoint", plan: "endpoint", deliveredWithin: 1.4...2.2, overlapping: true),
     ]
 
     static func main() async {
@@ -244,7 +244,7 @@ enum TranscriptionCheck {
             if case .hearing(let text) = shown { text } else { nil }
         }
         if case .heard = final {
-            let prefix = words.prefix { $0 != " " } + " frame "
+            let prefix = words.prefix { $0 != " " } + " T"
             expect(hearing.allSatisfy { $0.isEmpty || $0.hasPrefix(prefix) }, "\(label): every sample while held was this session's words, \(prefix)..., got \(Set(hearing.map { $0.prefix(3) }))")
             if scenario.plan == "endpoint" {
                 expect(hearing.contains { $0.hasPrefix(prefix) }, "\(label): words showed while held, the last sample read '\(hearing.last ?? "")'")
