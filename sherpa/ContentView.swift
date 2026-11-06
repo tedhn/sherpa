@@ -34,6 +34,14 @@ struct ContentView: View {
                 .font(.title3)
                 .foregroundStyle(.secondary)
 
+            // Three lines are always reserved, because the panel is sized and
+            // anchored only when it opens, so growing text would clip it.
+            Text(transcriptLine)
+                .font(.body)
+                .multilineTextAlignment(.center)
+                .lineLimit(3, reservesSpace: true)
+                .truncationMode(.head)
+
             if case .failed(.accessDenied) = state.microphone {
                 Link("Open Privacy Settings", destination: Self.microphoneSettings)
             }
@@ -80,6 +88,20 @@ private extension ContentView {
         case .failed(.accessRestricted): "Microphone access is restricted"
         case .failed(.noInputDevice): "No microphone found"
         case .failed(.engineFailed): "Couldn't start the microphone"
+        }
+    }
+
+    var transcriptLine: String {
+        guard let transcription = state.transcription else { return "" }
+        switch transcription.shown {
+        case .hearing(let words): return words.isEmpty && !state.microphone.isListening ? "…" : words
+        case .final(.heard(let sentence)): return sentence
+        case .final(.silence): return "Didn't catch that"
+        case .final(.failed(.noAPIKey)): return "No AssemblyAI key is set"
+        case .final(.failed(.tokenRefused)): return "AssemblyAI refused the key"
+        case .final(.failed(.serverError)): return "AssemblyAI closed the session"
+        case .final(.failed(.timedOut)): return "AssemblyAI didn't answer"
+        case .final(.failed(.transport)): return "Couldn't reach AssemblyAI"
         }
     }
 }
