@@ -14,72 +14,28 @@ typealias SpeechStream = AsyncStream<Data>
 final class Transcription {
     let number: Int
 
-    var shown: AssemblyAI.Transcript.Shown { final.map(AssemblyAI.Transcript.Shown.final) ?? .hearing(transcript.text) }
+    fileprivate(set) var shown: AssemblyAI.Transcript.Shown = .hearing("")
 
     var delivered: AssemblyAI.Final {
         get async {
             if let final { return final }
-            return await withCheckedContinuation { awaitingDelivery.append($0) }
+            return await withCheckedContinuation { awaiting.append($0) }
         }
     }
 
-    func closed() async {
-        await session?.value
-    }
-
-    private var transcript = AssemblyAI.Transcript()
-    private var final: AssemblyAI.Final?
     fileprivate let began = ContinuousClock.now
-    @ObservationIgnored fileprivate var ledger: AssemblyAI.Ledger?
-    @ObservationIgnored fileprivate var session: Task<Void, Never>?
-    @ObservationIgnored private var awaitingDelivery: [CheckedContinuation<AssemblyAI.Final, Never>] = []
+    @ObservationIgnored private var final: AssemblyAI.Final?
+    @ObservationIgnored private var awaiting: [CheckedContinuation<AssemblyAI.Final, Never>] = []
 
     fileprivate init(number: Int) {
         self.number = number
     }
 
-    fileprivate func hear(_ turn: AssemblyAI.Turn) {
-        transcript.hear(turn)
-        if ledger?.hear(turn, at: .now) == true { announce(transcript.final, via: .endpoint) }
-    }
-
-    fileprivate func finish() -> Plan {
-        ledger?.want(notBefore: .now)
-        let plan: Plan = ledger?.fire(at: .now) == true ? .endpoint : .terminate
-        let lag = ledger?.lastLag.map { String(Int($0 / .milliseconds(1))) } ?? "none"
-        logger.notice("""
-            transcription finishing session=\(self.number) plan=\(plan.rawValue, privacy: .public) \
-            lag=\(lag, privacy: .public)
-            """)
-        return plan
-    }
-
-    fileprivate func terminated() {
-        announce(transcript.final, via: .termination)
-    }
-
-    fileprivate func settle() {
-        announce(transcript.final, via: .fallback)
-    }
-
-    fileprivate func fail(_ failure: AssemblyAI.Failure) {
-        announce(.failed(failure), via: .failure)
-    }
-
-    fileprivate enum Plan: String { case endpoint, terminate }
-
-    private enum Via: String { case endpoint, termination, fallback, failure }
-
-    private func announce(_ final: AssemblyAI.Final, via: Via) {
-        guard self.final == nil else { return }
+    fileprivate func deliver(_ final: AssemblyAI.Final) {
         self.final = final
-        let words = if case .heard(let text) = final { text } else { "" }
-        logger.notice("""
-            transcription final session=\(self.number) via=\(via.rawValue, privacy: .public) \
-            after=\(self.began.duration(to: .now) / .seconds(1), format: .fixed(precision: 3)) text=\(words, privacy: .public)
-            """)
-        let waiting = awaitingDelivery
-        awaitingDelivery = []
+        shown = .final(final)
+        let waiting = awaiting
+        awaiting = []
         for continuation in waiting { continuation.resume(returning: final) }
     }
 }
@@ -88,6 +44,7 @@ final class Transcriber {
     struct Configuration {
         var key: String?
         var endpoints: AssemblyAI.Endpoints
+        var limits = Dictation.Limits()
 
         static var current: Configuration {
             let planted = (Bundle.main.object(forInfoDictionaryKey: "AssemblyAIAPIKey") as? String)?
@@ -104,126 +61,350 @@ final class Transcriber {
                 socket: defaults.string(forKey: "AssemblyAISocketURL").flatMap(URL.init(string:)) ?? configuration.endpoints.socket
             )
             if let key = defaults.string(forKey: "AssemblyAIAPIKey") { configuration.key = key }
+            if let idle = defaults.string(forKey: "AssemblyAIIdleSeconds").flatMap(Double.init) {
+                configuration.limits.idle = .seconds(idle)
+                configuration.limits.idleWithPanelOpen = .seconds(idle)
+            }
             #endif
             return configuration
         }
     }
 
-    private enum Stage: String { case minting, connecting, streaming, finishing, closing }
-
     private let configuration: Configuration
-    private let urlSession = URLSession(configuration: .default)
-    private var sessionCount = 0
-    private var cachedToken: AssemblyAI.Token?
+    private let urlSession: URLSession
+    private let tokens: Tokens
+    private var dictation: Dictation
+    private var records: [Int: Transcription] = [:]
+    private var queued: [Int: SpeechStream] = [:]
+    private var sockets: [Int: Socket] = [:]
+    private var alarm: (at: ContinuousClock.Instant, task: Task<Void, Never>)?
 
     init(configuration: Configuration = .current) {
+        let urlSession = URLSession(configuration: .default)
         self.configuration = configuration
+        self.urlSession = urlSession
+        tokens = Tokens(key: configuration.key, url: configuration.endpoints.token, urlSession: urlSession)
+        dictation = Dictation(limits: configuration.limits)
     }
 
-    func transcribe(_ speech: SpeechStream) -> Transcription {
-        sessionCount += 1
-        let transcription = Transcription(number: sessionCount)
-        transcription.session = Task { await run(transcription, speech) }
-        return transcription
+    func warm() {
+        handle(.panel(open: true))
     }
 
-    private func run(_ transcription: Transcription, _ speech: SpeechStream) async {
-        let session = transcription.number
-        let began = transcription.began
-        var stage = Stage.minting
-        var socket: URLSessionWebSocketTask?
-        defer { socket?.cancel(with: .normalClosure, reason: nil) }
-        defer { transcription.fail(.transport("the session ended without a final")) }
-        do {
-            var credential = try await token()
-            stage = .connecting
-            var task = open(credential.value)
-            socket = task
-            do {
-                try await awaitBegin(on: task)
-            } catch {
-                let failure = AssemblyAI.Failure(error, closeCode: task.closeCode.rawValue, closeReason: task.closeReason)
-                guard credential.reused, failure.isExpiredToken else { throw error }
-                cachedToken = nil
-                task.cancel(with: .normalClosure, reason: nil)
-                logger.notice("transcription retry session=\(session) reason=expiredToken")
-                stage = .minting
-                credential = try await token()
-                stage = .connecting
-                task = open(credential.value)
-                socket = task
-                try await awaitBegin(on: task)
-            }
-            logger.notice("""
-                transcription opened session=\(session) token=\(credential.reused ? "reused" : "minted", privacy: .public) \
-                after=\(began.duration(to: .now) / .seconds(1), format: .fixed(precision: 3))
-                """)
+    func cool() {
+        handle(.panel(open: false))
+    }
 
-            transcription.ledger = AssemblyAI.Ledger(began: .now)
-            stage = .streaming
-            let live = task
-            let listening = Task { try await listen(on: live, into: transcription) }
-            let sent = try await speak(speech, on: live, counting: transcription)
+    func press(_ speech: SpeechStream) -> Transcription {
+        let (press, effects) = dictation.press(at: .now)
+        queued[press.hold] = speech
+        let record = records[press.utterance] ?? Transcription(number: press.utterance)
+        records[press.utterance] = record
+        run(effects)
+        return record
+    }
 
-            let drainEnds: ContinuousClock.Instant
-            switch transcription.finish() {
-            case .endpoint:
-                stage = .finishing
-                try await send(.forceEndpoint, on: live, settlingAt: .now + AssemblyAI.Ledger.answerLimit, for: transcription)
-                stage = .closing
-                try await live.send(.string(AssemblyAI.Control.terminate.rawValue))
-                drainEnds = .now + drainLimit
-            case .terminate:
-                stage = .closing
-                drainEnds = .now + drainLimit
-                try await send(.terminate, on: live, settlingAt: drainEnds, for: transcription)
-            }
-            let serverSeconds = try await within(ContinuousClock.now.duration(to: drainEnds), cancelling: live) { try await listening.value }
-            logger.notice("""
-                transcription ended session=\(session) sent=\(sent.seconds, format: .fixed(precision: 3)) \
-                frames=\(sent.frames) server=\(serverSeconds, format: .fixed(precision: 3)) \
-                after=\(began.duration(to: .now) / .seconds(1), format: .fixed(precision: 3))
-                """)
-        } catch {
-            if stage == .minting || stage == .connecting { cachedToken = nil }
-            let failure = AssemblyAI.Failure(error, closeCode: socket?.closeCode.rawValue ?? 0, closeReason: socket?.closeReason)
-            logger.log(
-                level: failure == .noAPIKey ? .default : .error,
-                "transcription failed session=\(session) stage=\(stage.rawValue, privacy: .public) \(failure.logFields, privacy: .public)"
+    func release() {
+        handle(.release)
+    }
+
+    func close() async {
+        handle(.close)
+        for socket in Array(sockets.values) { await socket.finished() }
+    }
+
+    private func handle(_ event: Dictation.Event) {
+        run(dictation.handle(event, at: .now))
+    }
+
+    private func run(_ effects: [Dictation.Effect]) {
+        for effect in effects { perform(effect) }
+        for (number, record) in records {
+            if let words = dictation.words(of: number) { record.shown = .hearing(words) }
+        }
+        rearm()
+    }
+
+    private func perform(_ effect: Dictation.Effect) {
+        switch effect {
+        case .connect(let session, let cause):
+            logger.notice("transcription connecting session=\(session) cause=\(cause.rawValue, privacy: .public)")
+            let socket = Socket(
+                number: session,
+                report: { [weak self] in self?.handle($0) },
+                gone: { [weak self] in self?.sockets[session] = nil }
             )
-            transcription.fail(failure)
+            sockets[session] = socket
+            socket.start(tokens: tokens, urlSession: urlSession, endpoints: configuration.endpoints)
+        case .stream(let hold, let utterance, let session):
+            if let speech = queued.removeValue(forKey: hold) { sockets[session]?.stream(speech, hold: hold, utterance: utterance) }
+        case .finishing(let session, let utterance, let plan, let lag):
+            let (name, wait) = switch plan {
+            case .endpoint: ("endpoint", Duration.zero)
+            case .wait(let wait): ("wait", wait)
+            }
+            logger.notice("""
+                transcription finishing session=\(session) utterance=\(utterance) plan=\(name, privacy: .public) \
+                wait=\(milliseconds(wait), privacy: .public) lag=\(lag.map(milliseconds) ?? "none", privacy: .public)
+                """)
+        case .endpoint(let session):
+            sockets[session]?.endpoint()
+        case .close(let session, let reason):
+            sockets[session]?.close(reason)
+        case .heard(let session, let utterance?, let turn):
+            logger.debug("""
+                heard session=\(session) utterance=\(utterance) turn=\(turn.order) formatted=\(turn.isFormatted) \
+                end=\(turn.endsTurn) text=\(turn.text, privacy: .public)
+                """)
+        case .heard(let session, nil, let turn):
+            logger.notice("""
+                transcription late session=\(session) turn=\(turn.order) formatted=\(turn.isFormatted) \
+                end=\(turn.endsTurn) text=\(turn.text, privacy: .public)
+                """)
+        case .final(let session, let utterance, let final, let via):
+            logger.notice("""
+                transcription final session=\(number(session), privacy: .public) utterance=\(utterance) \
+                via=\(via.rawValue, privacy: .public) after=\(self.after(utterance), privacy: .public) text=\(words(final), privacy: .public)
+                """)
+        case .deliver(let session, let utterance, let final, let spans):
+            logger.notice("""
+                transcription delivered session=\(number(session), privacy: .public) utterance=\(utterance) \
+                holds=\(spans.count) after=\(self.after(utterance), privacy: .public) text=\(words(final), privacy: .public)
+                """)
+            for span in spans { queued[span.hold] = nil }
+            records.removeValue(forKey: utterance)?.deliver(final)
         }
     }
 
-    private func send(
-        _ control: AssemblyAI.Control,
-        on socket: URLSessionWebSocketTask,
-        settlingAt deadline: ContinuousClock.Instant,
-        for transcription: Transcription
-    ) async throws {
-        let fallback = Task {
-            try await Task.sleep(until: deadline)
-            transcription.settle()
+    private func rearm() {
+        let deadline = dictation.deadline
+        guard deadline != alarm?.at else { return }
+        alarm?.task.cancel()
+        alarm = deadline.map { at in
+            (at, Task { [weak self] in
+                try? await Task.sleep(until: at)
+                guard !Task.isCancelled, let self else { return }
+                alarm = nil
+                handle(.tick)
+            })
         }
-        try await socket.send(.string(control.rawValue))
-        _ = await transcription.delivered
-        fallback.cancel()
     }
 
-    private func open(_ token: String) -> URLSessionWebSocketTask {
-        let task = urlSession.webSocketTask(with: configuration.endpoints.socketURL(token: token, sampleRate: sampleRate))
-        task.resume()
-        return task
+    private func after(_ utterance: Int) -> String {
+        records[utterance].map { String(format: "%.3f", $0.began.duration(to: .now) / .seconds(1)) } ?? "none"
+    }
+}
+
+private func milliseconds(_ duration: Duration) -> String {
+    String(Int((duration / .milliseconds(1)).rounded()))
+}
+
+private func number(_ session: Int?) -> String {
+    session.map(String.init) ?? "none"
+}
+
+private func words(_ final: AssemblyAI.Final) -> String {
+    if case .heard(let text) = final { text } else { "" }
+}
+
+private final class Socket {
+    private enum Stage: String { case minting, connecting, open, closing }
+
+    private let number: Int
+    private let report: (Dictation.Event) -> Void
+    private let gone: () -> Void
+    private let started = ContinuousClock.now
+    private var stage = Stage.minting
+    private var opened = false
+    private var failed = false
+    private var drainExpired = false
+    private var task: URLSessionWebSocketTask?
+    private var life: Task<Void, Never>?
+    private var pump: Task<Void, Never>?
+    private var drain: Task<Void, Never>?
+    private var bytes = 0
+    private var frames = 0
+    private var utterances: Set<Int> = []
+
+    init(number: Int, report: @escaping (Dictation.Event) -> Void, gone: @escaping () -> Void) {
+        self.number = number
+        self.report = report
+        self.gone = gone
     }
 
-    private func token() async throws -> (value: String, reused: Bool) {
-        if let cached = cachedToken, cached.isUsable(at: .now) { return (cached.value, true) }
-        guard let key = configuration.key else { throw AssemblyAI.Failure.noAPIKey }
+    func start(tokens: Tokens, urlSession: URLSession, endpoints: AssemblyAI.Endpoints) {
+        life = Task {
+            defer { gone() }
+            do {
+                var credential = try await tokens.current()
+                try Task.checkCancellation()
+                stage = .connecting
+                var socket = open(credential.value, urlSession: urlSession, endpoints: endpoints)
+                do {
+                    try await awaitBegin(on: socket)
+                } catch {
+                    let failure = AssemblyAI.Failure(error, closeCode: socket.closeCode.rawValue, closeReason: socket.closeReason)
+                    guard credential.reused, failure.isExpiredToken, !Task.isCancelled else { throw error }
+                    tokens.forget()
+                    socket.cancel(with: .normalClosure, reason: nil)
+                    logger.notice("transcription retry session=\(self.number) reason=expiredToken")
+                    stage = .minting
+                    credential = try await tokens.current()
+                    try Task.checkCancellation()
+                    stage = .connecting
+                    socket = open(credential.value, urlSession: urlSession, endpoints: endpoints)
+                    try await awaitBegin(on: socket)
+                }
+                try Task.checkCancellation()
+                logger.notice("""
+                    transcription opened session=\(self.number) token=\(credential.reused ? "reused" : "minted", privacy: .public) \
+                    after=\(self.started.duration(to: .now) / .seconds(1), format: .fixed(precision: 3))
+                    """)
+                stage = .open
+                opened = true
+                report(.began(session: number))
+                let serverSeconds = try await listen(on: socket)
+                guard stage == .closing else { throw AssemblyAI.Failure.transport("the server ended the session") }
+                drain?.cancel()
+                logger.notice("""
+                    transcription ended session=\(self.number) sent=\(Double(self.bytes) / Double(sampleRate * 2), format: .fixed(precision: 3)) \
+                    frames=\(self.frames) server=\(serverSeconds, format: .fixed(precision: 3)) \
+                    after=\(self.started.duration(to: .now) / .seconds(1), format: .fixed(precision: 3)) utterances=\(self.utterances.count)
+                    """)
+            } catch {
+                if !opened, stage != .closing { tokens.forget() }
+                fail(error)
+            }
+        }
+    }
+
+    func stream(_ speech: SpeechStream, hold: Int, utterance: Int) {
+        guard let task else { return }
+        utterances.insert(utterance)
+        pump = Task {
+            var framer = AssemblyAI.Framer(sampleRate: sampleRate)
+            do {
+                for await pcm in speech {
+                    for frame in framer.take(pcm) { try await send(frame, on: task) }
+                }
+                if let tail = framer.finish() { try await send(tail, on: task) }
+                try Task.checkCancellation()
+                report(.streamed(session: number, hold: hold))
+            } catch is CancellationError {
+            } catch {
+                fail(error)
+            }
+        }
+    }
+
+    func endpoint() {
+        guard let task else { return }
+        Task {
+            do { try await task.send(.string(AssemblyAI.Control.forceEndpoint.rawValue)) } catch { fail(error) }
+        }
+    }
+
+    func close(_ reason: Dictation.Close) {
+        guard stage != .closing else { return }
+        logger.notice("transcription closing session=\(self.number) reason=\(reason.rawValue, privacy: .public)")
+        let wasOpen = stage == .open
+        stage = .closing
+        pump?.cancel()
+        guard wasOpen, let task else {
+            life?.cancel()
+            task?.cancel(with: .normalClosure, reason: nil)
+            return
+        }
+        Task {
+            do { try await task.send(.string(AssemblyAI.Control.terminate.rawValue)) } catch { fail(error) }
+        }
+        drain = Task {
+            try? await Task.sleep(for: drainLimit)
+            guard !Task.isCancelled else { return }
+            drainExpired = true
+            task.cancel(with: .goingAway, reason: nil)
+        }
+    }
+
+    func finished() async {
+        await life?.value
+    }
+
+    private func open(_ token: String, urlSession: URLSession, endpoints: AssemblyAI.Endpoints) -> URLSessionWebSocketTask {
+        let socket = urlSession.webSocketTask(with: endpoints.socketURL(token: token, sampleRate: sampleRate))
+        socket.resume()
+        task = socket
+        return socket
+    }
+
+    private func send(_ frame: Data, on task: URLSessionWebSocketTask) async throws {
+        try Task.checkCancellation()
+        try await task.send(.data(frame))
+        bytes += frame.count
+        frames += 1
+        report(.sent(session: number, audio: .microseconds(frame.count * 1_000_000 / (sampleRate * 2))))
+    }
+
+    private func listen(on socket: URLSessionWebSocketTask) async throws -> Double {
+        while true {
+            switch AssemblyAI.ServerEvent(json: try await socket.receive().payload) {
+            case .turn(let turn):
+                report(.heard(session: number, turn))
+            case .terminated(let audioSeconds):
+                return audioSeconds
+            case .error(let code, let reason):
+                throw AssemblyAI.Failure.serverError(code: code, reason: reason)
+            case .malformed(let type):
+                logger.error("transcription ignored session=\(self.number) malformed=\(type ?? "not JSON", privacy: .public)")
+            case .began, .ignored:
+                break
+            }
+        }
+    }
+
+    private func fail(_ error: any Error) {
+        guard !failed else { return }
+        failed = true
+        let failure = AssemblyAI.Failure(
+            drainExpired ? AssemblyAI.Failure.timedOut : error,
+            closeCode: task?.closeCode.rawValue ?? 0, closeReason: task?.closeReason
+        )
+        pump?.cancel()
+        drain?.cancel()
+        task?.cancel(with: .normalClosure, reason: nil)
+        guard opened || stage != .closing else { return }
+        logger.log(
+            level: failure == .noAPIKey ? .default : .error,
+            "transcription failed session=\(self.number) stage=\(self.stage.rawValue, privacy: .public) \(failure.logFields, privacy: .public)"
+        )
+        if stage != .closing { report(.failed(session: number, failure)) }
+    }
+}
+
+private final class Tokens {
+    private let key: String?
+    private let url: URL
+    private let urlSession: URLSession
+    private var cached: AssemblyAI.Token?
+
+    init(key: String?, url: URL, urlSession: URLSession) {
+        self.key = key
+        self.url = url
+        self.urlSession = urlSession
+    }
+
+    func current() async throws -> (value: String, reused: Bool) {
+        if let cached, cached.isUsable(at: .now) { return (cached.value, true) }
+        guard let key else { throw AssemblyAI.Failure.noAPIKey }
         let sentAt = ContinuousClock.now
-        let (body, response) = try await urlSession.data(for: AssemblyAI.tokenRequest(key: key, at: configuration.endpoints.token))
+        let (body, response) = try await urlSession.data(for: AssemblyAI.tokenRequest(key: key, at: url))
         let minted = try AssemblyAI.token(status: (response as? HTTPURLResponse)?.statusCode ?? 0, body: body, mintedAt: sentAt)
-        cachedToken = minted
+        cached = minted
         return (minted.value, false)
+    }
+
+    func forget() {
+        cached = nil
     }
 }
 
@@ -235,48 +416,6 @@ private func awaitBegin(on socket: URLSessionWebSocketTask) async throws {
         default: throw AssemblyAI.Failure.transport("the first message was not Begin")
         }
     }
-}
-
-private func listen(on socket: URLSessionWebSocketTask, into transcription: Transcription) async throws -> Double {
-    let session = transcription.number
-    do {
-        while true {
-            switch AssemblyAI.ServerEvent(json: try await socket.receive().payload) {
-            case .turn(let turn):
-                logger.debug("heard session=\(session) turn=\(turn.order) formatted=\(turn.isFormatted) end=\(turn.endsTurn) text=\(turn.text, privacy: .public)")
-                transcription.hear(turn)
-            case .terminated(let audioSeconds):
-                transcription.terminated()
-                return audioSeconds
-            case .error(let code, let reason):
-                throw AssemblyAI.Failure.serverError(code: code, reason: reason)
-            case .malformed(let type):
-                logger.error("transcription ignored session=\(session) malformed=\(type ?? "not JSON", privacy: .public)")
-            case .began, .ignored:
-                break
-            }
-        }
-    } catch {
-        transcription.fail(AssemblyAI.Failure(error, closeCode: socket.closeCode.rawValue, closeReason: socket.closeReason))
-        throw error
-    }
-}
-
-private func speak(_ speech: SpeechStream, on socket: URLSessionWebSocketTask, counting transcription: Transcription) async throws -> (seconds: Double, frames: Int) {
-    var framer = AssemblyAI.Framer(sampleRate: sampleRate)
-    var bytes = 0
-    var frames = 0
-    func send(_ frame: Data) async throws {
-        try await socket.send(.data(frame))
-        bytes += frame.count
-        frames += 1
-        transcription.ledger?.sent(.microseconds(frame.count * 1_000_000 / (sampleRate * 2)), at: .now)
-    }
-    for await pcm in speech {
-        for frame in framer.take(pcm) { try await send(frame) }
-    }
-    if let tail = framer.finish() { try await send(tail) }
-    return (Double(bytes) / Double(sampleRate * 2), frames)
 }
 
 // A timeout cancels the socket, because that, not task cancellation, is what
