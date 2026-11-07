@@ -108,6 +108,7 @@ swiftc -o "$DERIVED/fake-assemblyai" scripts/fake-assemblyai.swift >/dev/null \
         scripts/transcription-check.swift >/dev/null \
     && "$DERIVED/transcription-check" "$DERIVED/fake-assemblyai" || failures=$((failures + 1))
 
+idle_seconds=8
 fake_answer_delay=1.0
 fake_ports="$DERIVED/fake-assemblyai.ports"
 fake_capture="$DERIVED/fake-assemblyai.pcm"
@@ -123,7 +124,7 @@ while [[ ! -s "$fake_ports" ]] && (( SECONDS < deadline )); do sleep 0.1; done
 if [[ -s "$fake_ports" ]]; then
     read -r token_field socket_field < "$fake_ports"
     open -a "$APP" --args -AssemblyAITokenURL "${token_field#token=}" \
-        -AssemblyAISocketURL "${socket_field#socket=}" -AssemblyAIAPIKey fake
+        -AssemblyAISocketURL "${socket_field#socket=}" -AssemblyAIAPIKey fake -AssemblyAIIdleSeconds "$idle_seconds"
 else
     echo "  FAIL the fake AssemblyAI never wrote its ports"
     failures=$((failures + 1))
@@ -184,7 +185,7 @@ else
 fi
 
 echo "hold to talk"
-swift "$(dirname "$0")/hold-to-talk-check.swift" "$app_pid" ${fake_capture:+"$fake_capture" "$fake_scenario"} \
+swift "$(dirname "$0")/hold-to-talk-check.swift" "$app_pid" ${fake_capture:+"$fake_capture" "$fake_scenario" "$idle_seconds"} \
     || failures=$((failures + 1))
 check_focus_kept "focus still behind after using the panel" "$front_before" "$(frontmost)"
 
@@ -241,6 +242,19 @@ echo "  info corners and shadow: $DERIVED/shots/panel.png"
 # Tear down by quitting with the panel still open, which is the path that
 # strands the pin if applicationWillTerminate does not release it.
 swift "$(dirname "$0")/menu-bar-tracking-check.swift" quit "$app_pid" || failures=$((failures + 1))
+
+echo "session on quit"
+quit_log="$(log show --last 2m --style syslog --predicate \
+    "processIdentifier == $app_pid AND subsystem == \"my.rooftop.sherpa\" AND category == \"transcription\"" 2>/dev/null)"
+quit_session="$(grep -o 'transcription closing session=[0-9]* reason=quit' <<<"$quit_log" | grep -o 'session=[0-9]*' | tail -1)"
+if [[ -n "$quit_session" ]]; then
+    echo "  ok   quitting closed the open session, $quit_session"
+    check "the session read to its Termination before the app exited" "yes" \
+        "$(grep -q "transcription ended $quit_session " <<<"$quit_log" && echo yes || echo no)"
+elif [[ -n "$fake_capture" ]]; then
+    echo "  skip session on quit: no session was open at quit, the last lines were:"
+    grep -o 'transcription [a-z]* session=[0-9]*[^"]*' <<<"$quit_log" | tail -3 | sed 's/^/    /'
+fi
 pkill -f "$DERIVED" 2>/dev/null
 if [[ $failures -eq 0 ]]; then echo "all checks passed"; else echo "$failures check(s) failed"; fi
 exit $failures
