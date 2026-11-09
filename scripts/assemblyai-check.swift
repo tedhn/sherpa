@@ -29,7 +29,7 @@ enum AssemblyAICheck {
     static func main() {
         let url = AssemblyAI.Endpoints.production.socketURL(token: "abc.123-x", sampleRate: 16_000)
         expect(
-            url.absoluteString == "wss://streaming.assemblyai.com/v3/ws?sample_rate=16000&encoding=pcm_s16le&format_turns=true&speech_model=universal-streaming-english&token=abc.123-x",
+            url.absoluteString == "wss://streaming.assemblyai.com/v3/ws?sample_rate=16000&encoding=pcm_s16le&format_turns=true&speech_model=universal-streaming-english&end_of_turn_confidence_threshold=1&min_end_of_turn_silence_when_confident=10000&max_turn_silence=10000&token=abc.123-x",
             "the socket URL carries every query parameter in order, got \(url.absoluteString)"
         )
 

@@ -17,6 +17,11 @@ nonisolated enum AssemblyAI {
                 URLQueryItem(name: "encoding", value: "pcm_s16le"),
                 URLQueryItem(name: "format_turns", value: "true"),
                 URLQueryItem(name: "speech_model", value: "universal-streaming-english"),
+                // The hold ends an utterance, not a pause. With the defaults the server ended
+                // "Open the." on its own between two merged holds, before any ForceEndpoint.
+                URLQueryItem(name: "end_of_turn_confidence_threshold", value: "1"),
+                URLQueryItem(name: "min_end_of_turn_silence_when_confident", value: "10000"),
+                URLQueryItem(name: "max_turn_silence", value: "10000"),
                 URLQueryItem(name: "token", value: token),
             ]
             return components.url!

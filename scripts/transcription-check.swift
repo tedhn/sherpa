@@ -685,7 +685,8 @@ enum TranscriptionCheck {
         }
         if case .heard(let sentence) = outcome.final {
             expect(letters(sentence) == "openthesettingspagethenclickthebluebuttonatthetop", "live: the delivery is both sentences, got '\(sentence)'")
-            expect(sentence.first?.isUppercase == true && sentence.hasSuffix(".") && sentence.contains(". "), "live: punctuated as two sentences, got '\(sentence)'")
+            // One hold is one turn, so the server may join the two sentences with a comma.
+            expect(sentence.first?.isUppercase == true && sentence.hasSuffix("."), "live: punctuated, got '\(sentence)'")
         } else {
             expect(false, "live: the delivery is both sentences, got \(outcome.final)")
         }
