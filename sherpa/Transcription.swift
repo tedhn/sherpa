@@ -166,7 +166,7 @@ final class Transcriber {
                 transcription final session=\(number(session), privacy: .public) utterance=\(utterance) \
                 via=\(via.rawValue, privacy: .public) after=\(self.after(utterance), privacy: .public) text=\(words(final), privacy: .public)
                 """)
-        case .deliver(let session, let utterance, let final, let spans):
+        case .deliver(let session, let utterance, let final, _, let spans):
             logger.notice("""
                 transcription delivered session=\(number(session), privacy: .public) utterance=\(utterance) \
                 holds=\(spans.count) after=\(self.after(utterance), privacy: .public) text=\(words(final), privacy: .public)

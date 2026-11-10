@@ -110,7 +110,7 @@ enum DictationCheck {
             [
                 .heard(session: 1, utterance: 1, answer),
                 .final(session: 1, utterance: 1, sentence, via: .endpoint),
-                .deliver(session: 1, utterance: 1, sentence, spans: [span(1, 2000, 4000)]),
+                .deliver(session: 1, utterance: 1, sentence, via: .endpoint, spans: [span(1, 2000, 4000)]),
             ],
             "the formatted end answers, and the utterance is delivered once"
         )
@@ -146,7 +146,7 @@ enum DictationCheck {
             [
                 .heard(session: 1, utterance: 1, end),
                 .final(session: 1, utterance: 1, whole, via: .endpoint),
-                .deliver(session: 1, utterance: 1, whole, spans: [span(1, 2000, 4000), span(2, 4800, 6300)]),
+                .deliver(session: 1, utterance: 1, whole, via: .endpoint, spans: [span(1, 2000, 4000), span(2, 4800, 6300)]),
             ],
             "one answer delivers one sentence carrying both holds"
         )
@@ -164,7 +164,7 @@ enum DictationCheck {
             [
                 .heard(session: 1, utterance: 1, answer),
                 .final(session: 1, utterance: 1, sentence, via: .endpoint),
-                .deliver(session: 1, utterance: 1, sentence, spans: [span(1, 2000, 4000)]),
+                .deliver(session: 1, utterance: 1, sentence, via: .endpoint, spans: [span(1, 2000, 4000)]),
                 .stream(hold: 2, utterance: 2, session: 1),
             ],
             "the answer delivers utterance 1 before the new hold streams"
@@ -192,7 +192,7 @@ enum DictationCheck {
             [
                 .heard(session: 1, utterance: 1, answer),
                 .final(session: 1, utterance: 1, sentence, via: .endpoint),
-                .deliver(session: 1, utterance: 1, sentence, spans: [span(1, 2000, 4000)]),
+                .deliver(session: 1, utterance: 1, sentence, via: .endpoint, spans: [span(1, 2000, 4000)]),
                 .stream(hold: 2, utterance: 2, session: 1),
             ],
             "the late answer settles and delivers utterance 1 at once, then utterance 2 streams"
@@ -216,7 +216,7 @@ enum DictationCheck {
             [
                 .heard(session: 1, utterance: 1, caughtUp),
                 .final(session: 1, utterance: 1, sentence, via: .endpoint),
-                .deliver(session: 1, utterance: 1, sentence, spans: [span(1, 0, 2500)]),
+                .deliver(session: 1, utterance: 1, sentence, via: .endpoint, spans: [span(1, 0, 2500)]),
                 .stream(hold: 2, utterance: 2, session: 1),
             ],
             "then utterance 1 delivers and utterance 2 streams"
@@ -264,7 +264,7 @@ enum DictationCheck {
             dictation.handle(.tick, at: at(7800)),
             [
                 .final(session: 1, utterance: 1, .heard("Open the"), via: .fallback),
-                .deliver(session: 1, utterance: 1, .heard("Open the"), spans: [span(1, 2000, 4000)]),
+                .deliver(session: 1, utterance: 1, .heard("Open the"), via: .fallback, spans: [span(1, 2000, 4000)]),
                 .close(session: 1, reason: .retire),
                 .connect(session: 2, cause: .panel),
             ],
@@ -278,7 +278,7 @@ enum DictationCheck {
             closed.handle(.tick, at: at(7800)),
             [
                 .final(session: 1, utterance: 1, .heard("Open the"), via: .fallback),
-                .deliver(session: 1, utterance: 1, .heard("Open the"), spans: [span(1, 2000, 4000)]),
+                .deliver(session: 1, utterance: 1, .heard("Open the"), via: .fallback, spans: [span(1, 2000, 4000)]),
                 .close(session: 1, reason: .retire),
             ],
             "with the panel closed, no new socket"
@@ -294,7 +294,7 @@ enum DictationCheck {
         _ = held.press(at: at(2000))
         same(
             held.handle(.failed(session: 1, dropped), at: at(2500)),
-            [.final(session: 1, utterance: 1, .failed(dropped), via: .failure), .deliver(session: 1, utterance: 1, .failed(dropped), spans: [span(1, 2000, nil)])],
+            [.final(session: 1, utterance: 1, .failed(dropped), via: .failure), .deliver(session: 1, utterance: 1, .failed(dropped), via: .failure, spans: [span(1, 2000, nil)])],
             "a failure while held delivers the failure, with no reconnect"
         )
         same(held.handle(.failed(session: 1, dropped), at: at(2600)), [], "a second report of the same failure changes nothing")
@@ -305,7 +305,7 @@ enum DictationCheck {
         _ = answering.handle(.tick, at: at(5000))
         same(
             answering.handle(.failed(session: 1, dropped), at: at(5100)),
-            [.final(session: 1, utterance: 1, .failed(dropped), via: .failure), .deliver(session: 1, utterance: 1, .failed(dropped), spans: [span(1, 2000, 4000)])],
+            [.final(session: 1, utterance: 1, .failed(dropped), via: .failure), .deliver(session: 1, utterance: 1, .failed(dropped), via: .failure, spans: [span(1, 2000, 4000)])],
             "a failure before the answer delivers the failure"
         )
 
@@ -316,7 +316,7 @@ enum DictationCheck {
             queued.handle(.failed(session: 1, dropped), at: at(6100)),
             [
                 .final(session: 1, utterance: 1, .failed(dropped), via: .failure),
-                .deliver(session: 1, utterance: 1, .failed(dropped), spans: [span(1, 2000, 4000)]),
+                .deliver(session: 1, utterance: 1, .failed(dropped), via: .failure, spans: [span(1, 2000, 4000)]),
                 .connect(session: 2, cause: .carry),
             ],
             "a hold that never reached the failed socket carries to a new one"
@@ -333,7 +333,7 @@ enum DictationCheck {
         _ = connecting.handle(.release, at: at(3000))
         same(
             connecting.handle(.failed(session: 1, .timedOut), at: at(5000)),
-            [.final(session: 1, utterance: 1, .failed(.timedOut), via: .failure), .deliver(session: 1, utterance: 1, .failed(.timedOut), spans: [span(1, 0, 3000)])],
+            [.final(session: 1, utterance: 1, .failed(.timedOut), via: .failure), .deliver(session: 1, utterance: 1, .failed(.timedOut), via: .failure, spans: [span(1, 0, 3000)])],
             "a connect failure fails the hold that waited on it"
         )
         expect(connecting.deadline == nil, "and nothing is left to do")
@@ -408,7 +408,7 @@ enum DictationCheck {
         let connects = effects.filter { if case .connect = $0 { true } else { false } }
         expect(effects.filter { $0 == .endpoint(session: 1) }.count == 10, "one ForceEndpoint per utterance")
         let delivered = effects.compactMap { effect -> String? in
-            guard case .deliver(let session, let utterance, .heard(let text), let spans) = effect else { return nil }
+            guard case .deliver(let session, let utterance, .heard(let text), _, let spans) = effect else { return nil }
             return "\(session ?? 0)/\(utterance)/\(spans.count)/\(text)"
         }
         expect(connects == [.connect(session: 1, cause: .panel)], "ten utterances use the one warm connect, got \(connects)")
@@ -448,7 +448,7 @@ enum DictationCheck {
             up.handle(.close, at: at(4500)),
             [
                 .final(session: 1, utterance: 1, quit, via: .failure),
-                .deliver(session: 1, utterance: 1, quit, spans: [span(1, 2000, 4000)]),
+                .deliver(session: 1, utterance: 1, quit, via: .failure, spans: [span(1, 2000, 4000)]),
                 .close(session: 1, reason: .quit),
             ],
             "quit inside the merge window fails the utterance and closes the socket"
@@ -460,7 +460,7 @@ enum DictationCheck {
         let closed = AssemblyAI.Final.failed(.transport("Sherpa closed the session"))
         same(
             connecting.handle(.close, at: at(100)),
-            [.final(session: 1, utterance: 1, closed, via: .failure), .deliver(session: 1, utterance: 1, closed, spans: [span(1, 0, nil)]), .close(session: 1, reason: .quit)],
+            [.final(session: 1, utterance: 1, closed, via: .failure), .deliver(session: 1, utterance: 1, closed, via: .failure, spans: [span(1, 0, nil)]), .close(session: 1, reason: .quit)],
             "quit while connecting fails the waiting hold"
         )
         same(connecting.handle(.panel(open: true), at: at(200)), [.connect(session: 2, cause: .panel)], "the transcriber stays usable after a quit")
@@ -518,7 +518,7 @@ enum DictationCheck {
                     streaming[session] = nil
                 case .heard(let session, let utterance?, let turn):
                     foldedInto["\(session).\(turn.order)", default: []].insert(utterance)
-                case .deliver(_, let utterance, let final, _):
+                case .deliver(_, let utterance, let final, _, _):
                     deliveries[utterance, default: 0] += 1
                     if case .heard(let text) = final, !owned(text, by: utterance) {
                         problems.append("\(label): utterance \(utterance) delivered '\(text)' with a turn it does not own")
