@@ -152,7 +152,7 @@ final class LogTail: @unchecked Sendable {
         process.arguments = [
             "stream", "--level", "debug", "--style", "ndjson",
             "--predicate",
-            "subsystem == \"my.rooftop.sherpa\" AND (category == \"microphone\" OR category == \"transcription\")",
+            "subsystem == \"my.rooftop.sherpa\" AND (category == \"microphone\" OR category == \"transcription\" OR category == \"screenshot\")",
         ]
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
@@ -481,6 +481,67 @@ func checkTranscription(_ label: String, logged: Int, captureOffset: Int) {
     }
 }
 
+func checkScreenshots(logged: Int) {
+    guard capturePath != nil else { return }
+    let label = "plain hold screenshots"
+    guard let utterance = deliveries(in: tail.lines(after: logged)).first?.utterance else {
+        fail("\(label): no 'transcription delivered' line to follow")
+        return
+    }
+    let handoffPrefix = "transcription screenshots utterance=\(utterance) "
+    _ = wait(upTo: 5) { tail.lines(after: logged).contains { $0.hasPrefix(handoffPrefix) } }
+    let lines = tail.lines(after: logged)
+    guard let handoffAt = lines.firstIndex(where: { $0.hasPrefix(handoffPrefix) }) else {
+        fail("\(label): no '\(handoffPrefix)' line after the delivery")
+        return
+    }
+    let deliveredAt = lines.firstIndex { $0.hasPrefix("transcription delivered ") } ?? lines.count
+    let handoff = lines[handoffAt]
+    if deliveredAt < handoffAt {
+        print("  ok   \(label): the handoff followed the delivery: '\(handoff)'")
+    } else {
+        fail("\(label): the handoff '\(handoff)' came before the delivery, at lines \(handoffAt) and \(deliveredAt)")
+    }
+    if lines.contains(where: { $0.hasPrefix("screenshots failed reason=noAccess") }) {
+        print("  skip screenshots: allow Sherpa in System Settings > Privacy & Security > Screen Recording, then rerun")
+        if handoff == "\(handoffPrefix)displays=none" {
+            print("  ok   \(label): a denied capture still delivered, and the handoff read displays=none")
+        } else {
+            fail("\(label): with Screen Recording denied the handoff read '\(handoff)', expected '\(handoffPrefix)displays=none'")
+        }
+        return
+    }
+    let taken = lines.filter { $0.hasPrefix("screenshot taken ") }.map { line in
+        Dictionary(uniqueKeysWithValues: line.split(separator: " ").compactMap { pair -> (String, String)? in
+            let field = pair.split(separator: "=", maxSplits: 1)
+            return field.count == 2 ? (String(field[0]), String(field[1])) : nil
+        })
+    }
+    let screens = Set(NSScreen.screens.compactMap { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value })
+    let ids = taken.compactMap { $0["display"].flatMap(UInt32.init) }
+    if taken.count == screens.count {
+        print("  ok   \(label): \(taken.count) 'screenshot taken' line(s), one per screen")
+    } else {
+        fail("\(label): \(taken.count) 'screenshot taken' line(s) for \(screens.count) screen(s)")
+    }
+    if Set(ids) == screens, ids.count == taken.count {
+        print("  ok   \(label): the display ids are the NSScreenNumber set \(screens.sorted())")
+    } else {
+        fail("\(label): the display ids \(ids) are not the NSScreenNumber set \(screens.sorted())")
+    }
+    let longest = taken.compactMap { $0["pixels"]?.split(separator: "x").compactMap { Int($0) }.max() }
+    if longest.count == taken.count, longest.allSatisfy({ $0 <= 1280 }) {
+        print("  ok   \(label): every longer axis is at most 1280, got \(longest)")
+    } else {
+        fail("\(label): the longer axes \(longest) are not all at most 1280")
+    }
+    if handoff == "\(handoffPrefix)displays=\(screens.count)" {
+        print("  ok   \(label): the handoff read displays=\(screens.count)")
+    } else {
+        fail("\(label): the handoff read '\(handoff)', expected displays=\(screens.count)")
+    }
+}
+
 func panelWindows() -> String {
     driven("return count of windows")
 }
@@ -805,6 +866,7 @@ func idleClose(session: Int) {
 let warmed = warmFirst()
 let holdsBegan = tail.count
 hold("plain hold", .still)
+checkScreenshots(logged: holdsBegan)
 wait(0.5)
 hold("hold dragged off the control", .draggedOff)
 wait(0.5)
