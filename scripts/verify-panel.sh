@@ -124,17 +124,33 @@ echo ok > "$fake_scenario"
 "$DERIVED/fake-assemblyai" "$fake_ports" "$fake_capture" --answer-delay "$fake_answer_delay" \
     --scenario-file "$fake_scenario" >/dev/null &
 fake_pid=$!
-trap 'kill "$fake_pid" 2>/dev/null' EXIT
+swiftc -o "$DERIVED/fake-supabase" scripts/fake-supabase.swift >/dev/null || failures=$((failures + 1))
+fake_supabase_port="$DERIVED/fake-supabase.port"
+fake_archive="$DERIVED/fake-supabase-archive"
+rm -rf "$fake_supabase_port" "$fake_archive"
+"$DERIVED/fake-supabase" "$fake_supabase_port" "$fake_archive" >/dev/null &
+fake_supabase_pid=$!
+trap 'kill "$fake_pid" "$fake_supabase_pid" 2>/dev/null' EXIT
 deadline=$((SECONDS + 10))
-while [[ ! -s "$fake_ports" ]] && (( SECONDS < deadline )); do sleep 0.1; done
+while [[ ! -s "$fake_ports" || ! -s "$fake_supabase_port" ]] && (( SECONDS < deadline )); do sleep 0.1; done
+supabase_flags=(-SupabaseURL '')
+if [[ -s "$fake_supabase_port" ]]; then
+    supabase_flags=(-SupabaseURL "$(cat "$fake_supabase_port")" -SupabasePublishableKey fake)
+else
+    echo "  FAIL the fake Supabase never wrote its port"
+    failures=$((failures + 1))
+    fake_archive=""
+fi
 if [[ -s "$fake_ports" ]]; then
     read -r token_field socket_field < "$fake_ports"
     open -a "$APP" --args -AssemblyAITokenURL "${token_field#token=}" \
-        -AssemblyAISocketURL "${socket_field#socket=}" -AssemblyAIAPIKey fake -AssemblyAIIdleSeconds "$idle_seconds" -SupabaseURL ''
+        -AssemblyAISocketURL "${socket_field#socket=}" -AssemblyAIAPIKey fake -AssemblyAIIdleSeconds "$idle_seconds" \
+        "${supabase_flags[@]}"
 else
     echo "  FAIL the fake AssemblyAI never wrote its ports"
     failures=$((failures + 1))
     fake_capture=""
+    fake_archive=""
     open -a "$APP" --args -SupabaseURL ''
 fi
 app_pid=""
@@ -191,7 +207,7 @@ else
 fi
 
 echo "hold to talk"
-swift "$(dirname "$0")/hold-to-talk-check.swift" "$app_pid" ${fake_capture:+"$fake_capture" "$fake_scenario" "$idle_seconds"} \
+swift "$(dirname "$0")/hold-to-talk-check.swift" "$app_pid" ${fake_capture:+"$fake_capture" "$fake_scenario" "$idle_seconds" ${fake_archive:+"$fake_archive"}} \
     || failures=$((failures + 1))
 check_focus_kept "focus still behind after using the panel" "$front_before" "$(frontmost)"
 

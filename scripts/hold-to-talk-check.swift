@@ -9,6 +9,7 @@ guard let pid = arguments.first.flatMap(Int32.init) else {
 let capturePath = arguments.dropFirst().first
 let scenarioPath = arguments.dropFirst(2).first
 let idleSeconds = arguments.dropFirst(3).first.flatMap(Double.init)
+let archivePath = arguments.dropFirst(4).first
 
 var failures = 0
 
@@ -187,7 +188,7 @@ final class LogTail: @unchecked Sendable {
 
     func savedPath(after count: Int) -> String? {
         lock.withLock {
-            messages.dropFirst(count).first { $0.hasPrefix("wav saved") }
+            messages.dropFirst(count).last { $0.hasPrefix("wav saved") }
                 .flatMap { line in line.range(of: "path=").map { String(line[$0.upperBound...]) } }
         }
     }
@@ -380,7 +381,66 @@ func checkPanel(_ label: String, logged: Int, releasedAt: Date, holds: Int = 1) 
     } else {
         fail("\(label): the panel read '\(transcript())', expected '\(utterance.text)'")
     }
+    checkArchive(label, utterance, holds: holds, logged: logged)
     return utterance
+}
+
+var checkedRows: Set<String> = []
+
+func checkArchive(_ label: String, _ delivered: Delivered, holds: Int, logged: Int) {
+    guard let archivePath else { return }
+    let directory = URL(fileURLWithPath: archivePath)
+    func rows() -> [(name: String, row: [String: Any])] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: archivePath)) ?? [])
+            .filter { $0.hasSuffix(".json") && !checkedRows.contains($0) }
+            .compactMap { name in
+                let row = (try? Data(contentsOf: directory.appending(path: name)))
+                    .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                return row.flatMap { $0["final_text"] as? String == delivered.text ? (name, $0) : nil }
+            }
+    }
+    _ = wait(upTo: 3) { !rows().isEmpty }
+    let found = rows()
+    guard found.count == 1, let (name, row) = found.first else {
+        fail("\(label): expected one new archive row with final_text '\(delivered.text)', got \(found.count)")
+        return
+    }
+    checkedRows.insert(name)
+    print("  ok   \(label): the archive took one row for the delivered text")
+    if row["holds"] as? Int == holds {
+        print("  ok   \(label): the row counts \(holds) hold(s)")
+    } else {
+        fail("\(label): the row counts \(row["holds"] ?? "no") hold(s), expected \(holds)")
+    }
+    guard let audioPath = row["audio_path"] as? String,
+          let wav = FileManager.default.contents(atPath: directory.appending(path: audioPath).path)
+    else {
+        fail("\(label): the row's audio_path \(row["audio_path"] ?? "null") names no WAV in the archive")
+        return
+    }
+    let info = afinfo(directory.appending(path: audioPath).path)
+    let required = ["File type ID:   WAVE", "Data format:     1 ch,  16000 Hz, Int16", "audio data file offset: 44"]
+    let missing = required.filter { !info.contains($0) }
+    if missing.isEmpty {
+        print("  ok   \(label): \(audioPath) is PCM16 mono 16 kHz with a 44-byte header")
+    } else {
+        fail("\(label): afinfo on \(audioPath) lacked \(missing)")
+    }
+    let pcm = wav.dropFirst(44)
+    if row["audio_ms"] as? Int == pcm.count / 32 {
+        print("  ok   \(label): audio_ms is \(pcm.count / 32), the WAV's PCM at 32 bytes per ms")
+    } else {
+        fail("\(label): audio_ms is \(row["audio_ms"] ?? "null"), expected \(pcm.count / 32) from \(pcm.count) PCM bytes")
+    }
+    guard let lastPath = tail.savedPath(after: logged), let last = FileManager.default.contents(atPath: lastPath)?.dropFirst(44) else {
+        fail("\(label): could not read last-hold.wav to compare with the archive")
+        return
+    }
+    if holds == 1 ? pcm == last : pcm.suffix(last.count) == last {
+        print("  ok   \(label): the archived PCM \(holds == 1 ? "equals" : "ends with") last-hold.wav's \(last.count) bytes")
+    } else {
+        fail("\(label): the archived \(pcm.count) PCM bytes \(holds == 1 ? "differ from" : "do not end with") last-hold.wav's \(last.count) bytes")
+    }
 }
 
 func captureSize() -> Int {
