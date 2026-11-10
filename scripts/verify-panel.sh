@@ -93,6 +93,11 @@ swiftc -parse-as-library -o "$DERIVED/supabase-check" \
     scripts/supabase-check.swift >/dev/null \
     && "$DERIVED/supabase-check" || failures=$((failures + 1))
 
+echo "screenshot"
+swiftc -parse-as-library -o "$DERIVED/screenshot-check" \
+    sherpa/Screenshot.swift scripts/screenshot-check.swift >/dev/null \
+    && "$DERIVED/screenshot-check" || failures=$((failures + 1))
+
 echo "dictation"
 swiftc -parse-as-library -o "$DERIVED/dictation-check" \
     sherpa/AssemblyAI.swift sherpa/Dictation.swift scripts/dictation-check.swift >/dev/null \
