@@ -8,5 +8,9 @@
 	<string>$(ASSEMBLYAI_API_KEY)</string>
 	<key>ElevenLabsAPIKey</key>
 	<string>$(ELEVENLABS_API_KEY)</string>
+	<key>SupabasePublishableKey</key>
+	<string>$(SUPABASE_PUBLISHABLE_KEY)</string>
+	<key>SupabaseURL</key>
+	<string>$(SUPABASE_URL)</string>
 </dict>
 </plist>

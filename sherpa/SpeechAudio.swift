@@ -5,6 +5,7 @@ private nonisolated let logger = Logger(subsystem: "my.rooftop.sherpa", category
 
 nonisolated final class SpeechConverter {
     static let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true)!
+    static let bytesPerSecond = Int(format.sampleRate) * Int(format.streamDescription.pointee.mBytesPerFrame)
 
     private let converter: AVAudioConverter
     private let inputRate: Double

@@ -45,13 +45,20 @@ final class Transcriber {
         var key: String?
         var endpoints: AssemblyAI.Endpoints
         var limits = Dictation.Limits()
+        var archive: Supabase.Project? = nil
 
         static var current: Configuration {
-            let planted = (Bundle.main.object(forInfoDictionaryKey: "AssemblyAIAPIKey") as? String)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            func planted(_ name: String) -> String? {
+                let value = (Bundle.main.object(forInfoDictionaryKey: name) as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return value.isEmpty || value.hasPrefix("$(") ? nil : value
+            }
             var configuration = Configuration(
-                key: planted.isEmpty || planted.hasPrefix("$(") ? nil : planted,
-                endpoints: .production
+                key: planted("AssemblyAIAPIKey"),
+                endpoints: .production,
+                archive: planted("SupabaseURL").flatMap(URL.init(string:)).flatMap { url in
+                    planted("SupabasePublishableKey").map { Supabase.Project(url: url, key: $0) }
+                }
             )
             #if DEBUG
             let defaults = UserDefaults.standard
@@ -65,6 +72,10 @@ final class Transcriber {
                 configuration.limits.idle = .seconds(idle)
                 configuration.limits.idleWithPanelOpen = .seconds(idle)
             }
+            if let url = defaults.string(forKey: "SupabaseURL") {
+                let key = defaults.string(forKey: "SupabasePublishableKey") ?? configuration.archive?.key
+                configuration.archive = URL(string: url).flatMap { url in key.map { Supabase.Project(url: url, key: $0) } }
+            }
             #endif
             return configuration
         }
@@ -76,13 +87,17 @@ final class Transcriber {
     private var dictation: Dictation
     private var records: [Int: Transcription] = [:]
     private var queued: [Int: SpeechStream] = [:]
+    private var recorded: [Int: @Sendable () -> Data] = [:]
+    private var partials: [Int: [Supabase.Partial]] = [:]
     private var sockets: [Int: Socket] = [:]
     private var alarm: (at: ContinuousClock.Instant, task: Task<Void, Never>)?
+    private let archive: Archive?
 
     init(configuration: Configuration = .current) {
         let urlSession = URLSession(configuration: .default)
         self.configuration = configuration
         self.urlSession = urlSession
+        archive = configuration.archive.map { Archive(project: $0, urlSession: urlSession) }
         tokens = Tokens(key: configuration.key, url: configuration.endpoints.token, urlSession: urlSession)
         dictation = Dictation(limits: configuration.limits)
     }
@@ -95,9 +110,10 @@ final class Transcriber {
         handle(.panel(open: false))
     }
 
-    func press(_ speech: SpeechStream) -> Transcription {
+    func press(_ speech: SpeechStream, recorded: @escaping @Sendable () -> Data) -> Transcription {
         let (press, effects) = dictation.press(at: .now)
         queued[press.hold] = speech
+        self.recorded[press.hold] = recorded
         let record = records[press.utterance] ?? Transcription(number: press.utterance)
         records[press.utterance] = record
         run(effects)
@@ -152,6 +168,12 @@ final class Transcriber {
         case .close(let session, let reason):
             sockets[session]?.close(reason)
         case .heard(let session, let utterance?, let turn):
+            if let began = records[utterance]?.began {
+                partials[utterance, default: []].append(Supabase.Partial(
+                    sincePress: began.duration(to: .now),
+                    turn: turn.order, end: turn.endsTurn, text: turn.text
+                ))
+            }
             logger.debug("""
                 heard session=\(session) utterance=\(utterance) turn=\(turn.order) formatted=\(turn.isFormatted) \
                 end=\(turn.endsTurn) text=\(turn.text, privacy: .public)
@@ -166,13 +188,27 @@ final class Transcriber {
                 transcription final session=\(number(session), privacy: .public) utterance=\(utterance) \
                 via=\(via.rawValue, privacy: .public) after=\(self.after(utterance), privacy: .public) text=\(words(final), privacy: .public)
                 """)
-        case .deliver(let session, let utterance, let final, _, let spans):
+        case .deliver(let session, let utterance, let final, let via, let spans):
             logger.notice("""
                 transcription delivered session=\(number(session), privacy: .public) utterance=\(utterance) \
                 holds=\(spans.count) after=\(self.after(utterance), privacy: .public) text=\(words(final), privacy: .public)
                 """)
             for span in spans { queued[span.hold] = nil }
-            records.removeValue(forKey: utterance)?.deliver(final)
+            let record = records.removeValue(forKey: utterance)
+            let heard = partials.removeValue(forKey: utterance) ?? []
+            let recorders = spans.compactMap { recorded.removeValue(forKey: $0.hold) }
+            if let archive, let record {
+                let (now, instantNow) = (Date.now, ContinuousClock.now)
+                let wall = { (instant: ContinuousClock.Instant) in now - instant.duration(to: instantNow) / .seconds(1) }
+                let released = spans.last?.released
+                archive.keep(Supabase.Utterance(
+                    id: UUID(), started: wall(record.began),
+                    ending: released.map { .released(at: wall($0), finalAfter: $0.duration(to: instantNow)) } ?? .midHold(deliveredAt: now),
+                    holds: spans.count, final: final, via: via,
+                    partials: heard, pcm: recorders.reduce(into: Data()) { $0.append($1()) }
+                ), number: utterance)
+            }
+            record?.deliver(final)
         }
     }
 

@@ -51,9 +51,9 @@ final class AppState: ObservableObject {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             do throws(MicrophoneProblem) {
-                let (capture, speech) = try MicrophoneCapture.start()
+                let (capture, speech, recorded) = try MicrophoneCapture.start()
                 microphone = .listening(capture)
-                transcription = transcriber.press(speech)
+                transcription = transcriber.press(speech, recorded: recorded)
             } catch {
                 microphone = .failed(error)
             }

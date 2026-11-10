@@ -87,6 +87,12 @@ swiftc -parse-as-library -o "$DERIVED/assemblyai-check" \
     sherpa/AssemblyAI.swift scripts/assemblyai-check.swift >/dev/null \
     && "$DERIVED/assemblyai-check" || failures=$((failures + 1))
 
+echo "supabase"
+swiftc -parse-as-library -o "$DERIVED/supabase-check" \
+    sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Supabase.swift \
+    scripts/supabase-check.swift >/dev/null \
+    && "$DERIVED/supabase-check" || failures=$((failures + 1))
+
 echo "dictation"
 swiftc -parse-as-library -o "$DERIVED/dictation-check" \
     sherpa/AssemblyAI.swift sherpa/Dictation.swift scripts/dictation-check.swift >/dev/null \
@@ -104,7 +110,7 @@ app_swift_flags=(
 )
 swiftc -o "$DERIVED/fake-assemblyai" scripts/fake-assemblyai.swift >/dev/null \
     && swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/transcription-check" \
-        sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Transcription.swift \
+        sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Supabase.swift sherpa/Transcription.swift \
         scripts/transcription-check.swift >/dev/null \
     && "$DERIVED/transcription-check" "$DERIVED/fake-assemblyai" || failures=$((failures + 1))
 
@@ -124,12 +130,12 @@ while [[ ! -s "$fake_ports" ]] && (( SECONDS < deadline )); do sleep 0.1; done
 if [[ -s "$fake_ports" ]]; then
     read -r token_field socket_field < "$fake_ports"
     open -a "$APP" --args -AssemblyAITokenURL "${token_field#token=}" \
-        -AssemblyAISocketURL "${socket_field#socket=}" -AssemblyAIAPIKey fake -AssemblyAIIdleSeconds "$idle_seconds"
+        -AssemblyAISocketURL "${socket_field#socket=}" -AssemblyAIAPIKey fake -AssemblyAIIdleSeconds "$idle_seconds" -SupabaseURL ''
 else
     echo "  FAIL the fake AssemblyAI never wrote its ports"
     failures=$((failures + 1))
     fake_capture=""
-    open -a "$APP"
+    open -a "$APP" --args -SupabaseURL ''
 fi
 app_pid=""
 # A cold first launch from a fresh build location takes longer than any fixed

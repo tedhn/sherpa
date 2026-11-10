@@ -176,19 +176,19 @@ final class Bench {
         chunks.append(pcm.suffix(TapShape.converterTail))
 
         let (speech, continuation) = SpeechStream.makeStream(bufferingPolicy: .unbounded)
-        var record = prefill > 0 ? nil : transcriber.press(speech)
+        var record = prefill > 0 ? nil : transcriber.press(speech, recorded: { pcm })
         var shown: [AssemblyAI.Transcript.Shown] = []
         var terminated = false
         let began = ContinuousClock.now
         for (index, chunk) in chunks.enumerated() {
             try? await Task.sleep(until: began + .milliseconds(100 * index), clock: .continuous)
-            if record == nil, began.duration(to: .now) >= .seconds(prefill) { record = transcriber.press(speech) }
+            if record == nil, began.duration(to: .now) >= .seconds(prefill) { record = transcriber.press(speech, recorded: { pcm }) }
             during?(index)
             if case .terminated = continuation.yield(Data(chunk)) { terminated = true }
             if let record { shown.append(record.shown) }
         }
         continuation.finish()
-        let transcription = record ?? transcriber.press(speech)
+        let transcription = record ?? transcriber.press(speech, recorded: { pcm })
         transcriber.release()
         let releasedAt = ContinuousClock.now
         marker.notice("check released bytes=\(pcm.count)")
