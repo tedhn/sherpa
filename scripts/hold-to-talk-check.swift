@@ -763,6 +763,15 @@ func hold(_ label: String, _ kind: Hold) {
     }
     print("  ok   \(label): the device stopped after the mouse-up")
     let released = meterSamples(1).first
+    if kind == .still, requestsPath != nil {
+        wait(0.2)
+        let shown = reply()
+        if shown == "Asking Claude…" {
+            print("  ok   \(label): the reply reads 'Asking Claude…' right after the release, before the words are final")
+        } else {
+            fail("\(label): right after the release the reply read '\(shown)', expected 'Asking Claude…'")
+        }
+    }
 
     _ = wait(upTo: 2) { tail.summary(after: logged) != nil }
     guard let line = tail.summary(after: logged) else {

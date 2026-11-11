@@ -126,7 +126,8 @@ private extension ContentView {
 
     var replyLine: String {
         switch state.transcription?.reply {
-        case nil: ""
+        case nil:
+            if case .hearing = state.transcription?.shown, !state.microphone.isListening { "Asking Claude…" } else { "" }
         case .asking: "Asking Claude…"
         case .answered(let text): text
         case .failed(.noAPIKey): "No Anthropic key is set"
