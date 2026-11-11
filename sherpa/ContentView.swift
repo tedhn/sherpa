@@ -34,7 +34,8 @@ struct ContentView: View {
                 .font(.title3)
                 .foregroundStyle(.secondary)
 
-            Text(transcriptLine)
+            // reservesSpace keeps one line, not three, for an empty string, so the open panel would grow with the first words.
+            Text(transcriptLine.isEmpty ? " " : transcriptLine)
                 .font(.body)
                 .multilineTextAlignment(.center)
                 .lineLimit(3, reservesSpace: true)
