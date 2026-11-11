@@ -19,8 +19,18 @@ nonisolated struct FrameCounts: Sendable {
 // diagnostic even when it mutates main-actor state from the audio thread, and
 // a method on a nonisolated class warns.
 nonisolated final class TapReceiver: Sendable {
+    private struct Recording {
+        let converter: SpeechConverter
+        var pcm = Data()
+    }
+
     private let counts = OSAllocatedUnfairLock(initialState: FrameCounts())
     private let meter = OSAllocatedUnfairLock(initialState: LevelMeter())
+    private let recording: OSAllocatedUnfairLock<Recording>
+
+    init(converter: SpeechConverter) {
+        recording = OSAllocatedUnfairLock(uncheckedState: Recording(converter: converter))
+    }
 
     func receive(_ buffer: AVAudioPCMBuffer, at time: AVAudioTime) {
         let frames = Int(buffer.frameLength)
@@ -33,6 +43,7 @@ nonisolated final class TapReceiver: Sendable {
             return counts
         }
         meter.withLock { $0.hear(dBFS: dBFS, at: now) }
+        recording.withLockUnchecked { $0.pcm.append($0.converter.convert(buffer)) }
         logger.debug("buffer n=\(total.buffers) frames=\(frames) total=\(total.frames) dBFS=\(dBFS, format: .fixed(precision: 1))")
     }
 
@@ -40,6 +51,13 @@ nonisolated final class TapReceiver: Sendable {
 
     var level: BarFill {
         meter.withLock { $0 }.fill(at: .now)
+    }
+
+    func finishRecording() -> Data {
+        recording.withLockUnchecked { recording in
+            recording.pcm.append(recording.converter.finish())
+            return recording.pcm
+        }
     }
 }
 
@@ -57,6 +75,8 @@ private extension AVAudioPCMBuffer {
 }
 
 final class MicrophoneCapture {
+    private static let wavURL = URL.cachesDirectory.appending(components: "my.rooftop.sherpa", "last-hold.wav")
+
     private let engine: AVAudioEngine
     private let receiver: TapReceiver
     private let rate: Double
@@ -73,7 +93,11 @@ final class MicrophoneCapture {
             logger.notice("hold failed reason=noInputDevice")
             throw .noInputDevice
         }
-        let receiver = TapReceiver()
+        guard let converter = SpeechConverter(from: format) else {
+            logger.notice("hold failed reason=converter")
+            throw .engineFailed
+        }
+        let receiver = TapReceiver(converter: converter)
         // The tap delivers 100 to 400 ms per buffer whatever is asked, so ask
         // for the shortest.
         let tenthOfASecond = AVAudioFrameCount(format.sampleRate / 10)
@@ -110,5 +134,13 @@ final class MicrophoneCapture {
             rate=\(self.rate, format: .fixed(precision: 0)) \
             firstBuffer=\(firstBuffer, privacy: .public)
             """)
+        let wav = WAV.file(receiver.finishRecording())
+        do {
+            try FileManager.default.createDirectory(at: Self.wavURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try wav.write(to: Self.wavURL)
+            logger.notice("wav saved bytes=\(wav.count) path=\(Self.wavURL.path, privacy: .public)")
+        } catch {
+            logger.error("wav failed error=\(error.localizedDescription, privacy: .public)")
+        }
     }
 }

@@ -77,6 +77,11 @@ swiftc -parse-as-library -o "$DERIVED/level-meter-check" \
     sherpa/LevelMeter.swift scripts/level-meter-check.swift >/dev/null \
     && "$DERIVED/level-meter-check" || failures=$((failures + 1))
 
+echo "speech audio"
+swiftc -parse-as-library -o "$DERIVED/speech-audio-check" \
+    sherpa/SpeechAudio.swift scripts/speech-audio-check.swift >/dev/null \
+    && "$DERIVED/speech-audio-check" || failures=$((failures + 1))
+
 open -a "$APP"
 app_pid=""
 # A cold first launch from a fresh build location takes longer than any fixed
