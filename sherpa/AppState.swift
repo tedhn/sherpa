@@ -19,6 +19,7 @@ enum MicrophonePhase {
 @MainActor
 final class AppState: ObservableObject {
     @Published private(set) var microphone: MicrophonePhase = .ready
+    private let transcriber = Transcriber()
 
     func setHeld(_ held: Bool) {
         switch (held, microphone) {
@@ -35,7 +36,9 @@ final class AppState: ObservableObject {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             do throws(MicrophoneProblem) {
-                microphone = .listening(try MicrophoneCapture.start())
+                let (capture, speech) = try MicrophoneCapture.start()
+                microphone = .listening(capture)
+                Task { await transcriber.transcribe(speech) }
             } catch {
                 microphone = .failed(error)
             }

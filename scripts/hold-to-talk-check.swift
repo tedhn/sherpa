@@ -6,6 +6,7 @@ guard let pid = arguments.first.flatMap(Int32.init) else {
     print("  FAIL no process id given")
     exit(1)
 }
+let capturePath = arguments.dropFirst().first
 
 var failures = 0
 
@@ -142,7 +143,8 @@ final class LogTail: @unchecked Sendable {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/log")
         process.arguments = [
             "stream", "--level", "debug", "--style", "ndjson",
-            "--predicate", "subsystem == \"my.rooftop.sherpa\" AND category == \"microphone\"",
+            "--predicate",
+            "subsystem == \"my.rooftop.sherpa\" AND (category == \"microphone\" OR category == \"transcription\")",
         ]
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
@@ -183,6 +185,10 @@ final class LogTail: @unchecked Sendable {
                 .compactMap { fields(of: $0)["dBFS"] }
                 .max()
         }
+    }
+
+    func lines(after count: Int) -> [String] {
+        lock.withLock { Array(messages.dropFirst(count)) }
     }
 
     var count: Int { lock.withLock { messages.count } }
@@ -295,6 +301,48 @@ func checkWAV(_ label: String, _ kind: Hold, frames: Double, rate: Double, loude
     }
 }
 
+func captureSize() -> Int {
+    capturePath.flatMap { try? FileManager.default.attributesOfItem(atPath: $0)[.size] as? Int } ?? 0
+}
+
+func checkTranscription(_ label: String, logged: Int, captureOffset: Int) {
+    guard let capturePath else { return }
+    _ = wait(upTo: 8) {
+        tail.lines(after: logged).contains { $0.hasPrefix("transcription ended") || $0.hasPrefix("transcription failed") }
+    }
+    let lines = tail.lines(after: logged)
+    for line in lines where line.hasPrefix("transcription ") { print("  info \(label): \(line)") }
+    let release = lines.firstIndex { $0.hasPrefix("hold ended") } ?? lines.count
+    let early = lines.prefix(release).filter { $0.hasPrefix("heard ") }.count
+    if early > 0 {
+        print("  ok   \(label): \(early) heard lines arrived while the control was still held")
+    } else {
+        fail("\(label): no heard line arrived before the 'hold ended' line")
+    }
+    let ended = lines.dropFirst(release).filter { $0.hasPrefix("transcription ended") }.count
+    let failed = lines.filter { $0.hasPrefix("transcription failed") }.count
+    if ended == 1, failed == 0 {
+        print("  ok   \(label): the session ended once after the release, with no failure")
+    } else {
+        fail("\(label): after the release there were \(ended) 'transcription ended' and \(failed) 'transcription failed' lines, expected 1 and 0")
+    }
+    guard let wavPath = tail.savedPath(after: logged),
+          let wav = FileManager.default.contents(atPath: wavPath),
+          let capture = FileManager.default.contents(atPath: capturePath)
+    else {
+        fail("\(label): could not read both last-hold.wav and the fake's capture at \(capturePath)")
+        return
+    }
+    let saved = wav.dropFirst(44)
+    let sent = capture.dropFirst(captureOffset)
+    let padding = sent.count - saved.count
+    if sent.prefix(saved.count) == saved, sent.dropFirst(saved.count).allSatisfy({ $0 == 0 }), (0...1600).contains(padding) {
+        print("  ok   \(label): the fake received last-hold.wav's \(saved.count) bytes in order plus \(padding) zero bytes of padding")
+    } else {
+        fail("\(label): the fake received \(sent.count) bytes that are not last-hold.wav's \(saved.count) bytes plus at most 1600 zero bytes")
+    }
+}
+
 guard let controlRect = rect(of: control) else {
     print("  FAIL the hold-to-talk control is not in the panel, is the panel open?")
     exit(1)
@@ -330,6 +378,7 @@ func hold(_ label: String, _ kind: Hold) {
         return
     }
     let logged = tail.count
+    let captureOffset = captureSize()
     CGWarpMouseCursorPosition(centre)
     wait(0.2)
     post(.leftMouseDown, at: centre)
@@ -398,6 +447,7 @@ func hold(_ label: String, _ kind: Hold) {
     let loudest = tail.loudest(after: logged)
     checkMeter(label, kind, samples: samples, released: released, loudest: loudest)
     checkWAV(label, kind, frames: frames, rate: rate, loudest: loudest, logged: logged)
+    checkTranscription(label, logged: logged, captureOffset: captureOffset)
 }
 
 hold("plain hold", .still)

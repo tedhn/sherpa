@@ -82,7 +82,45 @@ swiftc -parse-as-library -o "$DERIVED/speech-audio-check" \
     sherpa/SpeechAudio.swift scripts/speech-audio-check.swift >/dev/null \
     && "$DERIVED/speech-audio-check" || failures=$((failures + 1))
 
-open -a "$APP"
+echo "assemblyai"
+swiftc -parse-as-library -o "$DERIVED/assemblyai-check" \
+    sherpa/AssemblyAI.swift scripts/assemblyai-check.swift >/dev/null \
+    && "$DERIVED/assemblyai-check" || failures=$((failures + 1))
+
+echo "transcription"
+app_swift_flags=(
+    -swift-version 5 -default-isolation=MainActor -target arm64-apple-macos14.2 -D DEBUG
+    -enable-upcoming-feature DisableOutwardActorInference
+    -enable-upcoming-feature GlobalActorIsolatedTypesUsability
+    -enable-upcoming-feature InferIsolatedConformances
+    -enable-upcoming-feature InferSendableFromCaptures
+    -enable-upcoming-feature MemberImportVisibility
+    -enable-upcoming-feature NonisolatedNonsendingByDefault
+)
+swiftc -o "$DERIVED/fake-assemblyai" scripts/fake-assemblyai.swift >/dev/null \
+    && swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/transcription-check" \
+        sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Transcription.swift \
+        scripts/transcription-check.swift >/dev/null \
+    && "$DERIVED/transcription-check" "$DERIVED/fake-assemblyai" || failures=$((failures + 1))
+
+fake_ports="$DERIVED/fake-assemblyai.ports"
+fake_capture="$DERIVED/fake-assemblyai.pcm"
+rm -f "$fake_ports"
+"$DERIVED/fake-assemblyai" "$fake_ports" "$fake_capture" >/dev/null &
+fake_pid=$!
+trap 'kill "$fake_pid" 2>/dev/null' EXIT
+deadline=$((SECONDS + 10))
+while [[ ! -s "$fake_ports" ]] && (( SECONDS < deadline )); do sleep 0.1; done
+if [[ -s "$fake_ports" ]]; then
+    read -r token_field socket_field < "$fake_ports"
+    open -a "$APP" --args -AssemblyAITokenURL "${token_field#token=}" \
+        -AssemblyAISocketURL "${socket_field#socket=}" -AssemblyAIAPIKey fake
+else
+    echo "  FAIL the fake AssemblyAI never wrote its ports"
+    failures=$((failures + 1))
+    fake_capture=""
+    open -a "$APP"
+fi
 app_pid=""
 # A cold first launch from a fresh build location takes longer than any fixed
 # sleep worth writing, so wait for the icon to actually appear.
@@ -137,7 +175,8 @@ else
 fi
 
 echo "hold to talk"
-swift "$(dirname "$0")/hold-to-talk-check.swift" "$app_pid" || failures=$((failures + 1))
+swift "$(dirname "$0")/hold-to-talk-check.swift" "$app_pid" ${fake_capture:+"$fake_capture"} \
+    || failures=$((failures + 1))
 check_focus_kept "focus still behind after using the panel" "$front_before" "$(frontmost)"
 
 echo "close"
