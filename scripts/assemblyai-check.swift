@@ -64,7 +64,11 @@ enum AssemblyAICheck {
         let begin = AssemblyAI.ServerEvent(json: json(#"{"type":"Begin","id":"s1","expires_at":1762000000}"#))
         expect(begin == .began, "Begin parses as began, got \(begin)")
         let turn = AssemblyAI.ServerEvent(json: json(#"{"type":"Turn","turn_order":2,"turn_is_formatted":true,"end_of_turn":true,"end_of_turn_confidence":0.9,"transcript":"Hello world.","utterance":"","words":[]}"#))
-        expect(turn == .turn(AssemblyAI.Turn(order: 2, text: "Hello world.", isFormatted: true, endsTurn: true)), "Turn parses its order, text and flags, got \(turn)")
+        expect(turn == .turn(AssemblyAI.Turn(order: 2, text: "Hello world.", isFormatted: true, endsTurn: true, audioEnd: nil)), "Turn parses its order, text and flags, and no words is no audio end, got \(turn)")
+        let worded = AssemblyAI.ServerEvent(json: json(#"{"type":"Turn","turn_order":0,"turn_is_formatted":true,"end_of_turn":false,"transcript":"Open the","words":[{"text":"Open","start":1200,"end":1360,"confidence":0.9,"word_is_final":true},{"text":"the","start":1400,"end":1520,"confidence":0.8,"word_is_final":false}]}"#))
+        expect(worded == .turn(AssemblyAI.Turn(order: 0, text: "Open the", isFormatted: true, endsTurn: false, audioEnd: .milliseconds(1520))), "a Turn's audio end is its last word's end, got \(worded)")
+        let wordless = AssemblyAI.ServerEvent(json: json(#"{"type":"Turn","turn_order":1,"turn_is_formatted":true,"end_of_turn":true,"transcript":""}"#))
+        expect(wordless == .turn(AssemblyAI.Turn(order: 1, text: "", isFormatted: true, endsTurn: true, audioEnd: nil)), "a Turn without words is not malformed, got \(wordless)")
         let termination = AssemblyAI.ServerEvent(json: json(#"{"type":"Termination","audio_duration_seconds":2.5,"session_duration_seconds":3.1}"#))
         expect(termination == .terminated(audioSeconds: 2.5), "Termination parses its audio duration, got \(termination)")
         let started = AssemblyAI.ServerEvent(json: json(#"{"type":"SpeechStarted","timestamp":120,"confidence":0.8}"#))
@@ -143,6 +147,103 @@ enum AssemblyAICheck {
         expect(AssemblyAI.Failure.timedOut.logFields == "reason=timedOut", "timedOut renders as one field")
         expect(offline.logFields == "reason=transport detail=Could not connect to the server.", "transport renders its detail last, got \(offline.logFields)")
 
+        checkTranscript()
         exit(failures == 0 ? 0 : 1)
+    }
+
+    static func turn(_ order: Int, _ text: String, formatted: Bool = true, end: Bool = false, through audioEnd: Duration? = nil) -> AssemblyAI.Turn {
+        AssemblyAI.Turn(order: order, text: text, isFormatted: formatted, endsTurn: end, audioEnd: audioEnd)
+    }
+
+    static func checkTranscript() {
+        expect(AssemblyAI.Control.forceEndpoint.rawValue == #"{"type":"ForceEndpoint"}"#, "ForceEndpoint is its bare type message")
+        expect(AssemblyAI.Transcript().shown == .hearing(""), "a new hold shows no words")
+
+        var two = AssemblyAI.Transcript()
+        let held = [
+            two.hear(turn(0, "Open the"), sentThrough: .zero),
+            two.hear(turn(0, "Open the Settings page."), sentThrough: .zero),
+            two.hear(turn(0, "open the settings page", formatted: false, end: true), sentThrough: .zero),
+            two.hear(turn(0, "Open the Settings page.", end: true), sentThrough: .zero),
+            two.hear(turn(0, "open the settings page", formatted: false, end: true), sentThrough: .zero),
+            two.hear(turn(1, "Then click"), sentThrough: .zero),
+        ]
+        expect(held.allSatisfy { $0 == nil }, "no end_of_turn delivers before ForceEndpoint")
+        expect(two.shown == .hearing("Open the Settings page. Then click"), "turns join in order, a formatted end outranks a later unformatted one, and the partial shows, got \(two.shown)")
+        two.expectEndpointAnswer()
+        let sentence = "Open the Settings page. Then click the blue button at the top."
+        let answer = two.hear(turn(1, "Then click the blue button at the top.", end: true), sentThrough: .zero)
+        expect(answer == .heard(sentence), "turn 1's formatted end answers ForceEndpoint with both turns, got \(String(describing: answer))")
+        let drained = [two.hear(turn(2, "", end: true), sentThrough: .zero), two.settle(), two.fail(.timedOut)]
+        expect(drained.allSatisfy { $0 == nil }, "after the answer, Terminate's empty end turn, the fallback and a drain failure deliver nothing")
+        expect(two.shown == .final(.heard(sentence)), "the panel keeps the final through the drain, got \(two.shown)")
+
+        var quiet = AssemblyAI.Transcript()
+        quiet.expectEndpointAnswer()
+        expect(quiet.hear(turn(0, "", end: true), sentThrough: .zero) == .silence, "an empty answer with no words is silence")
+
+        var paused = AssemblyAI.Transcript()
+        _ = paused.hear(turn(0, "Open the Settings page.", end: true), sentThrough: .zero)
+        paused.expectEndpointAnswer()
+        expect(paused.hear(turn(1, "", end: true), sentThrough: .zero) == .heard("Open the Settings page."), "an empty answer after an ended turn delivers that turn")
+
+        var twin = AssemblyAI.Transcript()
+        _ = twin.hear(turn(0, "open settings", formatted: false, end: true), sentThrough: .zero)
+        twin.expectEndpointAnswer()
+        let late = twin.hear(turn(0, "Open settings.", end: true), sentThrough: .zero)
+        expect(late == nil && twin.shown == .hearing("Open settings."), "a late formatted twin below the floor updates the words but does not answer")
+        expect(twin.hear(turn(1, "", end: true), sentThrough: .zero) == .heard("Open settings."), "the order-1 answer delivers the formatted text")
+
+        var rough = AssemblyAI.Transcript()
+        _ = rough.hear(turn(0, "open"), sentThrough: .zero)
+        rough.expectEndpointAnswer()
+        let unformatted = rough.hear(turn(0, "open settings", formatted: false, end: true), sentThrough: .zero)
+        rough.expectEndpointAnswer()
+        let formatted = rough.hear(turn(0, "Open settings.", end: true), sentThrough: .zero)
+        expect(unformatted == nil && formatted == .heard("Open settings."), "an unformatted end waits for its formatted twin, and the first floor stands")
+
+        var slow = AssemblyAI.Transcript()
+        _ = slow.hear(turn(0, "Open the Set"), sentThrough: .zero)
+        slow.expectEndpointAnswer()
+        expect(slow.settle() == .heard("Open the Set"), "the fallback delivers the words so far")
+        expect(slow.hear(turn(0, "Open the Settings page.", end: true), sentThrough: .zero) == nil && slow.shown == .final(.heard("Open the Set")), "an answer after the fallback changes nothing")
+
+        var nothing = AssemblyAI.Transcript()
+        nothing.expectEndpointAnswer()
+        expect(nothing.settle() == .silence, "a fallback with no words is silence")
+
+        var broken = AssemblyAI.Transcript()
+        _ = broken.hear(turn(0, "Open"), sentThrough: .zero)
+        expect(broken.fail(.transport("lost")) == .failed(.transport("lost")) && broken.settle() == nil, "a failure first is the one delivery")
+
+        var blank = AssemblyAI.Transcript()
+        _ = blank.hear(turn(0, "  "), sentThrough: .zero)
+        blank.expectEndpointAnswer()
+        expect(blank.hear(turn(0, " ", end: true), sentThrough: .zero) == .silence, "whitespace is no words")
+
+        var shuffled = AssemblyAI.Transcript()
+        _ = shuffled.hear(turn(1, "Second."), sentThrough: .zero)
+        _ = shuffled.hear(turn(0, "First.", end: true), sentThrough: .zero)
+        expect(shuffled.text == "First. Second.", "text follows turn order, not arrival order, got \(shuffled.text)")
+
+        var terminated = AssemblyAI.Transcript()
+        let unanswered = [
+            terminated.hear(turn(0, "Open the Settings page.", end: true, through: .milliseconds(1360)), sentThrough: .zero),
+            terminated.hear(turn(1, "Then click the blue button.", end: true, through: .milliseconds(3480)), sentThrough: .zero),
+            terminated.hear(turn(2, "", end: true), sentThrough: .zero),
+        ]
+        expect(unanswered.allSatisfy { $0 == nil }, "without ForceEndpoint no end_of_turn delivers, so Terminate's turns all fold")
+        expect(terminated.settle() == .heard("Open the Settings page. Then click the blue button."), "settling on Termination delivers every turn")
+
+        var lag = AssemblyAI.Transcript()
+        expect(lag.finish() == .terminate, "with no turns it terminates")
+        _ = lag.hear(turn(0, "Open the", through: .milliseconds(2340)), sentThrough: .milliseconds(2640))
+        expect(lag.lastLag == .milliseconds(300) && lag.finish() == .endpoint, "a word ending at 2340 heard at 2640 ms is a lag of 300, which ends by ForceEndpoint, got \(String(describing: lag.lastLag))")
+        _ = lag.hear(turn(0, "Open the", through: .milliseconds(1000)), sentThrough: .milliseconds(1600))
+        expect(lag.lastLag == .milliseconds(600) && lag.finish() == .endpoint, "a lag of 600 is still caught up")
+        _ = lag.hear(turn(0, "Open the", through: .milliseconds(1000)), sentThrough: .milliseconds(1601))
+        expect(lag.lastLag == .milliseconds(601) && lag.finish() == .terminate, "a lag of 601 terminates")
+        _ = lag.hear(turn(1, "", end: true), sentThrough: .milliseconds(5000))
+        expect(lag.lastLag == .milliseconds(601), "a turn without a word end leaves the lag as it was, got \(String(describing: lag.lastLag))")
     }
 }

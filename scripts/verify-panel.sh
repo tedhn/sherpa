@@ -103,10 +103,14 @@ swiftc -o "$DERIVED/fake-assemblyai" scripts/fake-assemblyai.swift >/dev/null \
         scripts/transcription-check.swift >/dev/null \
     && "$DERIVED/transcription-check" "$DERIVED/fake-assemblyai" || failures=$((failures + 1))
 
+fake_answer_delay=1.0
 fake_ports="$DERIVED/fake-assemblyai.ports"
 fake_capture="$DERIVED/fake-assemblyai.pcm"
+fake_scenario="$DERIVED/fake-assemblyai.scenario"
 rm -f "$fake_ports"
-"$DERIVED/fake-assemblyai" "$fake_ports" "$fake_capture" >/dev/null &
+echo ok > "$fake_scenario"
+"$DERIVED/fake-assemblyai" "$fake_ports" "$fake_capture" --answer-delay "$fake_answer_delay" \
+    --scenario-file "$fake_scenario" >/dev/null &
 fake_pid=$!
 trap 'kill "$fake_pid" 2>/dev/null' EXIT
 deadline=$((SECONDS + 10))
@@ -175,7 +179,7 @@ else
 fi
 
 echo "hold to talk"
-swift "$(dirname "$0")/hold-to-talk-check.swift" "$app_pid" ${fake_capture:+"$fake_capture"} \
+swift "$(dirname "$0")/hold-to-talk-check.swift" "$app_pid" ${fake_capture:+"$fake_capture" "$fake_scenario"} \
     || failures=$((failures + 1))
 check_focus_kept "focus still behind after using the panel" "$front_before" "$(frontmost)"
 

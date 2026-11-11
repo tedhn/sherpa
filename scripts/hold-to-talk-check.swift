@@ -7,6 +7,7 @@ guard let pid = arguments.first.flatMap(Int32.init) else {
     exit(1)
 }
 let capturePath = arguments.dropFirst().first
+let scenarioPath = arguments.dropFirst(2).first
 
 var failures = 0
 
@@ -41,6 +42,10 @@ let meter = "progress indicator 1 of group 1 of window 1"
 
 func caption() -> String {
     driven("return value of static text 2 of group 1 of window 1")
+}
+
+func transcript() -> String {
+    driven("return value of static text 3 of group 1 of window 1")
 }
 
 func meterSamples(_ count: Int) -> [Double] {
@@ -301,6 +306,63 @@ func checkWAV(_ label: String, _ kind: Hold, frames: Double, rate: Double, loude
     }
 }
 
+struct Delivered {
+    let session: Int
+    let via: String
+    let text: String
+}
+
+func finals(in lines: [String]) -> [Delivered] {
+    lines.compactMap { line in
+        guard line.hasPrefix("transcription final ") else { return nil }
+        let parts = line.components(separatedBy: " text=")
+        var head: [String: String] = [:]
+        for pair in parts[0].split(separator: " ") {
+            let field = pair.split(separator: "=", maxSplits: 1)
+            if field.count == 2 { head[String(field[0])] = String(field[1]) }
+        }
+        guard let session = head["session"].flatMap({ Int($0) }), let via = head["via"] else { return nil }
+        return Delivered(session: session, via: via, text: parts.dropFirst().joined(separator: " text="))
+    }
+}
+
+func closed(after count: Int) -> Int {
+    tail.lines(after: count).filter { $0.hasPrefix("transcription ended") || $0.hasPrefix("transcription failed") }.count
+}
+
+func useScenario(_ name: String) {
+    guard let scenarioPath else { return }
+    try? Data("\(name)\n".utf8).write(to: URL(fileURLWithPath: scenarioPath))
+}
+
+func checkPanel(_ label: String, logged: Int) {
+    guard capturePath != nil else { return }
+    _ = wait(upTo: 4) { !finals(in: tail.lines(after: logged)).isEmpty }
+    let delivered = finals(in: tail.lines(after: logged))
+    guard delivered.count == 1, let final = delivered.first else {
+        fail("\(label): expected one 'transcription final' line after the release, got \(delivered.count)")
+        return
+    }
+    let closedTurns = final.text.range(of: #"^S\d+ frame \d+\.( S\d+ frame \d+\.)?$"#, options: .regularExpression) != nil
+    if ["endpoint", "termination"].contains(final.via), closedTurns {
+        print("  ok   \(label): one final via \(final.via), every turn closed by its period: '\(final.text)'")
+    } else {
+        fail("\(label): the final came via \(final.via) as '\(final.text)', expected the endpoint answer or Termination with every turn closed by its period")
+    }
+    if wait(upTo: 1, until: { transcript() == final.text }) {
+        print("  ok   \(label): the panel shows the final")
+    } else {
+        fail("\(label): the panel read '\(transcript())', expected the final '\(final.text)'")
+    }
+    _ = wait(upTo: 6) { closed(after: logged) > 0 }
+    let drained = transcript()
+    if drained == final.text {
+        print("  ok   \(label): the panel still shows the final after the session closed")
+    } else {
+        fail("\(label): after the session closed the panel read '\(drained)', expected the final '\(final.text)'")
+    }
+}
+
 func captureSize() -> Int {
     capturePath.flatMap { try? FileManager.default.attributesOfItem(atPath: $0)[.size] as? Int } ?? 0
 }
@@ -399,6 +461,14 @@ func hold(_ label: String, _ kind: Hold) {
         return
     }
 
+    if capturePath != nil {
+        if wait(upTo: 1.5, until: { transcript().hasPrefix("S") }) {
+            print("  ok   \(label): words showed while held: '\(transcript())'")
+        } else {
+            fail("\(label): no words showed while held, the panel read '\(transcript())'")
+        }
+    }
+
     if kind == .speakersTalking { samples = speakAndSample() }
 
     if kind == .draggedOff {
@@ -447,7 +517,90 @@ func hold(_ label: String, _ kind: Hold) {
     let loudest = tail.loudest(after: logged)
     checkMeter(label, kind, samples: samples, released: released, loudest: loudest)
     checkWAV(label, kind, frames: frames, rate: rate, loudest: loudest, logged: logged)
+    checkPanel(label, logged: logged)
     checkTranscription(label, logged: logged, captureOffset: captureOffset)
+}
+
+func press() {
+    CGWarpMouseCursorPosition(centre)
+    wait(0.2)
+    post(.leftMouseDown, at: centre)
+}
+
+func release() {
+    post(.leftMouseUp, at: centre)
+}
+
+func silentHold() {
+    guard capturePath != nil, scenarioPath != nil else { return }
+    let label = "silent hold"
+    useScenario("silent")
+    defer { useScenario("ok") }
+    let logged = tail.count
+    press()
+    wait(1.5)
+    release()
+    if wait(upTo: 3, until: { transcript() == "Didn't catch that" }) {
+        print("  ok   \(label): the panel reads 'Didn't catch that'")
+    } else {
+        fail("\(label): the panel read '\(transcript())', expected 'Didn't catch that'")
+    }
+    _ = wait(upTo: 6) { closed(after: logged) > 0 }
+}
+
+func pressAgainWhileFinishing() {
+    guard capturePath != nil else { return }
+    let label = "press again while the last hold finishes"
+    let logged = tail.count
+    press()
+    wait(3)
+    release()
+    wait(0.3)
+    guard finals(in: tail.lines(after: logged)).isEmpty else {
+        fail("\(label): the first hold's final landed within 0.3 s of its release, so the next press cannot overlap it")
+        _ = wait(upTo: 6) { closed(after: logged) > 0 }
+        return
+    }
+    press()
+    if wait(upTo: 0.3, until: { transcript().isEmpty }) {
+        print("  ok   \(label): the press cleared the panel")
+    } else {
+        fail("\(label): 0.3 s after the press the panel still read '\(transcript())'")
+    }
+    var samples: [String] = []
+    for _ in 0..<10 {
+        samples.append(transcript())
+        wait(0.2)
+    }
+    release()
+    _ = wait(upTo: 8) { closed(after: logged) >= 2 }
+
+    let lines = tail.lines(after: logged)
+    let delivered = finals(in: lines).sorted { $0.session < $1.session }
+    guard delivered.count == 2 else {
+        fail("\(label): expected a final from each hold, got \(delivered.map(\.text))")
+        return
+    }
+    let (first, second) = (delivered[0], delivered[1])
+    let secondBegan = lines.indices.filter { lines[$0].hasPrefix("hold began") }.dropFirst().first ?? lines.count
+    let firstFinal = lines.firstIndex { $0.hasPrefix("transcription final session=\(first.session) ") } ?? -1
+    if firstFinal > secondBegan {
+        print("  ok   \(label): the first hold's final landed during the second hold")
+    } else {
+        fail("\(label): the first hold's final landed before the second hold began, so nothing overlapped")
+    }
+    let firstWords = first.text.prefix { $0 != " " } + " "
+    let leaked = samples.filter { $0.hasPrefix(firstWords) }
+    if leaked.isEmpty {
+        print("  ok   \(label): no sample during the second hold showed the first hold's words, \(Set(samples))")
+    } else {
+        fail("\(label): the panel showed the first hold's words during the second hold: \(leaked)")
+    }
+    if wait(upTo: 1, until: { transcript() == second.text }) {
+        print("  ok   \(label): the panel ends on the second hold's final '\(second.text)'")
+    } else {
+        fail("\(label): the panel read '\(transcript())', expected the second hold's final '\(second.text)'")
+    }
 }
 
 hold("plain hold", .still)
@@ -455,4 +608,8 @@ wait(0.5)
 hold("hold dragged off the control", .draggedOff)
 wait(0.5)
 hold("hold while the speakers talk", .speakersTalking)
+wait(0.5)
+silentHold()
+wait(0.5)
+pressAgainWhileFinishing()
 finish()
