@@ -9,7 +9,9 @@ guard let pid = arguments.first.flatMap(Int32.init) else {
 let capturePath = arguments.dropFirst().first
 let scenarioPath = arguments.dropFirst(2).first
 let idleSeconds = arguments.dropFirst(3).first.flatMap(Double.init)
-let archivePath = arguments.dropFirst(4).first
+let archivePath = arguments.dropFirst(4).first.flatMap { $0.isEmpty ? nil : $0 }
+let requestsPath = arguments.dropFirst(5).first.flatMap { $0.isEmpty ? nil : $0 }
+let claudeScenarioPath = arguments.dropFirst(6).first.flatMap { $0.isEmpty ? nil : $0 }
 
 var failures = 0
 
@@ -48,6 +50,16 @@ func caption() -> String {
 
 func transcript() -> String {
     driven("return value of static text 3 of group 1 of window 1")
+}
+
+let replyElement = "static text 1 of scroll area 1 of group 1 of window 1"
+
+func reply() -> String {
+    driven("return value of \(replyElement)")
+}
+
+func panelSize() -> String {
+    driven("return size of window 1")
 }
 
 func meterSamples(_ count: Int) -> [Double] {
@@ -152,7 +164,7 @@ final class LogTail: @unchecked Sendable {
         process.arguments = [
             "stream", "--level", "debug", "--style", "ndjson",
             "--predicate",
-            "subsystem == \"my.rooftop.sherpa\" AND (category == \"microphone\" OR category == \"transcription\" OR category == \"screenshot\")",
+            "subsystem == \"my.rooftop.sherpa\" AND (category == \"microphone\" OR category == \"transcription\" OR category == \"screenshot\" OR category == \"claude\")",
         ]
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
@@ -354,10 +366,21 @@ func useScenario(_ name: String) {
     try? Data("\(name)\n".utf8).write(to: URL(fileURLWithPath: scenarioPath))
 }
 
+func useClaudeScenario(_ name: String) {
+    guard let claudeScenarioPath else { return }
+    try? Data("\(name)\n".utf8).write(to: URL(fileURLWithPath: claudeScenarioPath))
+}
+
+func requestNumbers() -> [Int] {
+    guard let requestsPath else { return [] }
+    return ((try? FileManager.default.contentsOfDirectory(atPath: requestsPath)) ?? [])
+        .filter { $0.hasSuffix(".json") }.compactMap { Int($0.dropLast(".json".count)) }.sorted()
+}
+
 let closedTurns = #"^S\d+ T\d+ frame \d+\.( S\d+ T\d+ frame \d+\.)*$"#
 
 @discardableResult
-func checkPanel(_ label: String, logged: Int, releasedAt: Date, holds: Int = 1) -> Delivered? {
+func checkPanel(_ label: String, logged: Int, releasedAt: Date, holds: Int = 1, asking: Bool = false) -> Delivered? {
     guard capturePath != nil else { return nil }
     _ = wait(upTo: 4) { !deliveries(in: tail.lines(after: logged)).isEmpty }
     let delivered = deliveries(in: tail.lines(after: logged))
@@ -380,6 +403,14 @@ func checkPanel(_ label: String, logged: Int, releasedAt: Date, holds: Int = 1) 
         print("  ok   \(label): the panel shows the delivered text")
     } else {
         fail("\(label): the panel read '\(transcript())', expected '\(utterance.text)'")
+    }
+    if asking, requestsPath != nil {
+        let shown = reply()
+        if shown == "Asking Claude…" {
+            print("  ok   \(label): the reply reads 'Asking Claude…' once the transcript is final")
+        } else {
+            fail("\(label): the reply read '\(shown)' once the transcript was final, expected 'Asking Claude…'")
+        }
     }
     checkArchive(label, utterance, holds: holds, logged: logged)
     return utterance
@@ -440,6 +471,51 @@ func checkArchive(_ label: String, _ delivered: Delivered, holds: Int, logged: I
         print("  ok   \(label): the archived PCM \(holds == 1 ? "equals" : "ends with") last-hold.wav's \(last.count) bytes")
     } else {
         fail("\(label): the archived \(pcm.count) PCM bytes \(holds == 1 ? "differ from" : "do not end with") last-hold.wav's \(last.count) bytes")
+    }
+}
+
+func checkAnswer(_ label: String, _ delivered: Delivered, requestsBefore: Int, panelBefore: String, logged: Int) {
+    guard requestsPath != nil else { return }
+    let expected = "Answer to: \(delivered.text)"
+    if wait(upTo: 5, until: { reply().hasPrefix(expected) }) {
+        print("  ok   \(label): within 5 s the reply began '\(expected)'")
+    } else {
+        fail("\(label): the reply read '\(reply().prefix(80))', expected it to begin '\(expected)'")
+    }
+    let numbers = requestNumbers()
+    guard numbers.count == requestsBefore + 1, let newest = numbers.last,
+          let body = FileManager.default.contents(atPath: URL(fileURLWithPath: requestsPath!).appending(path: "\(newest).json").path),
+          let messages = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["messages"] as? [[String: Any]],
+          let content = messages.last?["content"] as? [[String: Any]]
+    else {
+        fail("\(label): expected exactly one new saved request, got \(numbers.count - requestsBefore)")
+        return
+    }
+    let types = content.map { $0["type"] as? String ?? "?" }
+    let taken = tail.lines(after: logged).filter { $0.hasPrefix("screenshot taken ") }.count
+    if content.last?["text"] as? String == delivered.text, types.last == "text" {
+        print("  ok   \(label): the request's last block is the transcript")
+    } else {
+        fail("\(label): the request's last block was \(content.last ?? [:]), expected the text '\(delivered.text)'")
+    }
+    let expectedTypes = Array(repeating: ["text", "image"], count: taken).flatMap { $0 } + ["text"]
+    if types == expectedTypes {
+        print("  ok   \(label): the request holds \(taken) image(s), each after its label, matching the \(taken) 'screenshot taken' line(s)")
+    } else {
+        fail("\(label): the request's blocks were \(types), expected a label and an image for each of \(taken) screenshot(s), then the text")
+    }
+    if taken > 0 {
+        let first = content.first?["text"] as? String ?? ""
+        if first.contains("The cursor is on this screen.") {
+            print("  ok   \(label): the first label says the cursor is on this screen: '\(first)'")
+        } else {
+            fail("\(label): the first label was '\(first)', expected it to say the cursor is on this screen")
+        }
+    }
+    if panelSize() == panelBefore {
+        print("  ok   \(label): the panel stayed \(panelBefore) after the long answer")
+    } else {
+        fail("\(label): the panel went from \(panelBefore) to \(panelSize()) after the answer")
     }
 }
 
@@ -632,6 +708,8 @@ func hold(_ label: String, _ kind: Hold) {
     }
     let logged = tail.count
     let captureOffset = captureSize()
+    let requestsBefore = requestNumbers().count
+    let panelBefore = panelSize()
     CGWarpMouseCursorPosition(centre)
     wait(0.2)
     post(.leftMouseDown, at: centre)
@@ -685,6 +763,15 @@ func hold(_ label: String, _ kind: Hold) {
     }
     print("  ok   \(label): the device stopped after the mouse-up")
     let released = meterSamples(1).first
+    if kind == .still, requestsPath != nil {
+        wait(0.2)
+        let shown = reply()
+        if shown == "Asking Claude…" {
+            print("  ok   \(label): the reply reads 'Asking Claude…' right after the release, before the words are final")
+        } else {
+            fail("\(label): right after the release the reply read '\(shown)', expected 'Asking Claude…'")
+        }
+    }
 
     _ = wait(upTo: 2) { tail.summary(after: logged) != nil }
     guard let line = tail.summary(after: logged) else {
@@ -709,7 +796,10 @@ func hold(_ label: String, _ kind: Hold) {
     let loudest = tail.loudest(after: logged)
     checkMeter(label, kind, samples: samples, released: released, loudest: loudest)
     checkWAV(label, kind, frames: frames, rate: rate, loudest: loudest, logged: logged)
-    checkPanel(label, logged: logged, releasedAt: releasedAt)
+    let delivered = checkPanel(label, logged: logged, releasedAt: releasedAt, asking: kind == .still)
+    if kind == .still, let delivered {
+        checkAnswer(label, delivered, requestsBefore: requestsBefore, panelBefore: panelBefore, logged: logged)
+    }
     checkTranscription(label, logged: logged, captureOffset: captureOffset)
 }
 
@@ -766,6 +856,7 @@ func warmFirst() -> Int? {
 func silentHold() {
     guard capturePath != nil, scenarioPath != nil else { return }
     let label = "silent hold"
+    let requestsBefore = requestNumbers().count
     useScenario("silent")
     defer { useScenario("ok") }
     _ = talk(for: 1.5)
@@ -773,6 +864,26 @@ func silentHold() {
         print("  ok   \(label): the panel reads 'Didn't catch that'")
     } else {
         fail("\(label): the panel read '\(transcript())', expected 'Didn't catch that'")
+    }
+    guard requestsPath != nil else { return }
+    wait(1)
+    if reply().isEmpty, requestNumbers().count == requestsBefore {
+        print("  ok   \(label): the reply is empty and no request reached Claude")
+    } else {
+        fail("\(label): the reply read '\(reply())' and \(requestNumbers().count - requestsBefore) request(s) arrived, expected neither")
+    }
+}
+
+func refusedKeyHold() {
+    guard capturePath != nil, requestsPath != nil, claudeScenarioPath != nil else { return }
+    let label = "hold with the key refused"
+    useClaudeScenario("401")
+    defer { useClaudeScenario("ok") }
+    _ = talk(for: 3)
+    if wait(upTo: 8, until: { reply() == "Anthropic refused the key" }) {
+        print("  ok   \(label): the reply reads 'Anthropic refused the key'")
+    } else {
+        fail("\(label): the reply read '\(reply())', expected 'Anthropic refused the key'")
     }
 }
 
@@ -911,6 +1022,8 @@ wait(0.5)
 hold("hold while the speakers talk", .speakersTalking)
 wait(0.5)
 silentHold()
+wait(0.5)
+refusedKeyHold()
 wait(0.5)
 mergedHolds()
 wait(0.5)

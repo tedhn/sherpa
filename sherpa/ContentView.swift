@@ -34,11 +34,21 @@ struct ContentView: View {
                 .font(.title3)
                 .foregroundStyle(.secondary)
 
-            Text(transcriptLine)
+            // reservesSpace keeps one line, not three, for an empty string, so the open panel would grow with the first words.
+            Text(transcriptLine.isEmpty ? " " : transcriptLine)
                 .font(.body)
                 .multilineTextAlignment(.center)
                 .lineLimit(3, reservesSpace: true)
                 .truncationMode(.head)
+
+            ScrollView {
+                Text(replyMarkdown)
+                    .font(.body)
+                    .foregroundStyle(isAnswer ? .primary : .secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(height: 200)
+            .id(state.transcription?.number)
 
             if case .failed(.accessDenied) = state.microphone {
                 Link("Open Privacy Settings", destination: Self.microphoneSettings)
@@ -100,6 +110,32 @@ private extension ContentView {
         case .final(.failed(.serverError)): return "AssemblyAI closed the session"
         case .final(.failed(.timedOut)): return "AssemblyAI didn't answer"
         case .final(.failed(.transport)): return "Couldn't reach AssemblyAI"
+        }
+    }
+}
+
+private extension ContentView {
+    var isAnswer: Bool {
+        if case .answered = state.transcription?.reply { true } else { false }
+    }
+
+    var replyMarkdown: AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return (try? AttributedString(markdown: replyLine, options: options)) ?? AttributedString(replyLine)
+    }
+
+    var replyLine: String {
+        switch state.transcription?.reply {
+        case nil:
+            if case .hearing = state.transcription?.shown, !state.microphone.isListening { "Asking Claude…" } else { "" }
+        case .asking: "Asking Claude…"
+        case .answered(let text): text
+        case .failed(.noAPIKey): "No Anthropic key is set"
+        case .failed(.keyRefused): "Anthropic refused the key"
+        case .failed(.busy): "Claude is busy, try again in a moment"
+        case .failed(.declined): "Claude declined to answer that"
+        case .failed(.unanswered): "Claude couldn't answer"
+        case .failed(.transport): "Couldn't reach Claude"
         }
     }
 }

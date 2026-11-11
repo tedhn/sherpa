@@ -98,6 +98,11 @@ swiftc -parse-as-library -o "$DERIVED/screenshot-check" \
     sherpa/Screenshot.swift scripts/screenshot-check.swift >/dev/null \
     && "$DERIVED/screenshot-check" || failures=$((failures + 1))
 
+echo "claude"
+swiftc -parse-as-library -o "$DERIVED/claude-check" \
+    sherpa/Screenshot.swift sherpa/Claude.swift scripts/claude-check.swift >/dev/null \
+    && "$DERIVED/claude-check" || failures=$((failures + 1))
+
 echo "dictation"
 swiftc -parse-as-library -o "$DERIVED/dictation-check" \
     sherpa/AssemblyAI.swift sherpa/Dictation.swift scripts/dictation-check.swift >/dev/null \
@@ -114,8 +119,9 @@ app_swift_flags=(
     -enable-upcoming-feature NonisolatedNonsendingByDefault
 )
 swiftc -o "$DERIVED/fake-assemblyai" scripts/fake-assemblyai.swift >/dev/null \
+    && swiftc -o "$DERIVED/fake-claude" scripts/fake-claude.swift >/dev/null \
     && swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/transcription-check" \
-        sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Supabase.swift sherpa/Screenshot.swift sherpa/Transcription.swift \
+        sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Supabase.swift sherpa/Screenshot.swift sherpa/Claude.swift sherpa/Transcription.swift \
         scripts/transcription-check.swift >/dev/null \
     && "$DERIVED/transcription-check" "$DERIVED/fake-assemblyai" || failures=$((failures + 1))
 
@@ -135,9 +141,26 @@ fake_archive="$DERIVED/fake-supabase-archive"
 rm -rf "$fake_supabase_port" "$fake_archive"
 "$DERIVED/fake-supabase" "$fake_supabase_port" "$fake_archive" >/dev/null &
 fake_supabase_pid=$!
-trap 'kill "$fake_pid" "$fake_supabase_pid" 2>/dev/null' EXIT
+fake_claude_port="$DERIVED/fake-claude.port"
+fake_claude_requests="$DERIVED/fake-claude-requests"
+fake_claude_scenario="$DERIVED/fake-claude.scenario"
+rm -rf "$fake_claude_port" "$fake_claude_requests"
+echo ok > "$fake_claude_scenario"
+"$DERIVED/fake-claude" "$fake_claude_port" "$fake_claude_requests" --answer-delay "$fake_answer_delay" \
+    --scenario-file "$fake_claude_scenario" >/dev/null &
+fake_claude_pid=$!
+trap 'kill "$fake_pid" "$fake_supabase_pid" "$fake_claude_pid" 2>/dev/null' EXIT
 deadline=$((SECONDS + 10))
-while [[ ! -s "$fake_ports" || ! -s "$fake_supabase_port" ]] && (( SECONDS < deadline )); do sleep 0.1; done
+while [[ ! -s "$fake_ports" || ! -s "$fake_supabase_port" || ! -s "$fake_claude_port" ]] && (( SECONDS < deadline )); do sleep 0.1; done
+claude_flags=(-AnthropicURL '')
+if [[ -s "$fake_claude_port" ]]; then
+    claude_flags=(-AnthropicURL "$(cat "$fake_claude_port")" -AnthropicAPIKey fake)
+else
+    echo "  FAIL the fake Claude never wrote its port"
+    failures=$((failures + 1))
+    fake_claude_requests=""
+    fake_claude_scenario=""
+fi
 supabase_flags=(-SupabaseURL '')
 if [[ -s "$fake_supabase_port" ]]; then
     supabase_flags=(-SupabaseURL "$(cat "$fake_supabase_port")" -SupabasePublishableKey fake)
@@ -150,13 +173,13 @@ if [[ -s "$fake_ports" ]]; then
     read -r token_field socket_field < "$fake_ports"
     open -a "$APP" --args -AssemblyAITokenURL "${token_field#token=}" \
         -AssemblyAISocketURL "${socket_field#socket=}" -AssemblyAIAPIKey fake -AssemblyAIIdleSeconds "$idle_seconds" \
-        "${supabase_flags[@]}"
+        "${supabase_flags[@]}" "${claude_flags[@]}"
 else
     echo "  FAIL the fake AssemblyAI never wrote its ports"
     failures=$((failures + 1))
     fake_capture=""
     fake_archive=""
-    open -a "$APP" --args -SupabaseURL ''
+    open -a "$APP" --args -SupabaseURL '' -AnthropicURL ''
 fi
 app_pid=""
 # A cold first launch from a fresh build location takes longer than any fixed
@@ -212,7 +235,7 @@ else
 fi
 
 echo "hold to talk"
-swift "$(dirname "$0")/hold-to-talk-check.swift" "$app_pid" ${fake_capture:+"$fake_capture" "$fake_scenario" "$idle_seconds" ${fake_archive:+"$fake_archive"}} \
+swift "$(dirname "$0")/hold-to-talk-check.swift" "$app_pid" ${fake_capture:+"$fake_capture" "$fake_scenario" "$idle_seconds" "$fake_archive" "$fake_claude_requests" "$fake_claude_scenario"} \
     || failures=$((failures + 1))
 check_focus_kept "focus still behind after using the panel" "$front_before" "$(frontmost)"
 
