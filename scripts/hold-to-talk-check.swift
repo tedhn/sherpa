@@ -481,7 +481,7 @@ func checkTranscription(_ label: String, logged: Int, captureOffset: Int) {
     }
 }
 
-func checkScreenshots(logged: Int) {
+func checkScreenshots(logged: Int, releasedAt point: CGPoint) {
     guard capturePath != nil else { return }
     let label = "plain hold screenshots"
     guard let utterance = deliveries(in: tail.lines(after: logged)).first?.utterance else {
@@ -545,6 +545,38 @@ func checkScreenshots(logged: Int) {
         print("  ok   \(label): the handoff read displays=\(screens.count)")
     } else {
         fail("\(label): the handoff read '\(handoff)', expected displays=\(screens.count)")
+    }
+    let labelPrefix = "screenshot labelled display="
+    let labelled = lines.filter { $0.hasPrefix(labelPrefix) }.compactMap { line -> (id: UInt32, text: String)? in
+        guard let range = line.range(of: " label="), let id = UInt32(line.dropFirst(labelPrefix.count).prefix { $0 != " " }) else { return nil }
+        return (id, String(line[range.upperBound...]))
+    }
+    let labelledIDs = labelled.map(\.id)
+    if labelled.count == taken.count, Set(labelledIDs) == Set(ids) {
+        print("  ok   \(label): one 'screenshot labelled' line per capture, displays \(labelledIDs)")
+    } else {
+        fail("\(label): \(labelled.count) 'screenshot labelled' line(s) for displays \(labelledIDs), expected the captured \(ids)")
+    }
+    var under: CGDirectDisplayID = 0
+    var found: UInt32 = 0
+    CGGetDisplaysWithPoint(point, 1, &under, &found)
+    if found == 1, labelledIDs.first == under {
+        print("  ok   \(label): the first labelled display \(under) is the one under the release point \(point)")
+    } else {
+        fail("\(label): the first labelled display is \(String(describing: labelledIDs.first)), the display under \(point) is \(found == 1 ? String(under) : "none")")
+    }
+    let pixelsByDisplay = Dictionary(uniqueKeysWithValues: taken.compactMap { line in
+        line["display"].flatMap(UInt32.init).flatMap { id in line["pixels"].map { (id, $0) } }
+    })
+    for (index, entry) in labelled.enumerated() {
+        let cursorSentence = index == 0 ? "The cursor is on this screen." : "The cursor is not on this screen."
+        let prefix = "Screen \(index + 1) of \(labelled.count). \(cursorSentence) "
+        let suffix = "This image is \(pixelsByDisplay[entry.id] ?? "missing") pixels."
+        if entry.text == prefix + suffix {
+            print("  ok   \(label): display \(entry.id) reads '\(entry.text)'")
+        } else {
+            fail("\(label): display \(entry.id) reads '\(entry.text)', expected '\(prefix + suffix)'")
+        }
     }
 }
 
@@ -872,7 +904,7 @@ func idleClose(session: Int) {
 let warmed = warmFirst()
 let holdsBegan = tail.count
 hold("plain hold", .still)
-checkScreenshots(logged: holdsBegan)
+checkScreenshots(logged: holdsBegan, releasedAt: centre)
 wait(0.5)
 hold("hold dragged off the control", .draggedOff)
 wait(0.5)
