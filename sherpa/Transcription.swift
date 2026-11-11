@@ -46,6 +46,7 @@ final class Transcriber {
         var endpoints: AssemblyAI.Endpoints
         var limits = Dictation.Limits()
         var archive: Supabase.Project? = nil
+        var screenshots: (@Sendable () async throws -> [Screenshot])? = nil
 
         static var current: Configuration {
             func planted(_ name: String) -> String? {
@@ -58,7 +59,8 @@ final class Transcriber {
                 endpoints: .production,
                 archive: planted("SupabaseURL").flatMap(URL.init(string:)).flatMap { url in
                     planted("SupabasePublishableKey").map { Supabase.Project(url: url, key: $0) }
-                }
+                },
+                screenshots: Screenshot.everyDisplay
             )
             #if DEBUG
             let defaults = UserDefaults.standard
@@ -90,6 +92,7 @@ final class Transcriber {
     private var recorded: [Int: @Sendable () -> Data] = [:]
     private var partials: [Int: [Supabase.Partial]] = [:]
     private var sockets: [Int: Socket] = [:]
+    private var screenshots: [Int: Task<[Screenshot]?, Never>] = [:]
     private var alarm: (at: ContinuousClock.Instant, task: Task<Void, Never>)?
     private let archive: Archive?
 
@@ -121,6 +124,9 @@ final class Transcriber {
     }
 
     func release() {
+        if let capture = configuration.screenshots, let utterance = dictation.heldUtterance {
+            screenshots[utterance] = Task { try? await capture() }
+        }
         handle(.release)
     }
 
@@ -207,6 +213,12 @@ final class Transcriber {
                     holds: spans.count, final: final, via: via,
                     partials: heard, pcm: recorders.reduce(into: Data()) { $0.append($1()) }
                 ), number: utterance)
+            }
+            if let taken = screenshots.removeValue(forKey: utterance) {
+                Task {
+                    let shots = await taken.value
+                    logger.notice("transcription screenshots utterance=\(utterance) displays=\(shots.map { String($0.count) } ?? "none", privacy: .public)")
+                }
             }
             record?.deliver(final)
         }

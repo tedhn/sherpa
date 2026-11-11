@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import os
 
@@ -119,7 +120,7 @@ final class Bench {
             limits.idle = idle
             limits.idleWithPanelOpen = idle
         }
-        let transcriber = Transcriber(configuration: .init(key: scenario.key, endpoints: endpoints, limits: limits))
+        let transcriber = Transcriber(configuration: .init(key: scenario.key, endpoints: endpoints, limits: limits, screenshots: scenario.screenshots))
         return Bench(name: scenario.name, tail: tail, transcriber: transcriber, server: server, files: (mode, capture, output))
     }
 
@@ -267,6 +268,7 @@ struct Scenario {
     var arguments: [String] = []
     var key: String? = "fake"
     var idle: Duration?
+    var screenshots: (@Sendable () async throws -> [Screenshot])?
     let run: (Bench) async -> Void
 }
 
@@ -304,6 +306,10 @@ enum TranscriptionCheck {
         Scenario(name: "no-key", key: nil, run: refused),
         Scenario(name: "expired-once", mode: "expired-once", run: expiredOnce),
         Scenario(name: "no-termination", mode: "no-termination", run: noTermination),
+        Scenario(name: "screenshot", screenshots: capturing(), run: screenshot),
+        Scenario(name: "screenshot-merge", screenshots: capturing(displaysPerCall: [1, 2]), run: screenshotMerge),
+        Scenario(name: "screenshot-slow", screenshots: capturing(delay: .seconds(3)), run: screenshotSlow),
+        Scenario(name: "screenshot-denied", screenshots: capturing(failing: .noAccess), run: screenshotDenied),
     ]
 
     static func main() async {
@@ -335,7 +341,7 @@ enum TranscriptionCheck {
                 await scenario.run(bench)
                 await bench.close()
                 deadline.cancel()
-                assessSession(bench)
+                assessSession(bench, scenario)
                 bench.stop()
             }
         }
@@ -344,7 +350,7 @@ enum TranscriptionCheck {
         exit(failures == 0 ? 0 : 1)
     }
 
-    static func assessSession(_ bench: Bench) {
+    static func assessSession(_ bench: Bench, _ scenario: Scenario) {
         for line in bench.lines where line.hasPrefix("transcription ") { print("  info \(line)") }
         let unprocessed = bench.output.compactMap { line in
             line.contains(" force-endpoint ") ? line.components(separatedBy: "unprocessed=").last.flatMap(Double.init) : nil
@@ -353,6 +359,72 @@ enum TranscriptionCheck {
         let delivered = bench.lines("transcription delivered ").compactMap { fields(of: $0)["utterance"] }
         expect(Set(delivered).count == delivered.count, "\(bench.name): no utterance was delivered twice, got \(delivered)")
         expect(!bench.lines.contains { $0.contains("code=3007") }, "\(bench.name): no 3007 input violation")
+        if scenario.screenshots == nil {
+            expect(bench.lines("transcription screenshots ").isEmpty, "\(bench.name): no screenshot handoff without a capture configured")
+        }
+    }
+
+    nonisolated static func capturing(
+        displaysPerCall: [Int] = [1], delay: Duration = .zero, failing: Screenshot.Failure? = nil
+    ) -> @Sendable () async throws -> [Screenshot] {
+        let context = CGContext(
+            data: nil, width: 2, height: 2, bitsPerComponent: 8, bytesPerRow: 8,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        let shot = Screenshot(encoding: context.makeImage()!, display: 1, points: CGSize(width: 2, height: 2))!
+        let calls = OSAllocatedUnfairLock(initialState: 0)
+        return { () async throws -> [Screenshot] in
+            let call = calls.withLock { $0 += 1; return $0 }
+            try? await Task.sleep(for: delay)
+            if let failing { throw failing }
+            return Array(repeating: shot, count: displaysPerCall[min(call, displaysPerCall.count) - 1])
+        }
+    }
+
+    static func screenshot(_ bench: Bench) async {
+        await bench.warm()
+        let held = await bench.hold(tone(0))
+        _ = await bench.outcome(held)
+        expect(await bench.waitFor("transcription screenshots ", upTo: 3), "screenshot: the handoff logged")
+        let lines = bench.lines
+        let delivered = lines.firstIndex { $0.hasPrefix("transcription delivered session=1 utterance=1 ") } ?? lines.count
+        let handoff = lines.firstIndex { $0.hasPrefix("transcription screenshots ") } ?? -1
+        expect(bench.lines("transcription screenshots ") == ["transcription screenshots utterance=1 displays=1"], "screenshot: one handoff of one display, got \(bench.lines("transcription screenshots "))")
+        expect(delivered < handoff, "screenshot: the handoff came after the delivery, at lines \(delivered) and \(handoff)")
+    }
+
+    static func screenshotMerge(_ bench: Bench) async {
+        await bench.warm()
+        _ = await bench.hold(tone(0))
+        try? await Task.sleep(for: .milliseconds(500))
+        let second = await bench.hold(tone(1))
+        _ = await bench.outcome(second)
+        expect(await bench.waitFor("transcription screenshots ", upTo: 3), "screenshot merge: the handoff logged")
+        await bench.sync()
+        expect(bench.lines("transcription screenshots ") == ["transcription screenshots utterance=1 displays=2"], "screenshot merge: one handoff, the second release's two displays, got \(bench.lines("transcription screenshots "))")
+    }
+
+    static func screenshotSlow(_ bench: Bench) async {
+        await bench.warm()
+        let held = await bench.hold(tone(0))
+        let outcome = await bench.outcome(held)
+        expect(outcome.final == .heard(sentence), "screenshot slow: delivered '\(sentence)', got \(outcome.final)")
+        expect((1.2...1.5).contains(outcome.deliveredAfter), "screenshot slow: delivered \(format(outcome.deliveredAfter)) s after the release, expected 1.2 to 1.5 with a 3 s capture")
+        expect(bench.lines("transcription screenshots ").isEmpty, "screenshot slow: the handoff was still waiting at delivery")
+        expect(await bench.waitFor("transcription screenshots ", upTo: 4), "screenshot slow: the handoff logged")
+        let after = bench.seconds(from: "check released ", to: "transcription screenshots ")
+        expect(after.map { $0 >= 3 } == true, "screenshot slow: the handoff came \(after.map(format) ?? "never") s after the release, expected at least 3")
+        expect(bench.lines("transcription screenshots ") == ["transcription screenshots utterance=1 displays=1"], "screenshot slow: one handoff of one display")
+    }
+
+    static func screenshotDenied(_ bench: Bench) async {
+        await bench.warm()
+        let held = await bench.hold(tone(0))
+        let outcome = await bench.outcome(held)
+        expect(outcome.final == .heard(sentence), "screenshot denied: delivered '\(sentence)', got \(outcome.final)")
+        expect((1.2...1.5).contains(outcome.deliveredAfter), "screenshot denied: delivered \(format(outcome.deliveredAfter)) s after the release, expected 1.2 to 1.5")
+        expect(await bench.waitFor("transcription screenshots ", upTo: 3), "screenshot denied: the handoff logged")
+        expect(bench.lines("transcription screenshots ") == ["transcription screenshots utterance=1 displays=none"], "screenshot denied: displays=none, got \(bench.lines("transcription screenshots "))")
     }
 
     static func warm(_ bench: Bench) async {

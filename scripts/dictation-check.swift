@@ -67,6 +67,7 @@ enum DictationCheck {
     static func main() {
         checkOneHold()
         checkMerge()
+        checkHeld()
         checkNewUtterance()
         checkGate()
         checkBacklog()
@@ -150,6 +151,28 @@ enum DictationCheck {
             ],
             "one answer delivers one sentence carrying both holds"
         )
+    }
+
+    static func checkHeld() {
+        print("held")
+        var dictation = Dictation()
+        expect(dictation.heldUtterance == nil, "nothing is held before the first press, got \(String(describing: dictation.heldUtterance))")
+        _ = dictation.press(at: at(0))
+        expect(dictation.heldUtterance == 1, "after a press at 0 s utterance 1 is held, got \(String(describing: dictation.heldUtterance))")
+        _ = dictation.handle(.release, at: at(1000))
+        expect(dictation.heldUtterance == nil, "after the release at 1 s nothing is held, got \(String(describing: dictation.heldUtterance))")
+        _ = dictation.press(at: at(1500))
+        expect(dictation.heldUtterance == 1, "a press at 1.5 s joins utterance 1 and holds it again, got \(String(describing: dictation.heldUtterance))")
+        _ = dictation.handle(.release, at: at(2000))
+        _ = dictation.press(at: at(4000))
+        expect(dictation.heldUtterance == 2, "a press at 4 s, 2 s after the release, holds utterance 2, got \(String(describing: dictation.heldUtterance))")
+
+        var failing = Dictation()
+        _ = failing.handle(.panel(open: true), at: at(0))
+        _ = failing.handle(.began(session: 1), at: at(900))
+        _ = failing.press(at: at(2000))
+        _ = failing.handle(.failed(session: 1, .timedOut), at: at(2500))
+        expect(failing.heldUtterance == nil, "a failure that delivers mid-hold leaves nothing held, got \(String(describing: failing.heldUtterance))")
     }
 
     static func checkNewUtterance() {

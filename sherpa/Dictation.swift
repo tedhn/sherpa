@@ -234,6 +234,8 @@ nonisolated struct Dictation: Sendable {
         live.first { $0.number == utterance }?.transcript.text
     }
 
+    var heldUtterance: Int? { live.last { $0.phase == .held }?.number }
+
     private var holding: Bool { live.contains { $0.phase == .held } }
 
     private var idleAt: Instant? {

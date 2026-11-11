@@ -93,6 +93,11 @@ swiftc -parse-as-library -o "$DERIVED/supabase-check" \
     scripts/supabase-check.swift >/dev/null \
     && "$DERIVED/supabase-check" || failures=$((failures + 1))
 
+echo "screenshot"
+swiftc -parse-as-library -o "$DERIVED/screenshot-check" \
+    sherpa/Screenshot.swift scripts/screenshot-check.swift >/dev/null \
+    && "$DERIVED/screenshot-check" || failures=$((failures + 1))
+
 echo "dictation"
 swiftc -parse-as-library -o "$DERIVED/dictation-check" \
     sherpa/AssemblyAI.swift sherpa/Dictation.swift scripts/dictation-check.swift >/dev/null \
@@ -110,7 +115,7 @@ app_swift_flags=(
 )
 swiftc -o "$DERIVED/fake-assemblyai" scripts/fake-assemblyai.swift >/dev/null \
     && swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/transcription-check" \
-        sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Supabase.swift sherpa/Transcription.swift \
+        sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Supabase.swift sherpa/Screenshot.swift sherpa/Transcription.swift \
         scripts/transcription-check.swift >/dev/null \
     && "$DERIVED/transcription-check" "$DERIVED/fake-assemblyai" || failures=$((failures + 1))
 
