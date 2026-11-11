@@ -535,6 +535,12 @@ func checkScreenshots(logged: Int) {
     } else {
         fail("\(label): the longer axes \(longest) are not all at most 1280")
     }
+    let selves = taken.map { $0["self"] ?? "missing" }
+    if selves.allSatisfy({ $0 == "hidden" }) {
+        print("  ok   \(label): Sherpa was on screen and every capture filtered it out, self=\(selves)")
+    } else {
+        fail("\(label): the panel was open at release, so every line should read self=hidden, got \(selves)")
+    }
     if handoff == "\(handoffPrefix)displays=\(screens.count)" {
         print("  ok   \(label): the handoff read displays=\(screens.count)")
     } else {

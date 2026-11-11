@@ -58,10 +58,11 @@ nonisolated struct Screenshot: Equatable, Sendable {
             logger.error("screenshots failed \(failure.logFields, privacy: .public)")
             throw failure
         }
+        let own = content.applications.filter { $0.processID == ProcessInfo.processInfo.processIdentifier }
         var shots: [Screenshot] = []
         for display in content.displays {
             let started = ContinuousClock.now
-            let filter = SCContentFilter(display: display, excludingWindows: [])
+            let filter = SCContentFilter(display: display, excludingApplications: own, exceptingWindows: [])
             let points = CGSize(width: display.width, height: display.height)
             let size = Pixels(fitting: points, scale: CGFloat(SCShareableContent.info(for: filter).pointPixelScale))
             let configuration = SCStreamConfiguration()
@@ -81,7 +82,7 @@ nonisolated struct Screenshot: Equatable, Sendable {
             let elapsed = started.duration(to: .now) / .milliseconds(1)
             logger.notice("""
                 screenshot taken display=\(shot.display) pixels=\(shot.pixels.width)x\(shot.pixels.height) \
-                points=\(Int(points.width))x\(Int(points.height)) bytes=\(shot.jpeg.count) ms=\(Int(elapsed.rounded()))
+                points=\(Int(points.width))x\(Int(points.height)) self=\(own.isEmpty ? "offscreen" : "hidden", privacy: .public) bytes=\(shot.jpeg.count) ms=\(Int(elapsed.rounded()))
                 """)
             shots.append(shot)
         }
