@@ -22,12 +22,25 @@ final class AppState: ObservableObject {
     @Published private(set) var transcription: Transcription?
     private let transcriber = Transcriber()
 
+    func panelOpened() {
+        transcriber.warm()
+    }
+
+    func panelClosed() {
+        transcriber.cool()
+    }
+
+    func quit() async {
+        await transcriber.close()
+    }
+
     func setHeld(_ held: Bool) {
         switch (held, microphone) {
         case (true, .ready), (true, .failed):
             beginHold()
         case (false, .listening):
             microphone = .ready
+            transcriber.release()
         case (true, .listening), (true, .askingForAccess), (false, _):
             break
         }
@@ -40,7 +53,7 @@ final class AppState: ObservableObject {
             do throws(MicrophoneProblem) {
                 let (capture, speech) = try MicrophoneCapture.start()
                 microphone = .listening(capture)
-                transcription = transcriber.transcribe(speech)
+                transcription = transcriber.press(speech)
             } catch {
                 microphone = .failed(error)
             }

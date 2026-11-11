@@ -8,6 +8,7 @@ guard let pid = arguments.first.flatMap(Int32.init) else {
 }
 let capturePath = arguments.dropFirst().first
 let scenarioPath = arguments.dropFirst(2).first
+let idleSeconds = arguments.dropFirst(3).first.flatMap(Double.init)
 
 var failures = 0
 
@@ -141,6 +142,7 @@ func speakAndSample() -> [Double] {
 final class LogTail: @unchecked Sendable {
     private let lock = NSLock()
     private var messages: [String] = []
+    private var stamps: [Date] = []
     private let process = Process()
 
     init() {
@@ -155,6 +157,9 @@ final class LogTail: @unchecked Sendable {
         process.standardError = FileHandle.nullDevice
         try? process.run()
         Thread.detachNewThread { [self] in
+            let stamp = DateFormatter()
+            stamp.locale = Locale(identifier: "en_US_POSIX")
+            stamp.dateFormat = "yyyy-MM-dd HH:mm:ss.SSSSSSZ"
             var pending = Data()
             let handle = output.fileHandleForReading
             while case let chunk = handle.availableData, !chunk.isEmpty {
@@ -166,7 +171,11 @@ final class LogTail: @unchecked Sendable {
                     guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
                           let message = object["eventMessage"] as? String
                     else { continue }
-                    lock.withLock { messages.append(message) }
+                    let at = (object["timestamp"] as? String).flatMap(stamp.date(from:)) ?? Date()
+                    lock.withLock {
+                        messages.append(message)
+                        stamps.append(at)
+                    }
                 }
             }
         }
@@ -194,6 +203,12 @@ final class LogTail: @unchecked Sendable {
 
     func lines(after count: Int) -> [String] {
         lock.withLock { Array(messages.dropFirst(count)) }
+    }
+
+    func time(of prefix: String, after count: Int) -> Date? {
+        lock.withLock {
+            messages.indices.dropFirst(count).first { messages[$0].hasPrefix(prefix) }.map { stamps[$0] }
+        }
     }
 
     var count: Int { lock.withLock { messages.count } }
@@ -308,26 +323,29 @@ func checkWAV(_ label: String, _ kind: Hold, frames: Double, rate: Double, loude
 
 struct Delivered {
     let session: Int
-    let via: String
+    let utterance: Int
+    let holds: Int
     let text: String
 }
 
-func finals(in lines: [String]) -> [Delivered] {
+func deliveries(in lines: [String]) -> [Delivered] {
     lines.compactMap { line in
-        guard line.hasPrefix("transcription final ") else { return nil }
+        guard line.hasPrefix("transcription delivered ") else { return nil }
         let parts = line.components(separatedBy: " text=")
-        var head: [String: String] = [:]
+        var head: [String: Int] = [:]
         for pair in parts[0].split(separator: " ") {
             let field = pair.split(separator: "=", maxSplits: 1)
-            if field.count == 2 { head[String(field[0])] = String(field[1]) }
+            if field.count == 2, let number = Int(field[1]) { head[String(field[0])] = number }
         }
-        guard let session = head["session"].flatMap({ Int($0) }), let via = head["via"] else { return nil }
-        return Delivered(session: session, via: via, text: parts.dropFirst().joined(separator: " text="))
+        guard let session = head["session"], let utterance = head["utterance"], let holds = head["holds"] else { return nil }
+        return Delivered(session: session, utterance: utterance, holds: holds, text: parts.dropFirst().joined(separator: " text="))
     }
 }
 
-func closed(after count: Int) -> Int {
-    tail.lines(after: count).filter { $0.hasPrefix("transcription ended") || $0.hasPrefix("transcription failed") }.count
+func sessionLines(after count: Int) -> [String] {
+    tail.lines(after: count).filter { line in
+        ["transcription connecting", "transcription opened", "transcription closing", "transcription ended", "transcription failed"].contains { line.hasPrefix($0) }
+    }
 }
 
 func useScenario(_ name: String) {
@@ -335,32 +353,34 @@ func useScenario(_ name: String) {
     try? Data("\(name)\n".utf8).write(to: URL(fileURLWithPath: scenarioPath))
 }
 
-func checkPanel(_ label: String, logged: Int) {
-    guard capturePath != nil else { return }
-    _ = wait(upTo: 4) { !finals(in: tail.lines(after: logged)).isEmpty }
-    let delivered = finals(in: tail.lines(after: logged))
-    guard delivered.count == 1, let final = delivered.first else {
-        fail("\(label): expected one 'transcription final' line after the release, got \(delivered.count)")
-        return
+let closedTurns = #"^S\d+ T\d+ frame \d+\.( S\d+ T\d+ frame \d+\.)*$"#
+
+@discardableResult
+func checkPanel(_ label: String, logged: Int, releasedAt: Date, holds: Int = 1) -> Delivered? {
+    guard capturePath != nil else { return nil }
+    _ = wait(upTo: 4) { !deliveries(in: tail.lines(after: logged)).isEmpty }
+    let delivered = deliveries(in: tail.lines(after: logged))
+    guard delivered.count == 1, let utterance = delivered.first else {
+        fail("\(label): expected one 'transcription delivered' line after the release, got \(delivered.count)")
+        return nil
     }
-    let closedTurns = final.text.range(of: #"^S\d+ frame \d+\.( S\d+ frame \d+\.)?$"#, options: .regularExpression) != nil
-    if ["endpoint", "termination"].contains(final.via), closedTurns {
-        print("  ok   \(label): one final via \(final.via), every turn closed by its period: '\(final.text)'")
+    let after = tail.time(of: "transcription delivered ", after: logged).map { $0.timeIntervalSince(releasedAt) } ?? -1
+    if (2.0...2.6).contains(after) {
+        print("  ok   \(label): delivered once, \(String(format: "%.2f", after)) s after the mouse-up")
     } else {
-        fail("\(label): the final came via \(final.via) as '\(final.text)', expected the endpoint answer or Termination with every turn closed by its period")
+        fail("\(label): delivered \(String(format: "%.2f", after)) s after the mouse-up, expected 2.0 to 2.6, the 1 s merge window plus the fake's 1 s answer")
     }
-    if wait(upTo: 1, until: { transcript() == final.text }) {
-        print("  ok   \(label): the panel shows the final")
+    if utterance.holds == holds, utterance.text.range(of: closedTurns, options: .regularExpression) != nil {
+        print("  ok   \(label): \(holds) hold(s), every turn closed by its period: '\(utterance.text)'")
     } else {
-        fail("\(label): the panel read '\(transcript())', expected the final '\(final.text)'")
+        fail("\(label): delivered \(utterance.holds) hold(s) as '\(utterance.text)', expected \(holds) with every turn closed by its period")
     }
-    _ = wait(upTo: 6) { closed(after: logged) > 0 }
-    let drained = transcript()
-    if drained == final.text {
-        print("  ok   \(label): the panel still shows the final after the session closed")
+    if wait(upTo: 1, until: { transcript() == utterance.text }) {
+        print("  ok   \(label): the panel shows the delivered text")
     } else {
-        fail("\(label): after the session closed the panel read '\(drained)', expected the final '\(final.text)'")
+        fail("\(label): the panel read '\(transcript())', expected '\(utterance.text)'")
     }
+    return utterance
 }
 
 func captureSize() -> Int {
@@ -369,9 +389,6 @@ func captureSize() -> Int {
 
 func checkTranscription(_ label: String, logged: Int, captureOffset: Int) {
     guard let capturePath else { return }
-    _ = wait(upTo: 8) {
-        tail.lines(after: logged).contains { $0.hasPrefix("transcription ended") || $0.hasPrefix("transcription failed") }
-    }
     let lines = tail.lines(after: logged)
     for line in lines where line.hasPrefix("transcription ") { print("  info \(label): \(line)") }
     let release = lines.firstIndex { $0.hasPrefix("hold ended") } ?? lines.count
@@ -381,12 +398,11 @@ func checkTranscription(_ label: String, logged: Int, captureOffset: Int) {
     } else {
         fail("\(label): no heard line arrived before the 'hold ended' line")
     }
-    let ended = lines.dropFirst(release).filter { $0.hasPrefix("transcription ended") }.count
-    let failed = lines.filter { $0.hasPrefix("transcription failed") }.count
-    if ended == 1, failed == 0 {
-        print("  ok   \(label): the session ended once after the release, with no failure")
+    let session = sessionLines(after: logged)
+    if session.isEmpty {
+        print("  ok   \(label): the open session carried the hold, with no connect, close or failure")
     } else {
-        fail("\(label): after the release there were \(ended) 'transcription ended' and \(failed) 'transcription failed' lines, expected 1 and 0")
+        fail("\(label): the hold touched the session itself: \(session)")
     }
     guard let wavPath = tail.savedPath(after: logged),
           let wav = FileManager.default.contents(atPath: wavPath),
@@ -403,6 +419,22 @@ func checkTranscription(_ label: String, logged: Int, captureOffset: Int) {
     } else {
         fail("\(label): the fake received \(sent.count) bytes that are not last-hold.wav's \(saved.count) bytes plus at most 1600 zero bytes")
     }
+}
+
+func panelWindows() -> String {
+    driven("return count of windows")
+}
+
+func clickStatusItem(expecting windows: String) -> Bool {
+    _ = driven("click menu bar item 1 of menu bar 2")
+    return wait(upTo: 5) { panelWindows() == windows }
+}
+
+func lastSession(after count: Int) -> Int? {
+    tail.lines(after: count).compactMap { line -> Int? in
+        guard line.hasPrefix("transcription opened session=") else { return nil }
+        return line.split(separator: " ").first { $0.hasPrefix("session=") }.flatMap { Int($0.dropFirst(8)) }
+    }.last
 }
 
 guard let controlRect = rect(of: control) else {
@@ -486,6 +518,7 @@ func hold(_ label: String, _ kind: Hold) {
     }
 
     post(.leftMouseUp, at: release)
+    let releasedAt = Date()
     let stopped = wait(upTo: 2) { deviceIsRunning() == false && caption() == "Hold to talk" }
     guard stopped else {
         fail("\(label): 2 s after the mouse-up the device running was \(deviceIsRunning() as Any) and the caption '\(caption())'")
@@ -517,7 +550,7 @@ func hold(_ label: String, _ kind: Hold) {
     let loudest = tail.loudest(after: logged)
     checkMeter(label, kind, samples: samples, released: released, loudest: loudest)
     checkWAV(label, kind, frames: frames, rate: rate, loudest: loudest, logged: logged)
-    checkPanel(label, logged: logged)
+    checkPanel(label, logged: logged, releasedAt: releasedAt)
     checkTranscription(label, logged: logged, captureOffset: captureOffset)
 }
 
@@ -531,78 +564,186 @@ func release() {
     post(.leftMouseUp, at: centre)
 }
 
+func talk(for seconds: Double) -> Date {
+    press()
+    wait(seconds)
+    release()
+    return Date()
+}
+
+func samples(_ count: Int) -> [String] {
+    (0..<count).map { _ in
+        defer { wait(0.2) }
+        return transcript()
+    }
+}
+
+func warmFirst() -> Int? {
+    guard capturePath != nil, let idleSeconds else { return nil }
+    let label = "panel open"
+    guard clickStatusItem(expecting: "0") else {
+        fail("\(label): the panel did not close")
+        return nil
+    }
+    wait(idleSeconds + 1.5)
+    let logged = tail.count
+    guard clickStatusItem(expecting: "1") else {
+        fail("\(label): the panel did not reopen")
+        return nil
+    }
+    _ = wait(upTo: 3) { lastSession(after: logged) != nil }
+    let lines = tail.lines(after: logged)
+    guard let session = lastSession(after: logged),
+          lines.contains("transcription connecting session=\(session) cause=panel"),
+          !lines.contains(where: { $0.hasPrefix("hold began") })
+    else {
+        fail("\(label): opening the panel did not connect a session before any press, got \(sessionLines(after: logged))")
+        return nil
+    }
+    print("  ok   \(label): opening the panel opened session \(session) before any press")
+    return session
+}
+
 func silentHold() {
     guard capturePath != nil, scenarioPath != nil else { return }
     let label = "silent hold"
     useScenario("silent")
     defer { useScenario("ok") }
-    let logged = tail.count
-    press()
-    wait(1.5)
-    release()
+    _ = talk(for: 1.5)
     if wait(upTo: 3, until: { transcript() == "Didn't catch that" }) {
         print("  ok   \(label): the panel reads 'Didn't catch that'")
     } else {
         fail("\(label): the panel read '\(transcript())', expected 'Didn't catch that'")
     }
-    _ = wait(upTo: 6) { closed(after: logged) > 0 }
 }
 
-func pressAgainWhileFinishing() {
+func mergedHolds() {
     guard capturePath != nil else { return }
-    let label = "press again while the last hold finishes"
+    let label = "press again 0.3 s after the release"
     let logged = tail.count
-    press()
-    wait(3)
-    release()
+    _ = talk(for: 3)
     wait(0.3)
-    guard finals(in: tail.lines(after: logged)).isEmpty else {
-        fail("\(label): the first hold's final landed within 0.3 s of its release, so the next press cannot overlap it")
-        _ = wait(upTo: 6) { closed(after: logged) > 0 }
-        return
+    press()
+    let during = samples(10)
+    release()
+    let releasedAt = Date()
+    if during.allSatisfy({ !$0.isEmpty }) {
+        print("  ok   \(label): the panel never cleared, \(Set(during.map { $0.prefix(16) }))")
+    } else {
+        fail("\(label): the panel went empty during the second hold: \(during)")
     }
+    checkPanel(label, logged: logged, releasedAt: releasedAt, holds: 2)
+}
+
+func newUtterance() {
+    guard capturePath != nil else { return }
+    let label = "press again 1.5 s after the release"
+    let logged = tail.count
+    _ = talk(for: 3)
+    wait(1.5)
     press()
     if wait(upTo: 0.3, until: { transcript().isEmpty }) {
         print("  ok   \(label): the press cleared the panel")
     } else {
         fail("\(label): 0.3 s after the press the panel still read '\(transcript())'")
     }
-    var samples: [String] = []
-    for _ in 0..<10 {
-        samples.append(transcript())
-        wait(0.2)
-    }
+    let during = samples(10)
     release()
-    _ = wait(upTo: 8) { closed(after: logged) >= 2 }
-
+    let releasedAt = Date()
+    // The first utterance is still waiting for its answer at the press, so it is delivered during the second hold.
+    _ = wait(upTo: 2) { !deliveries(in: tail.lines(after: logged)).isEmpty }
     let lines = tail.lines(after: logged)
-    let delivered = finals(in: lines).sorted { $0.session < $1.session }
-    guard delivered.count == 2 else {
-        fail("\(label): expected a final from each hold, got \(delivered.map(\.text))")
+    guard let firstAt = lines.firstIndex(where: { $0.hasPrefix("transcription delivered ") }),
+          let first = deliveries(in: [lines[firstAt]]).first
+    else {
+        fail("\(label): the first hold was never delivered")
         return
     }
-    let (first, second) = (delivered[0], delivered[1])
-    let secondBegan = lines.indices.filter { lines[$0].hasPrefix("hold began") }.dropFirst().first ?? lines.count
-    let firstFinal = lines.firstIndex { $0.hasPrefix("transcription final session=\(first.session) ") } ?? -1
-    if firstFinal > secondBegan {
-        print("  ok   \(label): the first hold's final landed during the second hold")
-    } else {
-        fail("\(label): the first hold's final landed before the second hold began, so nothing overlapped")
-    }
-    let firstWords = first.text.prefix { $0 != " " } + " "
-    let leaked = samples.filter { $0.hasPrefix(firstWords) }
+    let turns = Set(first.text.split(separator: " ").filter { $0.hasPrefix("T") })
+    let leaked = during.filter { sample in sample.split(separator: " ").contains { turns.contains($0) } }
     if leaked.isEmpty {
-        print("  ok   \(label): no sample during the second hold showed the first hold's words, \(Set(samples))")
+        print("  ok   \(label): no sample during the second hold showed the first one's turns \(turns.sorted())")
     } else {
-        fail("\(label): the panel showed the first hold's words during the second hold: \(leaked)")
+        fail("\(label): the panel showed the first hold's turns during the second hold: \(leaked)")
     }
-    if wait(upTo: 1, until: { transcript() == second.text }) {
-        print("  ok   \(label): the panel ends on the second hold's final '\(second.text)'")
+    guard let second = checkPanel(label, logged: logged + firstAt + 1, releasedAt: releasedAt) else { return }
+    if second.utterance == first.utterance + 1, second.session == first.session {
+        print("  ok   \(label): two utterances, \(first.utterance) then \(second.utterance), on session \(first.session)")
     } else {
-        fail("\(label): the panel read '\(transcript())', expected the second hold's final '\(second.text)'")
+        fail("\(label): expected utterance \(first.utterance + 1) on session \(first.session), got \(second.utterance) on \(second.session)")
     }
 }
 
+func serverClose(after session: Int) {
+    guard capturePath != nil, scenarioPath != nil else { return }
+    let label = "hold after a server close"
+    let logged = tail.count
+    useScenario("drop")
+    let failed = wait(upTo: 3) { tail.lines(after: logged).contains { $0.hasPrefix("transcription failed session=\(session) stage=open reason=serverError code=1011") } }
+    useScenario("ok")
+    if failed {
+        print("  ok   \(label): the fake's 1011 close failed session \(session) at stage=open")
+    } else {
+        fail("\(label): no 'transcription failed session=\(session) stage=open' line after the fake dropped it, got \(sessionLines(after: logged))")
+    }
+    press()
+    if wait(upTo: 3, until: { transcript().hasPrefix("S\(session + 1) ") }) {
+        print("  ok   \(label): words from session \(session + 1) showed while held: '\(transcript())'")
+    } else {
+        fail("\(label): no words from session \(session + 1) showed while held, the panel read '\(transcript())'")
+    }
+    release()
+    _ = wait(upTo: 3) { !deliveries(in: tail.lines(after: logged)).isEmpty }
+    let lines = tail.lines(after: logged)
+    if lines.contains("transcription connecting session=\(session + 1) cause=press") {
+        print("  ok   \(label): the press, not the failure, connected session \(session + 1)")
+    } else {
+        fail("\(label): expected the press to connect session \(session + 1), got \(sessionLines(after: logged))")
+    }
+}
+
+func idleClose(session: Int) {
+    guard capturePath != nil, let idleSeconds else { return }
+    let label = "idle close"
+    let logged = tail.count
+    // The panel closes somewhere between the click and the poll that sees it gone, about 0.2 s apart.
+    let clickedAt = Date()
+    guard clickStatusItem(expecting: "0") else {
+        fail("\(label): the panel did not close")
+        return
+    }
+    let goneAt = Date()
+    let closing = "transcription closing session=\(session) reason=idle"
+    _ = wait(upTo: idleSeconds + 2) { tail.lines(after: logged).contains(closing) }
+    let closedAt = tail.time(of: closing, after: logged)
+    let afterClick = closedAt.map { $0.timeIntervalSince(clickedAt) } ?? -1
+    let afterGone = closedAt.map { $0.timeIntervalSince(goneAt) } ?? -1
+    let span = "\(String(format: "%.2f", afterGone)) to \(String(format: "%.2f", afterClick)) s after the panel closed"
+    if afterClick >= idleSeconds, afterGone <= idleSeconds + 0.6 {
+        print("  ok   \(label): session \(session) closed \(span)")
+    } else {
+        fail("\(label): '\(closing)' came \(span), expected \(idleSeconds) to \(idleSeconds + 0.6)")
+    }
+    if wait(upTo: 3, until: { tail.lines(after: logged).contains { $0.hasPrefix("transcription ended session=\(session) ") } }) {
+        print("  ok   \(label): session \(session) read to its Termination")
+    } else {
+        fail("\(label): no 'transcription ended session=\(session)' line")
+    }
+    let reopened = tail.count
+    guard clickStatusItem(expecting: "1") else {
+        fail("\(label): the panel did not reopen")
+        return
+    }
+    let opened = "transcription opened session=\(session + 1) token=reused"
+    if wait(upTo: 3, until: { tail.lines(after: reopened).contains { $0.hasPrefix(opened) } }) {
+        print("  ok   \(label): reopening the panel opened session \(session + 1) with the reused token before any press")
+    } else {
+        fail("\(label): no '\(opened)' line after reopening the panel, got \(sessionLines(after: reopened))")
+    }
+}
+
+let warmed = warmFirst()
+let holdsBegan = tail.count
 hold("plain hold", .still)
 wait(0.5)
 hold("hold dragged off the control", .draggedOff)
@@ -611,5 +752,17 @@ hold("hold while the speakers talk", .speakersTalking)
 wait(0.5)
 silentHold()
 wait(0.5)
-pressAgainWhileFinishing()
+mergedHolds()
+wait(0.5)
+newUtterance()
+if let warmed {
+    let session = sessionLines(after: holdsBegan)
+    if session.isEmpty {
+        print("  ok   session \(warmed), opened with the panel, carried every hold")
+    } else {
+        fail("session \(warmed) did not carry every hold: \(session)")
+    }
+    serverClose(after: warmed)
+    idleClose(session: warmed + 1)
+}
 finish()

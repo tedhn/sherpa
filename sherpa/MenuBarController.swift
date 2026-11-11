@@ -79,6 +79,7 @@ final class MenuBarController: NSObject {
         // plain order-front for an app that is not active, and this app never
         // activates. Making the panel key here would pull focus as well.
         panel.orderFrontRegardless()
+        state.panelOpened()
     }
 
     private func outsideClick() {
@@ -86,11 +87,12 @@ final class MenuBarController: NSObject {
         hidePanel()
     }
 
-    private func hidePanel() {
+    func hidePanel() {
         // orderOut, not close(): close() tears down the hosting view (and the
         // SwiftUI state inside it); orderOut just hides it for the next show.
         panel.orderOut(nil)
         presentation = nil
+        state.panelClosed()
     }
 
     private func showQuitMenu(from button: NSStatusBarButton) {

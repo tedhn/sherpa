@@ -11,4 +11,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         menuBar = MenuBarController(state: state)
     }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // With .terminateLater, applicationWillTerminate waits for the reply, so hiding the
+        // panel is what releases the menu bar pin before the wait on the network.
+        menuBar?.hidePanel()
+        Task {
+            let (done, finish) = AsyncStream<Void>.makeStream()
+            Task {
+                await state.quit()
+                finish.yield()
+            }
+            Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                finish.yield()
+            }
+            for await _ in done { break }
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
 }

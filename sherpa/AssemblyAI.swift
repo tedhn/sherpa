@@ -17,6 +17,11 @@ nonisolated enum AssemblyAI {
                 URLQueryItem(name: "encoding", value: "pcm_s16le"),
                 URLQueryItem(name: "format_turns", value: "true"),
                 URLQueryItem(name: "speech_model", value: "universal-streaming-english"),
+                // The hold ends an utterance, not a pause. With the defaults the server ended
+                // "Open the." on its own between two merged holds, before any ForceEndpoint.
+                URLQueryItem(name: "end_of_turn_confidence_threshold", value: "1"),
+                URLQueryItem(name: "min_end_of_turn_silence_when_confident", value: "10000"),
+                URLQueryItem(name: "max_turn_silence", value: "10000"),
                 URLQueryItem(name: "token", value: token),
             ]
             return components.url!
@@ -131,24 +136,16 @@ nonisolated enum AssemblyAI {
         case failed(Failure)
     }
 
+    // One utterance's words, keyed by turn order.
     struct Transcript: Equatable, Sendable {
         enum Shown: Equatable, Sendable {
             case hearing(String)
             case final(Final)
         }
 
-        enum Finish: String, Sendable {
-            case endpoint, terminate
-        }
-
         private var turns: [Int: Turn] = [:]
-        private var answerFloor: Int?
-        private(set) var delivered: Final?
-        private(set) var lastLag: Duration?
 
         init() {}
-
-        var shown: Shown { delivered.map(Shown.final) ?? .hearing(text) }
 
         var text: String {
             turns.sorted { $0.key < $1.key }
@@ -157,46 +154,107 @@ nonisolated enum AssemblyAI {
                 .joined(separator: " ")
         }
 
-        mutating func hear(_ turn: Turn, sentThrough: Duration) -> Final? {
-            if let end = turn.audioEnd { lastLag = sentThrough - end }
+        var final: Final { text.isEmpty ? .silence : .heard(text) }
+
+        mutating func hear(_ turn: Turn) {
             if turns[turn.order].map({ $0.stage <= turn.stage }) ?? true {
                 turns[turn.order] = turn
             }
-            // Measured: the server answers ForceEndpoint with one end_of_turn at or above the
-            // turn that was open when it was sent.
-            guard let floor = answerFloor, turn.endsTurn, turn.order >= floor, turn.canAnswerEndpoint
-            else { return nil }
-            return settle()
         }
+    }
 
-        mutating func expectEndpointAnswer() {
-            guard answerFloor == nil else { return }
-            answerFloor = turns.max { $0.key < $1.key }.map { $0.value.endsTurn ? $0.key + 1 : $0.key } ?? 0
-        }
-
+    // What one socket has sent, and what the server's answers on it mean. The audio
+    // clock counts every byte sent, padding included, because word end times use that
+    // same timeline.
+    struct Ledger: Equatable, Sendable {
         // Live partials trailed the sent audio by a median 300 ms, p90 380 ms, max 740 ms;
         // a queued backlog by over 2000 ms.
         static let caughtUpLag: Duration = .milliseconds(600)
+        static let answerLimit: Duration = .milliseconds(2800)
+
+        struct Outstanding: Equatable, Sendable {
+            let floor: Int
+            let sentAt: ContinuousClock.Instant
+        }
+
+        private struct Latest: Equatable, Sendable {
+            let order: Int
+            let ended: Bool
+        }
+
+        private(set) var clock: Duration = .zero
+        private(set) var lastLag: Duration?
+        private(set) var outstanding: Outstanding?
+        private var wanted: ContinuousClock.Instant?
+        // A worst-case bound on the audio the server holds unprocessed, as of `asOf`: each
+        // frame adds its length, the server drains at least real time, and a word end shows
+        // how far it has got.
+        private var backlog: Duration = .zero
+        private var asOf: ContinuousClock.Instant
+        private var latest: Latest?
+
+        init(began: ContinuousClock.Instant) {
+            asOf = began
+        }
+
+        // Turn orders count up across the whole session, so a turn this socket has already
+        // carried can never be the first of a new utterance.
+        var nextOrder: Int { latest.map { $0.order + 1 } ?? 0 }
+
+        mutating func sent(_ audio: Duration, at now: ContinuousClock.Instant) {
+            backlog = worst(at: now) + audio
+            asOf = now
+            clock += audio
+        }
+
+        // True when the turn answers the outstanding ForceEndpoint.
+        mutating func hear(_ turn: Turn, at now: ContinuousClock.Instant) -> Bool {
+            if let end = turn.audioEnd {
+                lastLag = clock - end
+                backlog = max(.zero, min(worst(at: now), clock - end))
+                asOf = now
+            }
+            switch latest {
+            case let known? where known.order > turn.order:
+                break
+            case let known? where known.order == turn.order:
+                latest = Latest(order: known.order, ended: known.ended || turn.endsTurn)
+            default:
+                latest = Latest(order: turn.order, ended: turn.endsTurn)
+            }
+            // Measured: the server answers ForceEndpoint with one end_of_turn at or above the
+            // turn that was open when it was sent, an empty one after silence.
+            guard let floor = outstanding?.floor, turn.endsTurn, turn.order >= floor, turn.canAnswerEndpoint
+            else { return false }
+            outstanding = nil
+            return true
+        }
+
+        mutating func want(notBefore instant: ContinuousClock.Instant) { wanted = instant }
+
+        mutating func unwant() { wanted = nil }
 
         // AssemblyAI applies ForceEndpoint where its processing has reached, not after audio
-        // still queued, so it ends the wrong turn while the server is behind. Terminate
-        // finishes every turn first.
-        func finish() -> Finish {
-            lastLag.map { $0 <= Self.caughtUpLag } == true ? .endpoint : .terminate
+        // still queued, so it ends the wrong turn while the server is behind.
+        var caughtUp: ContinuousClock.Instant { asOf + max(.zero, backlog - Self.caughtUpLag) }
+
+        var endpointDue: ContinuousClock.Instant? {
+            guard let wanted, outstanding == nil else { return nil }
+            return max(wanted, caughtUp)
         }
 
-        mutating func settle() -> Final? {
-            deliver(text.isEmpty ? .silence : .heard(text))
+        // One ForceEndpoint outstanding at a time, so no answer is counted against the wrong one.
+        mutating func fire(at now: ContinuousClock.Instant) -> Bool {
+            guard let due = endpointDue, due <= now else { return false }
+            wanted = nil
+            outstanding = Outstanding(floor: latest.map { $0.ended ? $0.order + 1 : $0.order } ?? 0, sentAt: now)
+            return true
         }
 
-        mutating func fail(_ failure: Failure) -> Final? {
-            deliver(.failed(failure))
-        }
+        var answerDue: ContinuousClock.Instant? { outstanding.map { $0.sentAt + Self.answerLimit } }
 
-        private mutating func deliver(_ final: Final) -> Final? {
-            guard delivered == nil else { return nil }
-            delivered = final
-            return final
+        private func worst(at now: ContinuousClock.Instant) -> Duration {
+            max(.zero, backlog - asOf.duration(to: now))
         }
     }
 

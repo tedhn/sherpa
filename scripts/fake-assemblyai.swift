@@ -3,7 +3,7 @@ import Network
 
 enum Scenario: String {
     case ok, silent, noEndpoint = "no-endpoint", close1008 = "close-1008", noBegin = "no-begin",
-         noTermination = "no-termination", token401 = "token-401", expiredOnce = "expired-once"
+         noTermination = "no-termination", token401 = "token-401", expiredOnce = "expired-once", drop
 }
 
 var positional: [String] = []
@@ -29,6 +29,7 @@ guard positional.count >= 2, let parsed = Scenario(rawValue: positional.count > 
 
 let defaultScenario = parsed
 
+// Read at every decision, so a check can switch modes mid-session through the file.
 extension Scenario {
     static var current: Scenario {
         scenarioFile.flatMap { try? String(contentsOf: $0, encoding: .utf8) }
@@ -110,21 +111,25 @@ final class TokenExchange {
     }
 }
 
+nonisolated(unsafe) var streamingSessions: [StreamingSession] = []
+
 final class StreamingSession {
     private static let closeFallback = 1.0
     private static let processingDelay = 0.3
     private static let processingSpeed = 2.0
-    private static let turnEndsAtFrame = 15
+    private static let turnLength = 18
+    // The real server ends the right turn when it is caught up to within this much audio.
+    private static let caughtUp = 0.6
     private static var count = 0
 
     private let connection: NWConnection
     private let id: Int
-    private let scenario: Scenario
     private let opened = Date()
     private var received: [Int] = []
     private var silent: [Bool] = []
     private var bytes = 0
     private var closing = false
+    private var begun = false
     private let refuses: Bool
 
     private var processed = 0
@@ -134,6 +139,7 @@ final class StreamingSession {
     private var stepping = false
     private var stalled = false
     private var order = 0
+    private var spoken = 0
     private var openText: String?
     private var answerPending = false
     private var terminateWaiting = false
@@ -144,9 +150,10 @@ final class StreamingSession {
     init(_ connection: NWConnection) {
         Self.count += 1
         id = Self.count
-        scenario = Scenario.current
+        let scenario = Scenario.current
         refuses = scenario == .expiredOnce && id == 2 && mints == 1
         self.connection = connection
+        streamingSessions.append(self)
         connection.stateUpdateHandler = { [self] state in
             guard case .ready = state else { return }
             if refuses {
@@ -160,8 +167,10 @@ final class StreamingSession {
                 close(.protocolCode(.policyViolation), "Unauthorized Connection: Invalid API key")
             case .noBegin:
                 break
-            case .ok, .silent, .noEndpoint, .noTermination, .token401, .expiredOnce:
+            case .ok, .silent, .noEndpoint, .noTermination, .token401, .expiredOnce, .drop:
                 queue.asyncAfter(deadline: .now() + beginDelay) { [self] in
+                    print("session \(id) began")
+                    begun = true
                     send(["type": "Begin", "id": "fake-\(id)", "expires_at": Int(Date().timeIntervalSince1970) + 480])
                     queue.asyncAfter(deadline: .now() + Self.processingDelay) { [self] in
                         cursorFree = Date()
@@ -218,7 +227,7 @@ final class StreamingSession {
         let due = max(Date(), free.addingTimeInterval(seconds / Self.processingSpeed))
         queue.asyncAfter(deadline: .now() + due.timeIntervalSinceNow) { [self] in
             stepping = false
-            guard !stalled else { return }
+            guard !stalled, processed < received.count else { return }
             cursorFree = due
             process()
             step()
@@ -230,9 +239,11 @@ final class StreamingSession {
         processedBytes += received[processed]
         if !isSilent { wordBytes = processedBytes }
         processed += 1
-        guard scenario != .silent, !isSilent, processed % 3 == 0 else { return }
-        let text = "S\(id) frame \(processed)"
-        if processed == Self.turnEndsAtFrame {
+        guard Scenario.current != .silent, !isSilent else { return }
+        spoken += 1
+        guard processed % 3 == 0 else { return }
+        let text = "S\(id) T\(order) frame \(processed)"
+        if spoken >= Self.turnLength {
             sendTurn(text.lowercased(), formatted: false, end: true)
             endOpenTurn(text)
         } else {
@@ -241,16 +252,38 @@ final class StreamingSession {
         }
     }
 
+    // Caught up, ForceEndpoint ends the turn after everything received and the session
+    // carries on. Behind, it ends the turn where processing has reached, which is the wrong
+    // one, and nothing more is processed until Terminate, as measured.
     private func forceEndpoint() {
-        print("session \(id) force-endpoint at frame \(processed) of \(received.count)")
-        stalled = true
-        guard scenario != .noEndpoint else { return }
+        let unprocessed = Double(bytes - processedBytes) / Double(bytesPerSecond)
+        print("session \(id) force-endpoint at frame \(processed) of \(received.count) unprocessed=\(String(format: "%.3f", unprocessed))")
+        guard Scenario.current != .noEndpoint else {
+            stalled = true
+            return
+        }
+        if unprocessed > Self.caughtUp {
+            stalled = true
+        } else {
+            while processed < received.count { process() }
+            cursorFree = max(cursorFree ?? Date(), Date())
+        }
+        let (text, ended, cursor) = (openText, order, wordBytes)
+        order += 1
+        openText = nil
+        spoken = 0
         answerPending = true
         queue.asyncAfter(deadline: .now() + answerDelay) { [self] in
             answerPending = false
-            endOpenTurn(openText)
+            sendTurn(text.map { $0 + "." } ?? "", order: ended, formatted: true, end: true, through: cursor)
             if terminateWaiting { terminate() }
         }
+    }
+
+    func drop() {
+        guard begun, !closing else { return }
+        print("session \(id) dropped after \(received.count) frames, \(bytes) bytes")
+        close(.protocolCode(.internalServerError), "Internal error")
     }
 
     private func terminate() {
@@ -263,7 +296,7 @@ final class StreamingSession {
         while processed < received.count { process() }
         if openText != nil { endOpenTurn(openText) }
         endOpenTurn(nil)
-        guard scenario != .noTermination else { return }
+        guard Scenario.current != .noTermination else { return }
         send([
             "type": "Termination",
             "audio_duration_seconds": Double(bytes) / Double(bytesPerSecond),
@@ -276,12 +309,13 @@ final class StreamingSession {
         sendTurn(text.map { $0 + "." } ?? "", formatted: true, end: true)
         order += 1
         openText = nil
+        spoken = 0
     }
 
-    private func sendTurn(_ text: String, formatted: Bool, end: Bool) {
-        let cursor = wordBytes * 1000 / bytesPerSecond
-        let words: [[String: Any]] = text.isEmpty ? [] : [["text": "frame", "start": max(0, cursor - 100), "end": cursor]]
-        send(["type": "Turn", "turn_order": order, "turn_is_formatted": formatted, "end_of_turn": end, "transcript": text, "words": words])
+    private func sendTurn(_ text: String, order: Int? = nil, formatted: Bool, end: Bool, through cursor: Int? = nil) {
+        let ms = (cursor ?? wordBytes) * 1000 / bytesPerSecond
+        let words: [[String: Any]] = text.isEmpty ? [] : [["text": "frame", "start": max(0, ms - 100), "end": ms]]
+        send(["type": "Turn", "turn_order": order ?? self.order, "turn_is_formatted": formatted, "end_of_turn": end, "transcript": text, "words": words])
     }
 
     private func send(_ message: [String: Any]) {
@@ -335,6 +369,14 @@ for listener in [tokenListener, socketListener] {
     }
     listener.start(queue: queue)
 }
+
+let dropPoll = DispatchSource.makeTimerSource(queue: queue)
+dropPoll.schedule(deadline: .now(), repeating: 0.05)
+dropPoll.setEventHandler {
+    guard Scenario.current == .drop else { return }
+    for session in streamingSessions { session.drop() }
+}
+dropPoll.activate()
 
 let parentExit = DispatchSource.makeProcessSource(identifier: getppid(), eventMask: .exit, queue: queue)
 parentExit.setEventHandler { exit(0) }
