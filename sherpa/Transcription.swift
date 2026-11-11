@@ -15,6 +15,7 @@ final class Transcription {
     let number: Int
 
     fileprivate(set) var shown: AssemblyAI.Transcript.Shown = .hearing("")
+    fileprivate(set) var reply: Claude.Reply?
 
     var delivered: AssemblyAI.Final {
         get async {
@@ -47,6 +48,7 @@ final class Transcriber {
         var limits = Dictation.Limits()
         var archive: Supabase.Project? = nil
         var screenshots: (@Sendable () async throws -> [Screenshot])? = nil
+        var claude: Claude.Endpoint? = nil
 
         static var current: Configuration {
             func planted(_ name: String) -> String? {
@@ -60,7 +62,8 @@ final class Transcriber {
                 archive: planted("SupabaseURL").flatMap(URL.init(string:)).flatMap { url in
                     planted("SupabasePublishableKey").map { Supabase.Project(url: url, key: $0) }
                 },
-                screenshots: Screenshot.everyDisplay
+                screenshots: Screenshot.everyDisplay,
+                claude: Claude.Endpoint(url: Claude.Endpoint.production, key: planted("AnthropicAPIKey"))
             )
             #if DEBUG
             let defaults = UserDefaults.standard
@@ -77,6 +80,10 @@ final class Transcriber {
             if let url = defaults.string(forKey: "SupabaseURL") {
                 let key = defaults.string(forKey: "SupabasePublishableKey") ?? configuration.archive?.key
                 configuration.archive = URL(string: url).flatMap { url in key.map { Supabase.Project(url: url, key: $0) } }
+            }
+            if let url = defaults.string(forKey: "AnthropicURL") {
+                let key = defaults.string(forKey: "AnthropicAPIKey") ?? configuration.claude?.key
+                configuration.claude = URL(string: url).map { Claude.Endpoint(url: $0, key: key) }
             }
             #endif
             return configuration
@@ -95,12 +102,14 @@ final class Transcriber {
     private var screenshots: [Int: Task<[Screenshot]?, Never>] = [:]
     private var alarm: (at: ContinuousClock.Instant, task: Task<Void, Never>)?
     private let archive: Archive?
+    private let conversation: Conversation?
 
     init(configuration: Configuration = .current) {
         let urlSession = URLSession(configuration: .default)
         self.configuration = configuration
         self.urlSession = urlSession
         archive = configuration.archive.map { Archive(project: $0, urlSession: urlSession) }
+        conversation = configuration.claude.map { Conversation(endpoint: $0, urlSession: urlSession) }
         tokens = Tokens(key: configuration.key, url: configuration.endpoints.token, urlSession: urlSession)
         dictation = Dictation(limits: configuration.limits)
     }
@@ -214,11 +223,19 @@ final class Transcriber {
                     partials: heard, pcm: recorders.reduce(into: Data()) { $0.append($1()) }
                 ), number: utterance)
             }
-            if let taken = screenshots.removeValue(forKey: utterance) {
+            let taken = screenshots.removeValue(forKey: utterance)
+            if case .heard(let text) = final, let record, let conversation {
+                record.reply = .asking
                 Task {
-                    let shots = await taken.value
-                    logger.notice("transcription screenshots utterance=\(utterance) displays=\(shots.map { String($0.count) } ?? "none", privacy: .public)")
+                    let question = Claude.Question(text: text, screenshots: await handoff(taken, utterance: utterance))
+                    do throws(Claude.Failure) {
+                        record.reply = .answered(try await conversation.answer(question, utterance: utterance))
+                    } catch {
+                        record.reply = .failed(error)
+                    }
                 }
+            } else if let taken {
+                Task { _ = await handoff(taken, utterance: utterance) }
             }
             record?.deliver(final)
         }
@@ -241,6 +258,13 @@ final class Transcriber {
     private func after(_ utterance: Int) -> String {
         records[utterance].map { String(format: "%.3f", $0.began.duration(to: .now) / .seconds(1)) } ?? "none"
     }
+}
+
+private func handoff(_ taken: Task<[Screenshot]?, Never>?, utterance: Int) async -> [Screenshot] {
+    guard let taken else { return [] }
+    let shots = await taken.value
+    logger.notice("transcription screenshots utterance=\(utterance) displays=\(shots.map { String($0.count) } ?? "none", privacy: .public)")
+    return shots ?? []
 }
 
 private func milliseconds(_ duration: Duration) -> String {
