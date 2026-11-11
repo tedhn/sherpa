@@ -77,6 +77,10 @@ enum ScreenshotCheck {
     }
 
     static func main() async {
+        if CommandLine.arguments.contains("--backdrop") {
+            await backdrop()
+            return
+        }
         if CommandLine.arguments.contains("--live") {
             await live()
             return
@@ -141,9 +145,80 @@ enum ScreenshotCheck {
         )
     }
 
+    static let backdropRect = CGRect(x: 180, y: 180, width: 400, height: 400)
+    static let ownRect = CGRect(x: 300, y: 300, width: 160, height: 160)
+
+    @MainActor
+    static func solidWindow(_ color: NSColor, _ rect: CGRect, on screen: NSScreen) -> NSWindow {
+        let window = NSWindow(
+            contentRect: rect.offsetBy(dx: screen.frame.minX, dy: screen.frame.minY),
+            styleMask: .borderless, backing: .buffered, defer: false
+        )
+        window.backgroundColor = color
+        window.isOpaque = true
+        window.hasShadow = false
+        window.level = .floating
+        window.orderFrontRegardless()
+        window.display()
+        return window
+    }
+
+    @MainActor
+    static func backdrop() async {
+        NSApplication.shared.setActivationPolicy(.accessory)
+        _ = solidWindow(.green, backdropRect, on: NSScreen.screens[0])
+        try? await Task.sleep(for: .seconds(10))
+        exit(0)
+    }
+
+    static func fractions(of image: CGImage, in crop: CGRect) -> (magenta: Double, green: Double) {
+        let context = context(image.width, image.height)
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        let bytes = context.data!.assumingMemoryBound(to: UInt8.self)
+        var (magenta, green, total) = (0, 0, 0)
+        for y in Int(crop.minY)..<Int(crop.maxY) {
+            for x in Int(crop.minX)..<Int(crop.maxX) {
+                let offset = y * context.bytesPerRow + x * 4
+                let (r, g, b) = (bytes[offset], bytes[offset + 1], bytes[offset + 2])
+                if r > 200, g < 60, b > 200 { magenta += 1 }
+                if r < 60, g > 180, b < 60 { green += 1 }
+                total += 1
+            }
+        }
+        return (Double(magenta) / Double(total), Double(green) / Double(total))
+    }
+
     @MainActor
     static func live() async {
         print("live")
+        NSApplication.shared.setActivationPolicy(.accessory)
+        let child = Process()
+        child.executableURL = Bundle.main.executableURL!
+        child.arguments = ["--backdrop"]
+        do {
+            try child.run()
+        } catch {
+            print("  FAIL could not launch the backdrop child, \(error)")
+            exit(1)
+        }
+        func finish(_ window: NSWindow?) -> Never {
+            window?.orderOut(nil)
+            child.terminate()
+            exit(failures == 0 ? 0 : 1)
+        }
+        var appeared = false
+        for _ in 0..<50 where !appeared {
+            let listed = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
+            appeared = listed.contains { ($0[kCGWindowOwnerPID as String] as? Int32) == child.processIdentifier }
+            if !appeared { try? await Task.sleep(for: .milliseconds(100)) }
+        }
+        guard appeared else {
+            expect(false, "the backdrop child's window is on screen within 5 s")
+            finish(nil)
+        }
+        let main = NSScreen.screens[0]
+        let own = solidWindow(.magenta, ownRect, on: main)
+        try? await Task.sleep(for: .milliseconds(500))
         let started = ContinuousClock.now
         let shots: [Screenshot]
         do {
@@ -154,7 +229,7 @@ enum ScreenshotCheck {
             } else {
                 print("  FAIL \(error.logFields)")
             }
-            exit(1)
+            finish(own)
         }
         let elapsed = started.duration(to: .now) / .milliseconds(1)
         let screens = NSScreen.screens.compactMap { screen in
@@ -181,6 +256,20 @@ enum ScreenshotCheck {
             print("  info display=\(shot.display) pixels=\(shot.pixels.width)x\(shot.pixels.height) points=\(Int(shot.points.width))x\(Int(shot.points.height)) bytes=\(shot.jpeg.count)")
         }
         print("  info captured displays=\(shots.count) ms=\(Int(elapsed.rounded()))")
-        exit(failures == 0 ? 0 : 1)
+        let mainID = (main.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber).map { CGDirectDisplayID($0.uint32Value) }
+        if let shot = shots.first(where: { $0.display == mainID }), let image = decoded(shot.jpeg) {
+            let k = Double(shot.pixels.width) / shot.points.width
+            let inner = ownRect.insetBy(dx: 20, dy: 20)
+            let crop = CGRect(
+                x: inner.minX * k, y: (main.frame.height - inner.maxY) * k,
+                width: inner.width * k, height: inner.height * k
+            )
+            let seen = fractions(of: image, in: crop)
+            expect(seen.magenta < 0.01, "the check's own window is left out, magenta fraction \(String(format: "%.3f", seen.magenta))")
+            expect(seen.green > 0.99, "another process's window still shows where the own window was, green fraction \(String(format: "%.3f", seen.green))")
+        } else {
+            expect(false, "the screenshot of the main display \(String(describing: mainID)) decodes")
+        }
+        finish(own)
     }
 }
