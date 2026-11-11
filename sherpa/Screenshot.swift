@@ -82,7 +82,7 @@ nonisolated struct Screenshot: Equatable, Sendable {
             let elapsed = started.duration(to: .now) / .milliseconds(1)
             logger.notice("""
                 screenshot taken display=\(shot.display) pixels=\(shot.pixels.width)x\(shot.pixels.height) \
-                points=\(Int(points.width))x\(Int(points.height)) self=\(own.isEmpty ? "offscreen" : "hidden") bytes=\(shot.jpeg.count) ms=\(Int(elapsed.rounded()))
+                points=\(Int(points.width))x\(Int(points.height)) self=\(own.isEmpty ? "offscreen" : "hidden", privacy: .public) bytes=\(shot.jpeg.count) ms=\(Int(elapsed.rounded()))
                 """)
             shots.append(shot)
         }
