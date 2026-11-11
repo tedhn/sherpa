@@ -54,7 +54,7 @@ nonisolated struct Dictation: Sendable {
         // No utterance means the turn came late: from a closed socket or below the owner's first turn.
         case heard(session: Int, utterance: Int?, AssemblyAI.Turn)
         case final(session: Int?, utterance: Int, AssemblyAI.Final, via: Via)
-        case deliver(session: Int?, utterance: Int, AssemblyAI.Final, spans: [Span])
+        case deliver(session: Int?, utterance: Int, AssemblyAI.Final, via: Via, spans: [Span])
     }
 
     enum Cause: String, Sendable { case panel, press, carry }
@@ -263,7 +263,7 @@ nonisolated struct Dictation: Sendable {
         var effects: [Effect] = []
         if let index = live.firstIndex(where: { $0.number == socket.owner }) {
             effects.append(.final(session: socket.session, utterance: live[index].number, live[index].transcript.final, via: .fallback))
-            effects.append(deliver(index))
+            effects.append(deliver(index, via: .fallback))
         }
         effects.append(.close(session: socket.session, reason: .retire))
         line = .down
@@ -304,7 +304,7 @@ nonisolated struct Dictation: Sendable {
             live[owner].transcript.hear(turn)
             if answered {
                 effects.append(.final(session: session, utterance: live[owner].number, live[owner].transcript.final, via: .endpoint))
-                effects.append(deliver(owner))
+                effects.append(deliver(owner, via: .endpoint))
             }
         }
         if socket.ledger.fire(at: now) { effects.append(.endpoint(session: session)) }
@@ -353,15 +353,15 @@ nonisolated struct Dictation: Sendable {
 
     private mutating func fail(_ index: Int, _ failure: AssemblyAI.Failure, on session: Int?) -> [Effect] {
         let final = Effect.final(session: live[index].session ?? session, utterance: live[index].number, .failed(failure), via: .failure)
-        return [final, deliver(index, .failed(failure), on: session)]
+        return [final, deliver(index, .failed(failure), via: .failure, on: session)]
     }
 
     // The only place an utterance leaves `live`.
-    private mutating func deliver(_ index: Int, _ final: AssemblyAI.Final? = nil, on session: Int? = nil) -> Effect {
+    private mutating func deliver(_ index: Int, _ final: AssemblyAI.Final? = nil, via: Via, on session: Int? = nil) -> Effect {
         let utterance = live.remove(at: index)
         return .deliver(
             session: utterance.session ?? session, utterance: utterance.number,
-            final ?? utterance.transcript.final, spans: utterance.holds.map(\.span)
+            final ?? utterance.transcript.final, via: via, spans: utterance.holds.map(\.span)
         )
     }
 

@@ -61,6 +61,8 @@ nonisolated final class TapReceiver: Sendable {
         meter.withLock { $0 }.fill(at: .now)
     }
 
+    var recorded: Data { recording.withLockUnchecked { $0.pcm } }
+
     func finishRecording() -> Data {
         recording.withLockUnchecked { recording in
             recording.record(recording.converter.finish())
@@ -91,7 +93,7 @@ final class MicrophoneCapture {
     private let rate: Double
     private let started: ContinuousClock.Instant
 
-    static func start() throws(MicrophoneProblem) -> (capture: MicrophoneCapture, speech: SpeechStream) {
+    static func start() throws(MicrophoneProblem) -> (capture: MicrophoneCapture, speech: SpeechStream, recorded: @Sendable () -> Data) {
         let started = ContinuousClock.now
         let engine = AVAudioEngine()
         let input = engine.inputNode
@@ -120,7 +122,8 @@ final class MicrophoneCapture {
             throw .engineFailed
         }
         logger.notice("hold began rate=\(format.sampleRate, format: .fixed(precision: 0)) channels=\(format.channelCount)")
-        return (MicrophoneCapture(engine: engine, receiver: receiver, rate: format.sampleRate, started: started), speech)
+        let capture = MicrophoneCapture(engine: engine, receiver: receiver, rate: format.sampleRate, started: started)
+        return (capture, speech, { receiver.recorded })
     }
 
     private init(engine: AVAudioEngine, receiver: TapReceiver, rate: Double, started: ContinuousClock.Instant) {
