@@ -98,6 +98,11 @@ swiftc -parse-as-library -o "$DERIVED/screenshot-check" \
     sherpa/Screenshot.swift scripts/screenshot-check.swift >/dev/null \
     && "$DERIVED/screenshot-check" || failures=$((failures + 1))
 
+echo "claude"
+swiftc -parse-as-library -o "$DERIVED/claude-check" \
+    sherpa/Screenshot.swift sherpa/Claude.swift scripts/claude-check.swift >/dev/null \
+    && "$DERIVED/claude-check" || failures=$((failures + 1))
+
 echo "dictation"
 swiftc -parse-as-library -o "$DERIVED/dictation-check" \
     sherpa/AssemblyAI.swift sherpa/Dictation.swift scripts/dictation-check.swift >/dev/null \
