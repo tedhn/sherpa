@@ -87,6 +87,8 @@ enum ScreenshotCheck {
         }
         checkFitting()
         checkEncoding()
+        checkCursor()
+        checkLabels()
         checkFailure()
         exit(failures == 0 ? 0 : 1)
     }
@@ -108,14 +110,14 @@ enum ScreenshotCheck {
 
     static func checkEncoding() {
         print("encoding")
-        let points = CGSize(width: 1710, height: 1112)
+        let frame = CGRect(x: 97, y: -1112, width: 1710, height: 1112)
         let image = gradient(1280, 832)
-        guard let shot = Screenshot(encoding: image, display: 7, points: points) else {
+        guard let shot = Screenshot(encoding: image, display: 7, appKitFrame: frame, cursor: .zero) else {
             expect(false, "a drawn 1280x832 image encodes")
             return
         }
         expect(shot.pixels == .init(width: 1280, height: 832), "pixels come from the image, got \(shot.pixels)")
-        expect(shot.points == points, "points are kept as given, got \(shot.points)")
+        expect(shot.appKitFrame == frame, "the frame is kept as given, got \(shot.appKitFrame)")
         expect(shot.display == 7, "the display id is kept, got \(shot.display)")
         expect(Array(shot.jpeg.prefix(3)) == [0xFF, 0xD8, 0xFF], "the JPEG starts with FF D8 FF, got \(Array(shot.jpeg.prefix(3)))")
         expect(Array(shot.jpeg.suffix(2)) == [0xFF, 0xD9], "the JPEG ends with FF D9, got \(Array(shot.jpeg.suffix(2)))")
@@ -126,10 +128,53 @@ enum ScreenshotCheck {
         expect(luminanceQuantizers(jpeg(image, quality: 0.75)) != pinned, "quality 0.75 gives a different table, got \(luminanceQuantizers(jpeg(image, quality: 0.75)))")
         expect(luminanceQuantizers(jpeg(image, quality: 0.85)) != pinned, "quality 0.85 gives a different table, got \(luminanceQuantizers(jpeg(image, quality: 0.85)))")
         expect(!isFlat(back!), "the gradient decodes as not one flat colour")
-        let flat = Screenshot(encoding: solid(64, 64), display: 1, points: CGSize(width: 64, height: 64))
+        let flat = Screenshot(encoding: solid(64, 64), display: 1, appKitFrame: CGRect(x: 0, y: 0, width: 64, height: 64), cursor: .zero)
         expect(flat.flatMap { decoded($0.jpeg) }.map(isFlat) == true, "a solid image decodes as one flat colour")
-        let tiny = Screenshot(encoding: gradient(4, 2), display: 1, points: CGSize(width: 1280, height: 640))
+        let tiny = Screenshot(encoding: gradient(4, 2), display: 1, appKitFrame: CGRect(x: 0, y: 0, width: 1280, height: 640), cursor: .zero)
         expect(tiny?.pixels == .init(width: 4, height: 2), "a 4x2 image stays 4x2, so encoding never resizes, got \(String(describing: tiny?.pixels))")
+    }
+
+    static let mainFrame = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+    static let builtInFrame = CGRect(x: 97, y: -1112, width: 1710, height: 1112)
+
+    static func shot(_ display: CGDirectDisplayID, _ frame: CGRect, cursor: CGPoint, size: (Int, Int) = (8, 8)) -> Screenshot {
+        Screenshot(encoding: solid(size.0, size.1), display: display, appKitFrame: frame, cursor: cursor)!
+    }
+
+    static func checkCursor() {
+        print("cursor")
+        let flipped = Screenshot.appKitFrame(of: CGRect(x: 97, y: 1080, width: 1710, height: 1112), primaryHeight: 1080)
+        expect(flipped == builtInFrame, "the built-in's top-left frame flips to \(builtInFrame), got \(flipped)")
+        let same = Screenshot.appKitFrame(of: CGRect(x: 0, y: 0, width: 1920, height: 1080), primaryHeight: 1080)
+        expect(same == mainFrame, "the main display maps to itself, got \(same)")
+        func holders(_ x: Double, _ y: Double) -> [CGDirectDisplayID] {
+            let at = CGPoint(x: x, y: y)
+            return [shot(3, mainFrame, cursor: at), shot(1, builtInFrame, cursor: at)].filter(\.holdsCursor).map(\.display)
+        }
+        expect(holders(500, 1080) == [3], "the top pixel row of main is main's, got \(holders(500, 1080))")
+        expect(holders(500, 0) == [1], "the top pixel row of the built-in is the built-in's, got \(holders(500, 0))")
+        expect(holders(500, -1112).isEmpty, "one past the built-in's bottom is on neither, got \(holders(500, -1112))")
+        expect(holders(1920, 500).isEmpty, "one past main's right edge is on neither, got \(holders(1920, 500))")
+        let far = CGPoint(x: -5000, y: -5000)
+        let onBuiltIn = CGPoint(x: 500, y: -500)
+        let order = { (shots: [Screenshot]) in Screenshot.cursorFirst(shots).map(\.display) }
+        let first = order([shot(3, mainFrame, cursor: onBuiltIn), shot(1, builtInFrame, cursor: onBuiltIn)])
+        expect(first == [1, 3], "the cursor's screen moves first, got \(first)")
+        let none = order([shot(3, mainFrame, cursor: far), shot(1, builtInFrame, cursor: far)])
+        expect(none == [3, 1], "with no cursor screen the capture order stays, got \(none)")
+        let already = order([shot(1, builtInFrame, cursor: onBuiltIn), shot(3, mainFrame, cursor: onBuiltIn)])
+        expect(already == [1, 3], "a cursor screen already first stays first, got \(already)")
+    }
+
+    static func checkLabels() {
+        print("labels")
+        let cursor = CGPoint(x: 500, y: -500)
+        let on = shot(1, builtInFrame, cursor: cursor, size: (1280, 832)).label(number: 1, of: 2)
+        let want = "Screen 1 of 2. The cursor is on this screen. This image is 1280x832 pixels."
+        expect(on == want, "the cursor screen reads '\(want)', got '\(on)'")
+        let off = shot(3, mainFrame, cursor: cursor, size: (1280, 720)).label(number: 2, of: 2)
+        let wantOff = "Screen 2 of 2. The cursor is not on this screen. This image is 1280x720 pixels."
+        expect(off == wantOff, "the other screen reads '\(wantOff)', got '\(off)'")
     }
 
     static let pinned = [2, 2, 2, 2, 2, 2, 3, 2, 2, 3, 4, 3]
@@ -220,6 +265,7 @@ enum ScreenshotCheck {
         let own = solidWindow(.magenta, ownRect, on: main)
         try? await Task.sleep(for: .milliseconds(500))
         let started = ContinuousClock.now
+        let mouseBefore = NSEvent.mouseLocation
         let shots: [Screenshot]
         do {
             shots = try await Screenshot.everyDisplay()
@@ -243,7 +289,7 @@ enum ScreenshotCheck {
             let shortest = min(screen.frame.width, screen.frame.height)
             let expected = min(1280, (longest * screen.backingScaleFactor).rounded())
             let (pixelsLong, pixelsShort) = (max(shot.pixels.width, shot.pixels.height), min(shot.pixels.width, shot.pixels.height))
-            expect(shot.points == screen.frame.size, "display \(shot.display) points are the frame size, got \(shot.points) for \(screen.frame.size)")
+            expect(shot.appKitFrame == screen.frame, "display \(shot.display) frame is NSScreen's, got \(shot.appKitFrame) for \(screen.frame)")
             expect(Double(pixelsLong) == expected, "display \(shot.display) longer side is \(Int(expected)), got \(pixelsLong)")
             expect(
                 abs(Double(pixelsShort) - Double(pixelsLong) * shortest / longest) <= 1,
@@ -253,12 +299,24 @@ enum ScreenshotCheck {
             expect(back?.width == shot.pixels.width && back?.height == shot.pixels.height, "display \(shot.display) JPEG decodes at its own pixels, got \(back?.width ?? 0)x\(back?.height ?? 0)")
             expect(luminanceQuantizers(shot.jpeg) == pinned, "display \(shot.display) is encoded at quality 0.8, got \(luminanceQuantizers(shot.jpeg))")
             expect(back.map(isFlat) == false, "display \(shot.display) is not one flat colour")
-            print("  info display=\(shot.display) pixels=\(shot.pixels.width)x\(shot.pixels.height) points=\(Int(shot.points.width))x\(Int(shot.points.height)) bytes=\(shot.jpeg.count)")
+            print("  info display=\(shot.display) pixels=\(shot.pixels.width)x\(shot.pixels.height) points=\(Int(shot.appKitFrame.width))x\(Int(shot.appKitFrame.height)) bytes=\(shot.jpeg.count)")
+        }
+        let mouseAfter = NSEvent.mouseLocation
+        let screenUnder = { (mouse: CGPoint) in screens.first { NSMouseInRect(mouse, $0.1.frame, false) }?.0 }
+        if let under = screenUnder(mouseBefore), screenUnder(mouseAfter) == under {
+            expect(shots.first?.display == under, "the first screenshot is the display under the cursor \(under), got \(String(describing: shots.first?.display))")
+            expect(shots.first?.holdsCursor == true, "the first screenshot holds the cursor")
+            expect(shots.dropFirst().allSatisfy { !$0.holdsCursor }, "no other screenshot holds the cursor")
+        } else {
+            print("  skip the cursor went from \(mouseBefore) to \(mouseAfter) during the capture, not resting on one screen")
+        }
+        for (index, shot) in shots.enumerated() {
+            print("  info \(shot.label(number: index + 1, of: shots.count))")
         }
         print("  info captured displays=\(shots.count) ms=\(Int(elapsed.rounded()))")
         let mainID = (main.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber).map { CGDirectDisplayID($0.uint32Value) }
         if let shot = shots.first(where: { $0.display == mainID }), let image = decoded(shot.jpeg) {
-            let k = Double(shot.pixels.width) / shot.points.width
+            let k = Double(shot.pixels.width) / shot.appKitFrame.width
             let inner = ownRect.insetBy(dx: 20, dy: 20)
             let crop = CGRect(
                 x: inner.minX * k, y: (main.frame.height - inner.maxY) * k,
