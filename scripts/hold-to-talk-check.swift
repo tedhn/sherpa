@@ -36,9 +36,25 @@ func driven(_ command: String) -> String {
 // SwiftUI puts accessibilityLabel in AXAttributedDescription, which System
 // Events cannot filter on, so the control is found as the panel's only button.
 let control = "button 1 of group 1 of window 1"
+let meter = "progress indicator 1 of group 1 of window 1"
 
 func caption() -> String {
     driven("return value of static text 2 of group 1 of window 1")
+}
+
+func meterSamples(_ count: Int) -> [Double] {
+    let source = """
+        tell application "System Events" to tell (first process whose unix id is \(pid))
+        set samples to {}
+        repeat \(count) times
+        set end of samples to value of \(meter)
+        end repeat
+        return samples
+        end tell
+        """
+    return osascript(source)
+        .split(separator: ",")
+        .compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
 }
 
 func rect(of element: String) -> CGRect? {
@@ -67,10 +83,14 @@ func wait(upTo seconds: TimeInterval, until condition: () -> Bool) -> Bool {
     return condition()
 }
 
-func uint32Property(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector) -> UInt32? {
+func uint32Property(
+    _ object: AudioObjectID,
+    _ selector: AudioObjectPropertySelector,
+    scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal
+) -> UInt32? {
     var address = AudioObjectPropertyAddress(
         mSelector: selector,
-        mScope: kAudioObjectPropertyScopeGlobal,
+        mScope: scope,
         mElement: kAudioObjectPropertyElementMain
     )
     var value: UInt32 = 0
@@ -83,6 +103,33 @@ func deviceIsRunning() -> Bool? {
           device != 0
     else { return nil }
     return uint32Property(device, kAudioDevicePropertyDeviceIsRunningSomewhere).map { $0 != 0 }
+}
+
+func speakersBlocker() -> String? {
+    if osascript("output muted of (get volume settings)") != "false" {
+        return "the output is muted, and this check never unmutes it"
+    }
+    guard let output = uint32Property(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice),
+          output != 0,
+          uint32Property(output, kAudioDevicePropertyTransportType) == kAudioDeviceTransportTypeBuiltIn,
+          uint32Property(output, kAudioDevicePropertyDataSource, scope: kAudioObjectPropertyScopeOutput) == 0x6973_706B
+    else { return "the default output is not the built-in speakers" }
+    return nil
+}
+
+let calibratedVolume = 81
+
+func speakAndSample() -> [Double] {
+    let saved = osascript("output volume of (get volume settings)")
+    _ = osascript("set volume output volume \(calibratedVolume)")
+    let say = Process()
+    say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+    say.arguments = ["Hello, this is a test of the level meter. One two three four five."]
+    try? say.run()
+    let samples = meterSamples(140)
+    say.waitUntilExit()
+    if let volume = Int(saved) { _ = osascript("set volume output volume \(volume)") }
+    return samples
 }
 
 final class LogTail: @unchecked Sendable {
@@ -122,6 +169,15 @@ final class LogTail: @unchecked Sendable {
         lock.withLock { messages.dropFirst(count).first { $0.hasPrefix("hold ended") } }
     }
 
+    func loudest(after count: Int) -> Double? {
+        lock.withLock {
+            messages.dropFirst(count)
+                .filter { $0.hasPrefix("buffer ") }
+                .compactMap { fields(of: $0)["dBFS"] }
+                .max()
+        }
+    }
+
     var count: Int { lock.withLock { messages.count } }
 
     func stop() { process.terminate() }
@@ -134,6 +190,42 @@ func fields(of line: String) -> [String: Double] {
         if parts.count == 2, let number = Double(parts[1]) { result[String(parts[0])] = number }
     }
     return result
+}
+
+enum Hold {
+    case still
+    case draggedOff
+    case speakersTalking
+}
+
+func checkMeter(_ label: String, _ hold: Hold, samples: [Double], released: Double?, loudest: Double?) {
+    let heard = loudest.map { String(format: "%.1f dBFS", $0) } ?? "no buffer lines"
+    let peak = samples.max()
+    let shown = peak.map { "\(Int(($0 * 100).rounded())) %" } ?? "no reading"
+    if !samples.isEmpty { print("  info \(label): the bar peaked at \(shown), the loudest buffer was \(heard)") }
+
+    switch hold {
+    case .still:
+        if let peak, peak <= 0.10 {
+            print("  ok   \(label): the bar stayed near empty in silence")
+        } else {
+            fail("\(label): in silence the bar reached \(shown), expected at most 10 %; the loudest buffer was \(heard), is the room quiet?")
+        }
+    case .speakersTalking:
+        if let peak, peak >= 0.15 {
+            print("  ok   \(label): the bar rose to \(shown) while the speakers talked")
+        } else {
+            fail("\(label): while say played the bar reached \(shown), expected at least 15 %; the loudest buffer was \(heard)")
+        }
+    case .draggedOff:
+        break
+    }
+
+    if released == 0 {
+        print("  ok   \(label): the bar is empty after the mouse-up")
+    } else {
+        fail("\(label): after the mouse-up the bar read \(released.map { "\($0)" } ?? "nothing"), expected 0")
+    }
 }
 
 guard let controlRect = rect(of: control) else {
@@ -165,7 +257,11 @@ func finish() -> Never {
     exit(failures == 0 ? 0 : 1)
 }
 
-func hold(_ label: String, dragging: Bool) {
+func hold(_ label: String, _ kind: Hold) {
+    if kind == .speakersTalking, let reason = speakersBlocker() {
+        print("  skip \(label): \(reason)")
+        return
+    }
     let logged = tail.count
     CGWarpMouseCursorPosition(centre)
     wait(0.2)
@@ -177,7 +273,8 @@ func hold(_ label: String, dragging: Bool) {
         fail("\(label): macOS is asking for microphone access, click Allow, then rerun")
         finish()
     }
-    wait(1.5)
+    var samples: [Double] = []
+    if kind == .still { samples = meterSamples(45) } else { wait(1.5) }
     let listening = caption()
     let running = deviceIsRunning() == true
     if listening != "Listening…" || !running {
@@ -186,7 +283,9 @@ func hold(_ label: String, dragging: Bool) {
         return
     }
 
-    if dragging {
+    if kind == .speakersTalking { samples = speakAndSample() }
+
+    if kind == .draggedOff {
         let screenWidth = NSScreen.screens.first?.frame.width ?? 0
         let offset: CGFloat = centre.x + 200 < screenWidth ? 200 : -200
         release = CGPoint(x: centre.x + offset, y: centre.y)
@@ -207,6 +306,7 @@ func hold(_ label: String, dragging: Bool) {
         return
     }
     print("  ok   \(label): the device stopped after the mouse-up")
+    let released = meterSamples(1).first
 
     _ = wait(upTo: 2) { tail.summary(after: logged) != nil }
     guard let line = tail.summary(after: logged) else {
@@ -228,9 +328,12 @@ func hold(_ label: String, dragging: Bool) {
     } else {
         fail("\(label): \(Int(buffers)) buffers and ratio \(String(format: "%.2f", ratio)), expected at least 3 and 0.7 to 1.1")
     }
+    checkMeter(label, kind, samples: samples, released: released, loudest: tail.loudest(after: logged))
 }
 
-hold("plain hold", dragging: false)
+hold("plain hold", .still)
 wait(0.5)
-hold("hold dragged off the control", dragging: true)
+hold("hold dragged off the control", .draggedOff)
+wait(0.5)
+hold("hold while the speakers talk", .speakersTalking)
 finish()

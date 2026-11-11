@@ -1,3 +1,4 @@
+import Accelerate
 import AVFoundation
 import os
 
@@ -13,16 +14,17 @@ nonisolated struct FrameCounts: Sendable {
     var firstBuffer: ContinuousClock.Instant?
 }
 
-// The only object the audio thread touches. Everything else here is main
-// actor, and the tap is passed as the method reference `tally.receive` rather
-// than a closure literal: a literal written inside a main-actor type compiles
-// with no diagnostic even when it mutates main-actor state from the audio
-// thread, and a method on a nonisolated class warns.
-nonisolated final class FrameTally: Sendable {
+// The tap is passed as the method reference `receiver.receive` rather than a
+// closure literal: a literal written inside a main-actor type compiles with no
+// diagnostic even when it mutates main-actor state from the audio thread, and
+// a method on a nonisolated class warns.
+nonisolated final class TapReceiver: Sendable {
     private let counts = OSAllocatedUnfairLock(initialState: FrameCounts())
+    private let meter = OSAllocatedUnfairLock(initialState: LevelMeter())
 
     func receive(_ buffer: AVAudioPCMBuffer, at time: AVAudioTime) {
         let frames = Int(buffer.frameLength)
+        let dBFS = buffer.loudestChannelRMSDBFS
         let now = ContinuousClock.now
         let total = counts.withLock { counts in
             counts.buffers += 1
@@ -30,15 +32,33 @@ nonisolated final class FrameTally: Sendable {
             if counts.firstBuffer == nil { counts.firstBuffer = now }
             return counts
         }
-        logger.debug("buffer n=\(total.buffers) frames=\(frames) total=\(total.frames)")
+        meter.withLock { $0.hear(dBFS: dBFS, at: now) }
+        logger.debug("buffer n=\(total.buffers) frames=\(frames) total=\(total.frames) dBFS=\(dBFS, format: .fixed(precision: 1))")
     }
 
     var snapshot: FrameCounts { counts.withLock { $0 } }
+
+    var level: BarFill {
+        meter.withLock { $0 }.fill(at: .now)
+    }
+}
+
+private extension AVAudioPCMBuffer {
+    nonisolated var loudestChannelRMSDBFS: Float {
+        var loudest: Float = 0
+        if let channels = floatChannelData {
+            for channel in 0..<Int(format.channelCount) {
+                let samples = UnsafeBufferPointer(start: channels[channel], count: Int(frameLength))
+                loudest = max(loudest, vDSP.rootMeanSquare(samples))
+            }
+        }
+        return 20 * log10(max(loudest, 1e-6))
+    }
 }
 
 final class MicrophoneCapture {
     private let engine: AVAudioEngine
-    private let tally: FrameTally
+    private let receiver: TapReceiver
     private let rate: Double
     private let started: ContinuousClock.Instant
 
@@ -53,11 +73,11 @@ final class MicrophoneCapture {
             logger.notice("hold failed reason=noInputDevice")
             throw .noInputDevice
         }
-        let tally = FrameTally()
+        let receiver = TapReceiver()
         // The tap delivers 100 to 400 ms per buffer whatever is asked, so ask
         // for the shortest.
         let tenthOfASecond = AVAudioFrameCount(format.sampleRate / 10)
-        input.installTap(onBus: 0, bufferSize: tenthOfASecond, format: format, block: tally.receive)
+        input.installTap(onBus: 0, bufferSize: tenthOfASecond, format: format, block: receiver.receive)
         do {
             try engine.start()
         } catch {
@@ -66,20 +86,22 @@ final class MicrophoneCapture {
             throw .engineFailed
         }
         logger.notice("hold began rate=\(format.sampleRate, format: .fixed(precision: 0)) channels=\(format.channelCount)")
-        return MicrophoneCapture(engine: engine, tally: tally, rate: format.sampleRate, started: started)
+        return MicrophoneCapture(engine: engine, receiver: receiver, rate: format.sampleRate, started: started)
     }
 
-    private init(engine: AVAudioEngine, tally: FrameTally, rate: Double, started: ContinuousClock.Instant) {
+    private init(engine: AVAudioEngine, receiver: TapReceiver, rate: Double, started: ContinuousClock.Instant) {
         self.engine = engine
-        self.tally = tally
+        self.receiver = receiver
         self.rate = rate
         self.started = started
     }
 
+    var level: BarFill { receiver.level }
+
     isolated deinit {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        let counts = tally.snapshot
+        let counts = receiver.snapshot
         let seconds = started.duration(to: .now) / .seconds(1)
         let firstBuffer = counts.firstBuffer.map { String(format: "%.3f", started.duration(to: $0) / .seconds(1)) } ?? "none"
         logger.notice("""
