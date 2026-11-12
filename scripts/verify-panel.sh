@@ -103,6 +103,11 @@ swiftc -parse-as-library -o "$DERIVED/claude-check" \
     sherpa/Screenshot.swift sherpa/Claude.swift scripts/claude-check.swift >/dev/null \
     && "$DERIVED/claude-check" || failures=$((failures + 1))
 
+echo "voice"
+swiftc -parse-as-library -target arm64-apple-macos14.2 -o "$DERIVED/speaker-check" \
+    sherpa/Speaker.swift scripts/speaker-check.swift >/dev/null \
+    && "$DERIVED/speaker-check" || failures=$((failures + 1))
+
 echo "dictation"
 swiftc -parse-as-library -o "$DERIVED/dictation-check" \
     sherpa/AssemblyAI.swift sherpa/Dictation.swift scripts/dictation-check.swift >/dev/null \
@@ -120,8 +125,9 @@ app_swift_flags=(
 )
 swiftc -o "$DERIVED/fake-assemblyai" scripts/fake-assemblyai.swift >/dev/null \
     && swiftc -o "$DERIVED/fake-claude" scripts/fake-claude.swift >/dev/null \
+    && swiftc -o "$DERIVED/fake-voice" scripts/fake-voice.swift >/dev/null \
     && swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/transcription-check" \
-        sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Supabase.swift sherpa/Screenshot.swift sherpa/Claude.swift sherpa/Transcription.swift \
+        sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Supabase.swift sherpa/Screenshot.swift sherpa/Claude.swift sherpa/Speaker.swift sherpa/Transcription.swift \
         scripts/transcription-check.swift >/dev/null \
     && "$DERIVED/transcription-check" "$DERIVED/fake-assemblyai" || failures=$((failures + 1))
 
@@ -149,9 +155,14 @@ echo ok > "$fake_claude_scenario"
 "$DERIVED/fake-claude" "$fake_claude_port" "$fake_claude_requests" --answer-delay "$fake_answer_delay" \
     --scenario-file "$fake_claude_scenario" >/dev/null &
 fake_claude_pid=$!
-trap 'kill "$fake_pid" "$fake_supabase_pid" "$fake_claude_pid" 2>/dev/null' EXIT
+fake_voice_port="$DERIVED/fake-voice.port"
+fake_voice_requests="$DERIVED/fake-voice-requests"
+rm -rf "$fake_voice_port" "$fake_voice_requests"
+"$DERIVED/fake-voice" "$fake_voice_port" "$fake_voice_requests" >/dev/null &
+fake_voice_pid=$!
+trap 'kill "$fake_pid" "$fake_supabase_pid" "$fake_claude_pid" "$fake_voice_pid" 2>/dev/null' EXIT
 deadline=$((SECONDS + 10))
-while [[ ! -s "$fake_ports" || ! -s "$fake_supabase_port" || ! -s "$fake_claude_port" ]] && (( SECONDS < deadline )); do sleep 0.1; done
+while [[ ! -s "$fake_ports" || ! -s "$fake_supabase_port" || ! -s "$fake_claude_port" || ! -s "$fake_voice_port" ]] && (( SECONDS < deadline )); do sleep 0.1; done
 claude_flags=(-AnthropicURL '')
 if [[ -s "$fake_claude_port" ]]; then
     claude_flags=(-AnthropicURL "$(cat "$fake_claude_port")" -AnthropicAPIKey fake)
@@ -160,6 +171,14 @@ else
     failures=$((failures + 1))
     fake_claude_requests=""
     fake_claude_scenario=""
+fi
+voice_flags=(-AssemblyAIVoiceURL '')
+if [[ -s "$fake_voice_port" ]]; then
+    voice_flags=(-AssemblyAIVoiceURL "$(cat "$fake_voice_port")")
+else
+    echo "  FAIL the fake voice never wrote its port"
+    failures=$((failures + 1))
+    fake_voice_requests=""
 fi
 supabase_flags=(-SupabaseURL '')
 if [[ -s "$fake_supabase_port" ]]; then
@@ -173,13 +192,13 @@ if [[ -s "$fake_ports" ]]; then
     read -r token_field socket_field < "$fake_ports"
     open -a "$APP" --args -AssemblyAITokenURL "${token_field#token=}" \
         -AssemblyAISocketURL "${socket_field#socket=}" -AssemblyAIAPIKey fake -AssemblyAIIdleSeconds "$idle_seconds" \
-        "${supabase_flags[@]}" "${claude_flags[@]}"
+        "${supabase_flags[@]}" "${claude_flags[@]}" "${voice_flags[@]}"
 else
     echo "  FAIL the fake AssemblyAI never wrote its ports"
     failures=$((failures + 1))
     fake_capture=""
     fake_archive=""
-    open -a "$APP" --args -SupabaseURL '' -AnthropicURL ''
+    open -a "$APP" --args -SupabaseURL '' -AnthropicURL '' -AssemblyAIVoiceURL ''
 fi
 app_pid=""
 # A cold first launch from a fresh build location takes longer than any fixed
