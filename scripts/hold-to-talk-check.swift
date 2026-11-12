@@ -1184,6 +1184,14 @@ func idleClose(session: Int) {
     }
 }
 
+func tapEnabled() -> Bool? {
+    var count: UInt32 = 0
+    CGGetEventTapList(0, nil, &count)
+    var taps = [CGEventTapInformation](repeating: CGEventTapInformation(), count: Int(count))
+    CGGetEventTapList(count, &taps, &count)
+    return taps.prefix(Int(count)).first { $0.tappingProcess == pid }?.enabled
+}
+
 func hotkey() {
     guard let idleSeconds, capturePath != nil, requestsPath != nil, claudeScenarioPath != nil, voiceRequestsPath != nil, voiceScenarioPath != nil else { return }
     let alone = "modifier alone"
@@ -1246,6 +1254,33 @@ func hotkey() {
         fail("\(shortcut): ctrl+option+F18 began a hold")
     } else {
         print("  ok   \(shortcut): no hold began")
+    }
+
+    let stall = "tap disabled by a stall"
+    let stalled = tail.count
+    kill(pid, SIGSTOP)
+    for _ in 0..<10 {
+        postModifier(leftControl, down: false, flags: [])
+        wait(0.3)
+    }
+    let disabledByStall = tapEnabled() == false
+    kill(pid, SIGCONT)
+    if disabledByStall {
+        print("  ok   \(stall): the stall disabled the tap")
+        wait(1)
+        postModifier(leftControl, down: false, flags: [])
+        if wait(upTo: 2, until: { tail.lines(after: stalled).contains { $0.hasPrefix("hotkey reenabled cause=timeout") } }) {
+            print("  ok   \(stall): the app logged 'hotkey reenabled cause=timeout'")
+        } else {
+            fail("\(stall): no 'hotkey reenabled cause=timeout' line within 2 s, the hotkey lines were \(tail.lines(after: stalled).filter { $0.hasPrefix("hotkey ") })")
+        }
+        if tapEnabled() == true {
+            print("  ok   \(stall): the tap is enabled again")
+        } else {
+            fail("\(stall): the tap is still disabled after the app drained its events")
+        }
+    } else {
+        fail("\(stall): the tap stayed enabled through a 3 s stall, so the check proved nothing")
     }
 
     let began = tail.count
