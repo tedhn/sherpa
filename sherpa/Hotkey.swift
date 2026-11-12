@@ -68,6 +68,12 @@ final class Hotkey {
         }
     }
 
+    fileprivate func reenable(after type: CGEventType) {
+        guard let tap else { return }
+        CGEvent.tapEnable(tap: tap, enable: true)
+        logger.notice("hotkey reenabled cause=\(type == .tapDisabledByTimeout ? "timeout" : "input", privacy: .public)")
+    }
+
     fileprivate func keyDown() {
         guard case .waiting(let task) = chord else { return }
         task.cancel()
@@ -86,9 +92,14 @@ private nonisolated func hotkeyCallback(
         let flags = event.flags
         let hotkey = Unmanaged<Hotkey>.fromOpaque(userInfo).takeUnretainedValue()
         MainActor.assumeIsolated {
-            if type == .keyDown {
+            switch type {
+            case .keyDown:
                 hotkey.keyDown()
-            } else {
+            case .tapDisabledByTimeout, .tapDisabledByUserInput:
+                hotkey.reenable(after: type)
+                // The notice stands in for the event macOS replaced and carries that event's flags.
+                fallthrough
+            default:
                 hotkey.flagsChanged(flags)
             }
         }
