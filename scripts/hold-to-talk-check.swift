@@ -92,6 +92,16 @@ func post(_ type: CGEventType, at point: CGPoint) {
         .post(tap: .cghidEventTap)
 }
 
+func postModifier(_ virtualKey: CGKeyCode, down: Bool, flags: CGEventFlags) {
+    guard let event = CGEvent(keyboardEventSource: CGEventSource(stateID: .hidSystemState), virtualKey: virtualKey, keyDown: down) else { return }
+    event.type = .flagsChanged
+    event.flags = flags
+    event.post(tap: .cghidEventTap)
+}
+
+let leftControl: CGKeyCode = 59
+let leftOption: CGKeyCode = 58
+
 func wait(_ seconds: TimeInterval) {
     Thread.sleep(forTimeInterval: seconds)
 }
@@ -166,7 +176,7 @@ final class LogTail: @unchecked Sendable {
         process.arguments = [
             "stream", "--level", "debug", "--style", "ndjson",
             "--predicate",
-            "subsystem == \"my.rooftop.sherpa\" AND (category == \"microphone\" OR category == \"transcription\" OR category == \"screenshot\" OR category == \"claude\" OR category == \"voice\")",
+            "subsystem == \"my.rooftop.sherpa\" AND (category == \"microphone\" OR category == \"transcription\" OR category == \"screenshot\" OR category == \"claude\" OR category == \"voice\" OR category == \"hotkey\")",
         ]
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
@@ -1174,6 +1184,130 @@ func idleClose(session: Int) {
     }
 }
 
+func hotkey() {
+    guard let idleSeconds, capturePath != nil, requestsPath != nil, claudeScenarioPath != nil, voiceRequestsPath != nil, voiceScenarioPath != nil else { return }
+    let alone = "modifier alone"
+    let chord = "hotkey hold"
+    let cuttingOff = "hotkey cuts the voice off"
+    defer {
+        postModifier(leftOption, down: false, flags: [])
+        postModifier(leftControl, down: false, flags: [])
+    }
+    guard clickStatusItem(expecting: "0") else {
+        fail("\(chord): the panel did not close")
+        return
+    }
+    wait(idleSeconds + 1.5)
+
+    let logged = tail.count
+    postModifier(leftControl, down: true, flags: .maskControl)
+    wait(0.2)
+    postModifier(leftControl, down: false, flags: [])
+    wait(0.2)
+    postModifier(leftOption, down: true, flags: .maskAlternate)
+    wait(0.2)
+    postModifier(leftOption, down: false, flags: [])
+    wait(1)
+    if tail.lines(after: logged).contains(where: { $0.hasPrefix("hold began") }) {
+        fail("\(alone): ctrl alone or option alone began a hold")
+    } else {
+        print("  ok   \(alone): ctrl alone and option alone began no hold")
+    }
+
+    func pressChord() {
+        postModifier(leftControl, down: true, flags: .maskControl)
+        postModifier(leftOption, down: true, flags: [.maskControl, .maskAlternate])
+    }
+    func releaseChord() {
+        postModifier(leftOption, down: false, flags: .maskControl)
+        postModifier(leftControl, down: false, flags: [])
+    }
+
+    let began = tail.count
+    pressChord()
+    guard wait(upTo: 1, until: { tail.lines(after: began).contains { $0.hasPrefix("hold began") } }) else {
+        fail("\(chord): no 'hold began' within 1 s of ctrl+option, check that Sherpa has Accessibility access in System Settings > Privacy & Security > Accessibility, the hotkey lines were \(tail.lines(after: logged).filter { $0.hasPrefix("hotkey ") })")
+        return
+    }
+    print("  ok   \(chord): 'hold began' within 1 s of ctrl+option")
+    if deviceIsRunning() == true {
+        print("  ok   \(chord): the microphone ran while the chord was held")
+    } else {
+        fail("\(chord): the input device was not running while the chord was held")
+    }
+    let heldWindows = panelWindows()
+    if heldWindows == "0" {
+        print("  ok   \(chord): the panel stayed closed while held")
+    } else {
+        fail("\(chord): \(heldWindows) panel window(s) open while held, expected 0")
+    }
+    wait(3)
+    releaseChord()
+    _ = wait(upTo: 15) { tail.lines(after: began).contains { $0.hasPrefix("voice spoke utterance=") } }
+    let lines = tail.lines(after: began)
+    if lines.contains(where: { $0.hasPrefix("hold ended") }) {
+        print("  ok   \(chord): 'hold ended' after the release")
+    } else {
+        fail("\(chord): no 'hold ended' line after the release")
+    }
+    if lines.contains(where: { $0.hasPrefix("transcription connecting ") && $0.hasSuffix(" cause=press") }) {
+        print("  ok   \(chord): the press connected the session, not a panel")
+    } else {
+        fail("\(chord): expected a 'transcription connecting' line with cause=press, got \(sessionLines(after: began))")
+    }
+    guard let delivered = deliveries(in: lines).first else {
+        fail("\(chord): no 'transcription delivered' line within 15 s of the release")
+        return
+    }
+    print("  ok   \(chord): utterance \(delivered.utterance) was delivered as '\(delivered.text)'")
+    let asking = "claude asking utterance=\(delivered.utterance) "
+    if lines.contains(where: { $0.hasPrefix(asking) }) {
+        print("  ok   \(chord): the app logged '\(asking.dropLast())'")
+    } else {
+        fail("\(chord): expected '\(asking.dropLast())', the claude lines were \(lines.filter { $0.hasPrefix("claude ") })")
+    }
+    let spoke = "voice spoke utterance=\(delivered.utterance) "
+    if lines.contains(where: { $0.hasPrefix(spoke) }) {
+        print("  ok   \(chord): the app logged '\(spoke.dropLast())'")
+    } else {
+        fail("\(chord): expected '\(spoke.dropLast())' within 15 s of the release, the voice lines were \(lines.filter { $0.hasPrefix("voice ") })")
+    }
+    let endWindows = panelWindows()
+    if endWindows == "0" {
+        print("  ok   \(chord): the panel was still closed at the end")
+    } else {
+        fail("\(chord): \(endWindows) panel window(s) open at the end, expected 0")
+    }
+
+    useVoiceScenario("long")
+    defer { useVoiceScenario("ok") }
+    let cutLogged = tail.count
+    pressChord()
+    wait(2)
+    releaseChord()
+    let voiceAsking = "voice asking utterance=\(delivered.utterance + 1) "
+    guard wait(upTo: 10, until: { tail.lines(after: cutLogged).contains { $0.hasPrefix(voiceAsking) } }) else {
+        fail("\(cuttingOff): expected '\(voiceAsking.dropLast())' within 10 s of the release, the voice lines were \(tail.lines(after: cutLogged).filter { $0.hasPrefix("voice ") })")
+        return
+    }
+    wait(1)
+    let spokenAt = tail.count
+    pressChord()
+    let stopped = "voice stopped utterance=\(delivered.utterance + 1) "
+    if wait(upTo: 1, until: { tail.lines(after: spokenAt).contains { $0.hasPrefix(stopped) } }) {
+        print("  ok   \(cuttingOff): within 1 s of the chord the app logged '\(stopped.dropLast())'")
+    } else {
+        fail("\(cuttingOff): expected '\(stopped.dropLast())' within 1 s of the chord, the voice lines were \(tail.lines(after: spokenAt).filter { $0.hasPrefix("voice ") })")
+    }
+    releaseChord()
+    wait(0.5)
+
+    guard clickStatusItem(expecting: "1") else {
+        fail("\(chord): the panel did not reopen")
+        return
+    }
+}
+
 let warmed = warmFirst()
 let holdsBegan = tail.count
 hold("plain hold", .still)
@@ -1202,4 +1336,5 @@ if let warmed {
     serverClose(after: warmed)
     idleClose(session: warmed + 1)
 }
+hotkey()
 finish()
