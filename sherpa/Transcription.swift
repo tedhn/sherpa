@@ -49,6 +49,7 @@ final class Transcriber {
         var archive: Supabase.Project? = nil
         var screenshots: (@Sendable () async throws -> [Screenshot])? = nil
         var claude: Claude.Endpoint? = nil
+        var voice: Voice.Endpoint? = nil
         var forgetAfter = Claude.History.idle
 
         static var current: Configuration {
@@ -64,7 +65,8 @@ final class Transcriber {
                     planted("SupabasePublishableKey").map { Supabase.Project(url: url, key: $0) }
                 },
                 screenshots: Screenshot.everyDisplay,
-                claude: Claude.Endpoint(url: Claude.Endpoint.production, key: planted("AnthropicAPIKey"))
+                claude: Claude.Endpoint(url: Claude.Endpoint.production, key: planted("AnthropicAPIKey")),
+                voice: Voice.Endpoint(url: Voice.Endpoint.production, key: planted("AssemblyAIAPIKey"))
             )
             #if DEBUG
             let defaults = UserDefaults.standard
@@ -81,6 +83,9 @@ final class Transcriber {
             if let url = defaults.string(forKey: "SupabaseURL") {
                 let key = defaults.string(forKey: "SupabasePublishableKey") ?? configuration.archive?.key
                 configuration.archive = URL(string: url).flatMap { url in key.map { Supabase.Project(url: url, key: $0) } }
+            }
+            if let url = defaults.string(forKey: "AssemblyAIVoiceURL") {
+                configuration.voice = URL(string: url).map { Voice.Endpoint(url: $0, key: configuration.key) }
             }
             if let url = defaults.string(forKey: "AnthropicURL") {
                 let key = defaults.string(forKey: "AnthropicAPIKey") ?? configuration.claude?.key
@@ -104,6 +109,7 @@ final class Transcriber {
     private var alarm: (at: ContinuousClock.Instant, task: Task<Void, Never>)?
     private let archive: Archive?
     private let conversation: Conversation?
+    private let speaker: Speaker?
 
     init(configuration: Configuration = .current) {
         let urlSession = URLSession(configuration: .default)
@@ -111,6 +117,7 @@ final class Transcriber {
         self.urlSession = urlSession
         archive = configuration.archive.map { Archive(project: $0, urlSession: urlSession) }
         conversation = configuration.claude.map { Conversation(endpoint: $0, urlSession: urlSession, forgetAfter: configuration.forgetAfter) }
+        speaker = configuration.voice.map { Speaker(endpoint: $0, urlSession: urlSession) }
         tokens = Tokens(key: configuration.key, url: configuration.endpoints.token, urlSession: urlSession)
         dictation = Dictation(limits: configuration.limits)
     }
@@ -230,7 +237,9 @@ final class Transcriber {
                 Task {
                     let question = Claude.Question(text: text, screenshots: await handoff(taken, utterance: utterance))
                     do throws(Claude.Failure) {
-                        record.reply = .answered(try await conversation.answer(question, utterance: utterance) { record.reply = .answering($0) })
+                        let answer = try await conversation.answer(question, utterance: utterance) { record.reply = .answering($0) }
+                        record.reply = .answered(answer)
+                        speaker?.say(answer, utterance: utterance)
                     } catch {
                         record.reply = .failed(error)
                     }
