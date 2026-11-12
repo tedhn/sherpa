@@ -229,7 +229,7 @@ final class Transcriber {
                 Task {
                     let question = Claude.Question(text: text, screenshots: await handoff(taken, utterance: utterance))
                     do throws(Claude.Failure) {
-                        record.reply = .answered(try await conversation.answer(question, utterance: utterance))
+                        record.reply = .answered(try await conversation.answer(question, utterance: utterance) { record.reply = .answering($0) })
                     } catch {
                         record.reply = .failed(error)
                     }

@@ -135,7 +135,7 @@ final class Bench {
         var endpoint: Claude.Endpoint?
         if scenario.claude {
             let (port, requests, answerMode) = (file("claude-port"), file("claude-requests"), file("claude-mode"))
-            try? Data("ok\n".utf8).write(to: answerMode)
+            try? Data("\(scenario.claudeMode)\n".utf8).write(to: answerMode)
             let fake = Process()
             fake.executableURL = URL(fileURLWithPath: binary).deletingLastPathComponent().appending(path: "fake-claude")
             fake.arguments = [port.path, requests.path, "--answer-delay", "0.5", "--scenario-file", answerMode.path]
@@ -302,10 +302,18 @@ final class Bench {
         }
     }
 
+    private(set) var partials: [String] = []
+
     func reply(of transcription: Transcription, upTo seconds: Double = 8) async -> Claude.Reply? {
         let deadline = ContinuousClock.now + .seconds(seconds)
-        while ContinuousClock.now < deadline, transcription.reply == .asking {
-            try? await Task.sleep(for: .milliseconds(50))
+        partials = []
+        while ContinuousClock.now < deadline {
+            switch transcription.reply {
+            case .asking: break
+            case .answering(let text): if partials.last != text { partials.append(text) }
+            default: return transcription.reply
+            }
+            try? await Task.sleep(for: .milliseconds(10))
         }
         return transcription.reply
     }
@@ -334,6 +342,7 @@ struct Scenario {
     var idle: Duration?
     var screenshots: (@Sendable () async throws -> [Screenshot])?
     var claude = false
+    var claudeMode = "ok"
     var claudeKey: String? = "fake"
     let run: (Bench) async -> Void
 }
@@ -377,6 +386,7 @@ enum TranscriptionCheck {
         Scenario(name: "screenshot-slow", screenshots: capturing(delay: .seconds(3)), claude: true, run: screenshotSlow),
         Scenario(name: "screenshot-denied", screenshots: capturing(failing: .noAccess), claude: true, run: screenshotDenied),
         Scenario(name: "ask-no-key", claude: true, claudeKey: nil, run: askNoKey),
+        Scenario(name: "ask-overloaded", claude: true, claudeMode: "overloaded", run: askOverloaded),
     ]
 
     static func main() async {
@@ -464,13 +474,16 @@ enum TranscriptionCheck {
             return
         }
         expect(text.hasPrefix("Answer to: \(sentence)\n\n"), "screenshot: the answer opens with the transcript, got '\(text.prefix(60))'")
+        let shorter = bench.partials.filter { $0.count < text.count }
+        expect(shorter.count >= 2, "screenshot: at least 2 partial answers shorter than the answer were seen, got lengths \(bench.partials.map(\.count)) of \(text.count)")
+        expect(bench.partials.allSatisfy { text.hasPrefix($0) }, "screenshot: each partial is a prefix of the answer")
         expect(
             bench.requestBlocks == [[.text("Screen 1 of 1. The cursor is not on this screen. This image is 2x2 pixels."), .image, .text(sentence)]],
             "screenshot: one request carried the label, the image, then the words, got \(bench.requestBlocks)"
         )
         let asking = bench.lines.firstIndex { $0.hasPrefix("claude asking utterance=1 images=1 bytes=") } ?? -1
         expect(handoff < asking, "screenshot: Claude was asked after the screenshots were handed over, at lines \(handoff) and \(asking)")
-        expect(bench.lines("claude answered ").count == 1 && bench.lines("claude answered ")[0].hasPrefix("claude answered utterance=1 ms="), "screenshot: the answer was logged once")
+        expect(bench.lines("claude answered ").count == 1 && bench.lines("claude answered ")[0].hasPrefix("claude answered utterance=1 first="), "screenshot: the answer was logged once")
         expect(!bench.lines.contains { $0.contains("Answer to") }, "screenshot: the answer text is not logged")
     }
 
@@ -504,6 +517,19 @@ enum TranscriptionCheck {
         expect(await bench.waitFor("claude failed ", upTo: 3), "ask no key: the failure logged")
         await bench.sync()
         expect(bench.lines("claude ").map { $0.replacingOccurrences(of: #"ms=\d+"#, with: "ms=N", options: .regularExpression) } == ["claude failed utterance=1 ms=N reason=noAPIKey"], "ask no key: one failed line and no asking line, got \(bench.lines("claude "))")
+    }
+
+    static func askOverloaded(_ bench: Bench) async {
+        await bench.warm()
+        let held = await bench.hold(tone(0))
+        _ = await bench.outcome(held)
+        let reply = await bench.reply(of: held.transcription)
+        expect(reply == .failed(.busy(status: 200, detail: "overloaded_error: Overloaded")), "ask overloaded: the reply failed as busy, got \(String(describing: reply))")
+        expect(bench.partials.first?.isEmpty == false, "ask overloaded: partial text was shown before the failure, got \(bench.partials)")
+        expect(await bench.waitFor("claude failed ", upTo: 3), "ask overloaded: the failure logged")
+        await bench.sync()
+        let failed = bench.lines("claude failed ").map { $0.replacingOccurrences(of: #"ms=\d+"#, with: "ms=N", options: .regularExpression) }
+        expect(failed == ["claude failed utterance=1 ms=N reason=busy status=200 detail=overloaded_error: Overloaded"], "ask overloaded: one failed line, got \(failed)")
     }
 
     static func screenshotSlow(_ bench: Bench) async {
