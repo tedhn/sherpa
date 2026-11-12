@@ -12,8 +12,15 @@ enum ClaudeCheck {
 
     static let endpoint = Claude.Endpoint(url: URL(string: "https://example.test/v1/messages")!, key: "k-123")
 
+    static func fields(_ request: URLRequest) -> [String: Any] {
+        (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any] ?? [:]
+    }
+
     static func body(_ request: URLRequest) -> String {
-        String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+        var rest = fields(request)
+        rest["system"] = nil
+        let data = (try? JSONSerialization.data(withJSONObject: rest, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()
+        return String(decoding: data, as: UTF8.self)
     }
 
     static func shot(display: CGDirectDisplayID, cursor: CGPoint, red: Double = 0.2, green: Double = 0.4, blue: Double = 0.6) -> Screenshot {
@@ -44,12 +51,12 @@ enum ClaudeCheck {
         let jpeg = Data([0xFF, 0xD8, 0xFF, 0xD9])
         let one = try? Claude.request(Claude.Question(images: [.init(label: "L", jpeg: jpeg)], text: "T"), after: [], to: endpoint)
         expect(
-            one.map(body) == #"{"max_tokens":16000,"messages":[{"content":[{"text":"L","type":"text"},{"source":{"data":"/9j/2Q==","media_type":"image/jpeg","type":"base64"},"type":"image"},{"text":"T","type":"text"}],"role":"user"}],"model":"claude-haiku-5-5","output_config":{"effort":"low"},"stream":true,"system":"Each question comes with fresh screenshots of the user's screens. Earlier questions also came with screenshots, which you saw and answered from, but they are removed from the history to save space. Your earlier answers are accurate descriptions of what was on screen then. Don't retract them because the old images are missing."}"#,
+            one.map(body) == #"{"max_tokens":16000,"messages":[{"content":[{"text":"L","type":"text"},{"source":{"data":"/9j/2Q==","media_type":"image/jpeg","type":"base64"},"type":"image"},{"text":"T","type":"text"}],"role":"user"}],"model":"claude-haiku-5-5","output_config":{"effort":"low"},"stream":true}"#,
             "one image renders its label, the image, then the words, got \(one.map(body) ?? "nil")"
         )
         let none = try? Claude.request(Claude.Question(images: [], text: "T"), after: [], to: endpoint)
         expect(
-            none.map(body) == #"{"max_tokens":16000,"messages":[{"content":[{"text":"T","type":"text"}],"role":"user"}],"model":"claude-haiku-5-5","output_config":{"effort":"low"},"stream":true,"system":"Each question comes with fresh screenshots of the user's screens. Earlier questions also came with screenshots, which you saw and answered from, but they are removed from the history to save space. Your earlier answers are accurate descriptions of what was on screen then. Don't retract them because the old images are missing."}"#,
+            none.map(body) == #"{"max_tokens":16000,"messages":[{"content":[{"text":"T","type":"text"}],"role":"user"}],"model":"claude-haiku-5-5","output_config":{"effort":"low"},"stream":true}"#,
             "no images leaves only the words, got \(none.map(body) ?? "nil")"
         )
         let remembered = try? Claude.request(
@@ -64,9 +71,10 @@ enum ClaudeCheck {
         let twoNote = "[You were shown 2 screenshots with this question and answered from them. They have been removed from the history to save space.]"
         let oneNote = "[You were shown 1 screenshot with this question and answered from it. It has been removed from the history to save space.]"
         expect(
-            remembered.map(body) == #"{"max_tokens":16000,"messages":[{"content":[{"text":"\#(twoNote)","type":"text"},{"text":"Q1","type":"text"}],"role":"user"},{"content":[{"text":"A1","type":"text"}],"role":"assistant"},{"content":[{"text":"Q2","type":"text"}],"role":"user"},{"content":[{"text":"A2","type":"text"}],"role":"assistant"},{"content":[{"text":"\#(oneNote)","type":"text"},{"text":"Q3","type":"text"}],"role":"user"},{"content":[{"text":"A3","type":"text"}],"role":"assistant"},{"content":[{"text":"T","type":"text"}],"role":"user"}],"model":"claude-haiku-5-5","output_config":{"effort":"low"},"stream":true,"system":"Each question comes with fresh screenshots of the user's screens. Earlier questions also came with screenshots, which you saw and answered from, but they are removed from the history to save space. Your earlier answers are accurate descriptions of what was on screen then. Don't retract them because the old images are missing."}"#,
+            remembered.map(body) == #"{"max_tokens":16000,"messages":[{"content":[{"text":"\#(twoNote)","type":"text"},{"text":"Q1","type":"text"}],"role":"user"},{"content":[{"text":"A1","type":"text"}],"role":"assistant"},{"content":[{"text":"Q2","type":"text"}],"role":"user"},{"content":[{"text":"A2","type":"text"}],"role":"assistant"},{"content":[{"text":"\#(oneNote)","type":"text"},{"text":"Q3","type":"text"}],"role":"user"},{"content":[{"text":"A3","type":"text"}],"role":"assistant"},{"content":[{"text":"T","type":"text"}],"role":"user"}],"model":"claude-haiku-5-5","output_config":{"effort":"low"},"stream":true}"#,
             "history renders as note and question, then answer, oldest first, before the current turn, got \(remembered.map(body) ?? "nil")"
         )
+        expect(one.map { !((fields($0)["system"] as? String) ?? "").isEmpty } == true, "the request carries a non-empty system prompt")
         expect(one?.httpMethod == "POST", "the request is a POST")
         expect(one?.url?.absoluteString == "https://example.test/v1/messages", "the request goes to the endpoint, got \(one?.url?.absoluteString ?? "nil")")
         expect(
