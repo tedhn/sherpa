@@ -79,8 +79,9 @@ final class AppState {
         }
     }
 
+    /// The record is replaced only by a press that reached the Transcriber, so a
+    /// press whose microphone fails leaves the answer, and its voice, in place.
     private func beginHold() {
-        transcription = nil
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             do throws(MicrophoneProblem) {
