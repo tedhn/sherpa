@@ -127,6 +127,11 @@ swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/hotkey-start-check
     sherpa/Hotkey.swift scripts/hotkey-start-check.swift >/dev/null \
     && "$DERIVED/hotkey-start-check" || failures=$((failures + 1))
 
+echo "overlay"
+swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/overlay-check" \
+    sherpa/Overlay.swift scripts/overlay-check.swift >/dev/null \
+    && "$DERIVED/overlay-check" || failures=$((failures + 1))
+
 echo "transcription"
 swiftc -o "$DERIVED/fake-assemblyai" scripts/fake-assemblyai.swift >/dev/null \
     && swiftc -o "$DERIVED/fake-claude" scripts/fake-claude.swift >/dev/null \
@@ -228,6 +233,7 @@ echo "status item"
 item_pos="$(proc 'to return position of menu bar item 1 of menu bar 2')"
 check "icon is in the menu bar" "yes" "$([[ "$item_pos" == *,* ]] && echo yes || echo no)"
 check "no panel before the first click" "0" "$(proc 'to return count of windows')"
+[[ -x "$DERIVED/overlay-check" ]] && { "$DERIVED/overlay-check" --app "$app_pid" || failures=$((failures + 1)); }
 
 echo "open"
 front_before="$(frontmost)"
