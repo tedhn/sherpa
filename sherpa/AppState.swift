@@ -48,6 +48,7 @@ final class AppState {
     var voice: VoiceState {
         if case .listening = microphone { return .listening }
         guard let transcription else { return .idle }
+        if transcription.speaking { return .responding }
         switch (transcription.shown, transcription.reply) {
         case (.hearing, nil), (_, .asking), (_, .answering): return .processing
         case (.final, nil), (_, .answered), (_, .failed): return .idle
