@@ -14,6 +14,7 @@ let requestsPath = arguments.dropFirst(5).first.flatMap { $0.isEmpty ? nil : $0 
 let claudeScenarioPath = arguments.dropFirst(6).first.flatMap { $0.isEmpty ? nil : $0 }
 let voiceRequestsPath = arguments.dropFirst(7).first.flatMap { $0.isEmpty ? nil : $0 }
 let voiceScenarioPath = arguments.dropFirst(8).first.flatMap { $0.isEmpty ? nil : $0 }
+let microphoneScenarioPath = arguments.dropFirst(9).first.flatMap { $0.isEmpty ? nil : $0 }
 
 var failures = 0
 
@@ -386,6 +387,11 @@ func useClaudeScenario(_ name: String) {
 func useVoiceScenario(_ name: String) {
     guard let voiceScenarioPath else { return }
     try? Data("\(name)\n".utf8).write(to: URL(fileURLWithPath: voiceScenarioPath))
+}
+
+func useMicrophoneScenario(_ name: String) {
+    guard let microphoneScenarioPath else { return }
+    try? Data("\(name)\n".utf8).write(to: URL(fileURLWithPath: microphoneScenarioPath))
 }
 
 struct State: Equatable {
@@ -1281,6 +1287,78 @@ func idleClose(session: Int) {
     }
 }
 
+func failedPressWhileSpeaking() {
+    guard capturePath != nil, requestsPath != nil, claudeScenarioPath != nil, voiceRequestsPath != nil, voiceScenarioPath != nil, microphoneScenarioPath != nil else { return }
+    let label = "press with the microphone failing while the voice speaks"
+    useVoiceScenario("long")
+    defer {
+        useVoiceScenario("ok")
+        useMicrophoneScenario("ok")
+    }
+    let logged = tail.count
+    _ = talk(for: 3)
+    guard wait(upTo: 10, until: { !deliveries(in: tail.lines(after: logged)).isEmpty }), let delivered = deliveries(in: tail.lines(after: logged)).first else {
+        fail("\(label): no 'transcription delivered' line within 10 s of the release")
+        return
+    }
+    let asking = "voice asking utterance=\(delivered.utterance) "
+    guard wait(upTo: 10, until: { tail.lines(after: logged).contains { $0.hasPrefix(asking) } }) else {
+        fail("\(label): expected '\(asking.dropLast())' within 10 s of the release, the voice lines were \(tail.lines(after: logged).filter { $0.hasPrefix("voice ") })")
+        return
+    }
+    wait(1)
+    let heard = transcript()
+    let answer = reply()
+    let pressed = tail.count
+    useMicrophoneScenario("engineFailed")
+    press()
+    let refused = "hold failed reason=engineFailed scenario=file"
+    if wait(upTo: 1, until: { tail.lines(after: pressed).contains(refused) }) {
+        print("  ok   \(label): within 1 s of the press the app logged '\(refused)'")
+    } else {
+        fail("\(label): expected '\(refused)' within 1 s of the press, the microphone lines were \(tail.lines(after: pressed).filter { $0.hasPrefix("hold ") })")
+    }
+    if wait(upTo: 1, until: { caption() == "Couldn't start the microphone" }) {
+        print("  ok   \(label): the caption reads 'Couldn't start the microphone'")
+    } else {
+        fail("\(label): the caption read '\(caption())', expected 'Couldn't start the microphone'")
+    }
+    if transcript() == heard, reply() == answer, !answer.isEmpty {
+        print("  ok   \(label): the panel kept the question and the answer")
+    } else {
+        fail("\(label): the panel read '\(transcript())' and '\(reply().prefix(40))', expected the turn it showed before the press, '\(heard)' and '\(answer.prefix(40))'")
+    }
+    wait(1.5)
+    let lines = tail.lines(after: pressed)
+    let stopped = "voice stopped utterance=\(delivered.utterance) "
+    if lines.contains(where: { $0.hasPrefix(stopped) }) {
+        fail("\(label): the app logged '\(stopped.dropLast())', expected the failed press to leave the voice playing")
+    } else {
+        print("  ok   \(label): 1.5 s after the press the voice was still playing, no '\(stopped.dropLast())' line")
+    }
+    if states(after: pressed).isEmpty {
+        print("  ok   \(label): no state line since the press, so utterance \(delivered.utterance) is still responding")
+    } else {
+        fail("\(label): the state changed during the failed press: \(states(after: pressed))")
+    }
+
+    release()
+    useMicrophoneScenario("ok")
+    let spoke = "voice spoke utterance=\(delivered.utterance) "
+    if wait(upTo: 10, until: { tail.lines(after: pressed).contains { $0.hasPrefix(spoke) } }) {
+        print("  ok   \(label): the voice finished utterance \(delivered.utterance) after the failed press")
+    } else {
+        fail("\(label): expected '\(spoke.dropLast())' within 10 s of the release, the voice lines were \(tail.lines(after: pressed).filter { $0.hasPrefix("voice ") })")
+    }
+    _ = wait(upTo: 3) { !states(after: pressed).isEmpty }
+    let since = states(after: pressed)
+    if since == [State(voice: "idle", utterance: delivered.utterance)] {
+        print("  ok   \(label): the only state line since the press was idle utterance=\(delivered.utterance), after the voice finished")
+    } else {
+        fail("\(label): the state lines since the press were \(since), expected only idle utterance=\(delivered.utterance)")
+    }
+}
+
 func tapEnabled() -> Bool? {
     var count: UInt32 = 0
     CGGetEventTapList(0, nil, &count)
@@ -1496,5 +1574,6 @@ if let warmed {
     serverClose(after: warmed)
     idleClose(session: warmed + 1)
 }
+failedPressWhileSpeaking()
 hotkey()
 finish()
