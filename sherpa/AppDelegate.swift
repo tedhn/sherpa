@@ -18,7 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.companion = companion
         overlays = NSScreen.screens.map { screen in
             let overlay = OverlayWindow(screen: screen)
-            let content = NSHostingView(rootView: CompanionView(companion: companion, screenFrame: screen.frame))
+            let content = NSHostingView(rootView: CompanionView(companion: companion, state: state, screenFrame: screen.frame))
             // A hosting view sizes its window to the content by default; the overlay must stay the screen's size.
             content.sizingOptions = []
             overlay.contentView = content
