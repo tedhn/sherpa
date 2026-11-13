@@ -131,6 +131,9 @@ echo "overlay"
 swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/overlay-check" \
     sherpa/Overlay.swift scripts/overlay-check.swift >/dev/null \
     && "$DERIVED/overlay-check" || failures=$((failures + 1))
+swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/companion-check" \
+    sherpa/Companion.swift scripts/companion-check.swift >/dev/null \
+    && "$DERIVED/companion-check" || failures=$((failures + 1))
 
 echo "transcription"
 swiftc -o "$DERIVED/fake-assemblyai" scripts/fake-assemblyai.swift >/dev/null \
@@ -234,6 +237,8 @@ item_pos="$(proc 'to return position of menu bar item 1 of menu bar 2')"
 check "icon is in the menu bar" "yes" "$([[ "$item_pos" == *,* ]] && echo yes || echo no)"
 check "no panel before the first click" "0" "$(proc 'to return count of windows')"
 [[ -x "$DERIVED/overlay-check" ]] && { "$DERIVED/overlay-check" --app "$app_pid" || failures=$((failures + 1)); }
+echo "companion"
+[[ -x "$DERIVED/companion-check" ]] && { "$DERIVED/companion-check" --app "$app_pid" || failures=$((failures + 1)); }
 
 echo "open"
 front_before="$(frontmost)"
@@ -268,6 +273,9 @@ else
     echo "  skip geometry checks: no panel to measure"
     panel_x=0 panel_y=0 panel_w=0 panel_h=0 panel_h=0
 fi
+
+echo "companion over the panel"
+[[ -x "$DERIVED/companion-check" ]] && { "$DERIVED/companion-check" --panel "$app_pid" || failures=$((failures + 1)); }
 
 echo "hold to talk"
 swift "$(dirname "$0")/hold-to-talk-check.swift" "$app_pid" ${fake_capture:+"$fake_capture" "$fake_scenario" "$idle_seconds" "$fake_archive" "$fake_claude_requests" "$fake_claude_scenario" "$fake_voice_requests" "$fake_voice_scenario" "$microphone_scenario"} \
