@@ -28,8 +28,8 @@ enum CompanionCheck {
         NSApplication.shared.setActivationPolicy(.accessory)
         let arguments = CommandLine.arguments
         Task {
-            if arguments.count == 3, arguments[1] == "--app", let pid = Int32(arguments[2]) {
-                await checkApp(pid: pid)
+            if (3...4).contains(arguments.count), arguments[1] == "--app", let pid = Int32(arguments[2]) {
+                await checkApp(pid: pid, restSeconds: arguments.count == 4 ? Double(arguments[3]) : nil)
             } else if arguments.count == 3, arguments[1] == "--panel", let pid = Int32(arguments[2]) {
                 await checkPanel(pid: pid)
             } else {
@@ -141,7 +141,7 @@ enum CompanionCheck {
         point.map { String(format: "(%.1f, %.1f)", $0.x, $0.y) } ?? "none"
     }
 
-    static func checkApp(pid: Int32) async {
+    static func checkApp(pid: Int32, restSeconds: Double?) async {
         let saved = CGEvent(source: nil)?.location ?? .zero
         let all = overlays(pid)
         for screen in NSScreen.screens {
@@ -179,6 +179,7 @@ enum CompanionCheck {
         }
 
         await checkDrag(overlays: all)
+        if let restSeconds { await checkRest(overlays: all, restSeconds: restSeconds, pid: pid) }
         checkFeed(pid: pid)
 
         move(to: saved)
@@ -228,7 +229,27 @@ enum CompanionCheck {
         expect(near(found, local, within: 2), "the glyph followed the drag", "\(describe(found)) vs \(describe(local))")
     }
 
-    static func checkFeed(pid: Int32) {
+    static func checkRest(overlays all: [Overlay], restSeconds: Double, pid: Int32) async {
+        let main = CGMainDisplayID()
+        guard let overlay = all.first(where: { $0.bounds == CGDisplayBounds(main) }) else {
+            expect(false, "the primary display has an overlay")
+            return
+        }
+        try? await Task.sleep(for: .seconds(restSeconds + 1.5))
+        expect(glyph(in: overlay) == nil, "a pointer still past the rest time hides the glyph")
+        expect(companionLog(pid: pid).contains("companion resting"), "the app logged companion resting")
+
+        let here = CGEvent(source: nil)?.location ?? .zero
+        let target = CGPoint(x: here.x - 40, y: here.y)
+        move(to: target)
+        try? await Task.sleep(for: .milliseconds(800))
+        let local = CGPoint(x: target.x - overlay.bounds.minX + 35, y: target.y - overlay.bounds.minY + 25)
+        let found = glyph(in: overlay)?.centre
+        expect(near(found, local, within: 2), "a move after the rest brings the glyph back",
+               "\(describe(found)) vs \(describe(local))")
+    }
+
+    static func companionLog(pid: Int32) -> String {
         let log = Process()
         log.executableURL = URL(fileURLWithPath: "/usr/bin/log")
         log.arguments = ["show", "--last", "2m", "--style", "syslog", "--predicate",
@@ -241,6 +262,11 @@ enum CompanionCheck {
             text = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
             log.waitUntilExit()
         }
+        return text
+    }
+
+    static func checkFeed(pid: Int32) {
+        let text = companionLog(pid: pid)
         expect(text.contains("companion tapping"), "the companion follows through the event tap, not the poll", text)
     }
 

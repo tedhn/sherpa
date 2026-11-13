@@ -210,6 +210,7 @@ if [[ -s "$fake_ports" ]]; then
     read -r token_field socket_field < "$fake_ports"
     open -a "$APP" --args -AssemblyAITokenURL "${token_field#token=}" \
         -AssemblyAISocketURL "${socket_field#socket=}" -AssemblyAIAPIKey fake -AssemblyAIIdleSeconds "$idle_seconds" \
+        -CompanionRestSeconds 8 \
         "${supabase_flags[@]}" "${claude_flags[@]}" "${voice_flags[@]}" -MicrophoneScenarioFile "$microphone_scenario"
 else
     echo "  FAIL the fake AssemblyAI never wrote its ports"
@@ -238,7 +239,7 @@ check "icon is in the menu bar" "yes" "$([[ "$item_pos" == *,* ]] && echo yes ||
 check "no panel before the first click" "0" "$(proc 'to return count of windows')"
 [[ -x "$DERIVED/overlay-check" ]] && { "$DERIVED/overlay-check" --app "$app_pid" || failures=$((failures + 1)); }
 echo "companion"
-[[ -x "$DERIVED/companion-check" ]] && { "$DERIVED/companion-check" --app "$app_pid" || failures=$((failures + 1)); }
+[[ -x "$DERIVED/companion-check" ]] && { "$DERIVED/companion-check" --app "$app_pid" 8 || failures=$((failures + 1)); }
 
 echo "open"
 front_before="$(frontmost)"

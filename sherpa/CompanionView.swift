@@ -7,6 +7,7 @@ struct CompanionView: View {
 
     var body: some View {
         CompanionGlyph()
+            .opacity(companion.resting ? 0 : 1)
             .position(Companion.local(companion.position, in: screenFrame))
             // The notched built-in display gives a full-screen window a top safe-area inset.
             // Without this, local y = 0 would sit below the notch, not at the screen's top edge.

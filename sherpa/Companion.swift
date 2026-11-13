@@ -18,6 +18,10 @@ final class Companion {
     static let margin: CGFloat = 12
     private static let follow = Animation.spring(response: 0.2, dampingFraction: 0.6)
 
+    /// True once the pointer has sat still for `restAfter`, five minutes outside tests; the glyph
+    /// fades out until the next move.
+    private(set) var resting = false
+
     // A mouse tap needs the Accessibility grant (an ungranted app gets a non-nil tap that reads
     // tapIsEnabled false), so the companion polls until the grant.
     private enum Feed {
@@ -31,8 +35,18 @@ final class Companion {
     ].reduce(0) { $0 | 1 << $1.rawValue }
 
     @ObservationIgnored private var feed: Feed?
+    @ObservationIgnored private var lastMove = ContinuousClock.now
+    @ObservationIgnored private var restWatch: Task<Void, Never>?
+    let restAfter: Duration
 
     init() {
+        var restAfter = Duration.seconds(300)
+        #if DEBUG
+        if let seconds = UserDefaults.standard.string(forKey: "CompanionRestSeconds").flatMap(Double.init) {
+            restAfter = .seconds(seconds)
+        }
+        #endif
+        self.restAfter = restAfter
         position = Self.position(following: NSEvent.mouseLocation, on: NSScreen.screens.map(\.frame))
     }
 
@@ -55,6 +69,7 @@ final class Companion {
         feed = .tapping(port)
         logger.notice("companion tapping")
         followPointer()
+        watchForRest()
     }
 
     /// Where the glyph's centre goes for a pointer at `pointer`: the offset, clamped inside the
@@ -79,7 +94,29 @@ final class Companion {
     fileprivate func followPointer() {
         let next = Self.position(following: NSEvent.mouseLocation, on: NSScreen.screens.map(\.frame))
         if next == position { return }
+        lastMove = .now
+        if resting {
+            withAnimation(.easeOut(duration: 0.2)) { resting = false }
+            logger.notice("companion woke")
+        }
         withAnimation(Self.follow) { position = next }
+        watchForRest()
+    }
+
+    private func watchForRest() {
+        if restWatch != nil { return }
+        restWatch = Task { [weak self] in
+            while let self {
+                let due = lastMove + restAfter
+                if .now >= due {
+                    withAnimation(.easeIn(duration: 1)) { self.resting = true }
+                    logger.notice("companion resting")
+                    restWatch = nil
+                    return
+                }
+                try? await Task.sleep(until: due, clock: .continuous)
+            }
+        }
     }
 
     fileprivate func reenable(after type: CGEventType) {
