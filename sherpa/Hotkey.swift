@@ -5,7 +5,11 @@ private nonisolated let logger = Logger(subsystem: "my.rooftop.sherpa", category
 
 final class Hotkey {
     private let state: AppState
-    private var tap: CFMachPort?
+    private enum Tap {
+        case stopped
+        case starting
+        case listening(CFMachPort)
+    }
     private enum Chord {
         case up
         case waiting(Task<Void, Never>)
@@ -15,6 +19,7 @@ final class Hotkey {
 
     private static let shortcutWindow = Duration.milliseconds(300)
 
+    private var tap = Tap.stopped
     private var chord = Chord.up
 
     init(state: AppState) {
@@ -22,6 +27,8 @@ final class Hotkey {
     }
 
     func start() async {
+        guard case .stopped = tap else { return }
+        tap = .starting
         let prompt = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         if !AXIsProcessTrustedWithOptions(prompt) {
             logger.notice("hotkey waiting for accessibility")
@@ -29,7 +36,7 @@ final class Hotkey {
                 try? await Task.sleep(for: .seconds(1))
             }
         }
-        guard let tap = CGEvent.tapCreate(
+        guard let port = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .listenOnly,
@@ -38,14 +45,17 @@ final class Hotkey {
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
             logger.error("hotkey failed tap=nil")
+            tap = .stopped
             return
         }
-        guard CGEvent.tapIsEnabled(tap: tap) else {
+        guard CGEvent.tapIsEnabled(tap: port) else {
             logger.error("hotkey failed tap=disabled")
+            CFMachPortInvalidate(port)
+            tap = .stopped
             return
         }
-        CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(nil, tap, 0), .commonModes)
-        self.tap = tap
+        CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(nil, port, 0), .commonModes)
+        tap = .listening(port)
         logger.notice("hotkey listening")
     }
 
@@ -69,8 +79,8 @@ final class Hotkey {
     }
 
     fileprivate func reenable(after type: CGEventType) {
-        guard let tap else { return }
-        CGEvent.tapEnable(tap: tap, enable: true)
+        guard case .listening(let port) = tap else { return }
+        CGEvent.tapEnable(tap: port, enable: true)
         logger.notice("hotkey reenabled cause=\(type == .tapDisabledByTimeout ? "timeout" : "input", privacy: .public)")
     }
 
