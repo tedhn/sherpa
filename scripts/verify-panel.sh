@@ -240,6 +240,8 @@ check "no panel before the first click" "0" "$(proc 'to return count of windows'
 [[ -x "$DERIVED/overlay-check" ]] && { "$DERIVED/overlay-check" --app "$app_pid" || failures=$((failures + 1)); }
 echo "companion"
 [[ -x "$DERIVED/companion-check" ]] && { "$DERIVED/companion-check" --app "$app_pid" 8 || failures=$((failures + 1)); }
+echo "displays rearranged"
+[[ -x "$DERIVED/companion-check" ]] && { "$DERIVED/companion-check" --rearranged "$app_pid" || failures=$((failures + 1)); }
 
 echo "open"
 front_before="$(frontmost)"
