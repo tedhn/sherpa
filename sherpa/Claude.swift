@@ -50,6 +50,32 @@ nonisolated enum Claude {
         }
     }
 
+    enum Target: Equatable, Sendable {
+        case none
+        case point(x: Int, y: Int, label: String, screen: Int)
+
+        static let cursorScreen = 1
+
+        var logField: String {
+            switch self {
+            case .none: "none"
+            case .point(let x, let y, _, let screen): "screen\(screen):\(x),\(y)"
+            }
+        }
+
+        static func split(_ answer: String) -> (spoken: String, target: Target)? {
+            let tag = #/\[POINT:(?:(none)|([0-9]+)\s*,\s*([0-9]+)\s*:([^\]:\n\r]+?)(?::screen([0-9]+))?)\]\s*\z/#
+            guard let match = answer.firstMatch(of: tag) else { return nil }
+            let spoken = answer[..<match.range.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+            let (_, none, x, y, label, screen) = match.output
+            if none != nil { return (spoken, Target.none) }
+            let name = label?.trimmingCharacters(in: .whitespaces) ?? ""
+            let number = screen.map { Int($0) ?? 0 } ?? cursorScreen
+            guard let x = x.flatMap({ Int($0) }), let y = y.flatMap({ Int($0) }), !name.isEmpty, number > 0 else { return nil }
+            return (spoken, .point(x: x, y: y, label: name, screen: number))
+        }
+    }
+
     enum Reply: Equatable, Sendable {
         case asking
         case answering(String)
@@ -164,7 +190,7 @@ nonisolated enum Claude {
     private static let version = "2026-10-21"
     private static let effort = "low"
     private static let maxTokens = 16000
-    private static let system = """
+    static let system = """
         You are Sherpa, a voice assistant in the user's Mac menu bar. The user speaks a question, and you get their words and a screenshot of each display. Your reply is spoken aloud by text-to-speech, so talk the way a sharp, friendly person sitting next to them would.
 
         Rules:
@@ -262,7 +288,8 @@ final class Conversation {
             }
             let text = try reading.finished()
             history.remember(Claude.Exchange(question: question.text, screens: question.images.count, answer: text), at: .now)
-            logger.notice("claude answered utterance=\(utterance) first=\(first) ms=\(elapsed()) chars=\(text.count) updates=\(updates)")
+            let target = Claude.Target.split(text)?.target.logField ?? "missing"
+            logger.notice("claude answered utterance=\(utterance) first=\(first) ms=\(elapsed()) chars=\(text.count) updates=\(updates) target=\(target, privacy: .public)")
             return text
         } catch {
             if Task.isCancelled {
