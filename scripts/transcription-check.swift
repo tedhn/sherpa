@@ -489,6 +489,8 @@ enum TranscriptionCheck {
         let shorter = bench.partials.filter { $0.count < text.count }
         expect(shorter.count >= 2, "screenshot: at least 2 partial answers shorter than the answer were seen, got lengths \(bench.partials.map(\.count)) of \(text.count)")
         expect(bench.partials.allSatisfy { text.hasPrefix($0) }, "screenshot: each partial is a prefix of the answer")
+        expect(!text.contains("["), "screenshot: the answer has no tag, got '\(text.suffix(40))'")
+        expect(!bench.partials.contains { $0.contains("[") }, "screenshot: no partial answer showed any of the tag")
         expect(
             bench.requestBlocks == [[.text("Screen 1 of 1. The cursor is not on this screen. This image is 2x2 pixels."), .image, .text(sentence)]],
             "screenshot: one request carried the label, the image, then the words, got \(bench.requestBlocks)"
@@ -497,6 +499,7 @@ enum TranscriptionCheck {
         expect(handoff < asking, "screenshot: Claude was asked after the screenshots were handed over, at lines \(handoff) and \(asking)")
         expect(bench.lines("claude answered ").count == 1 && bench.lines("claude answered ")[0].hasPrefix("claude answered utterance=1 first="), "screenshot: the answer was logged once")
         expect(!bench.lines.contains { $0.contains("Answer to") }, "screenshot: the answer text is not logged")
+        expect(bench.lines("claude answered ").first?.hasSuffix(" target=screen1:640,400") == true, "screenshot: the answered line ends with the target, got \(bench.lines("claude answered "))")
     }
 
     static func followUp(_ bench: Bench) async {
@@ -527,6 +530,7 @@ enum TranscriptionCheck {
             ],
             "follow-up: request 2 carries utterance 1 as the note and words, then the whole answer, then the current turn, got \(sent[1])"
         )
+        expect(!sent.joined().filter { $0.role == "assistant" }.contains { $0.blocks.contains { if case .text(let text) = $0 { text.contains("POINT") } else { false } } }, "follow-up: no assistant turn in any request has the tag")
         expect(sent[2] == [SentTurn(role: "user", blocks: screens + [.text(questions[2])])], "follow-up: request 3 forgot everything after the idle gap, got \(sent[2])")
         await bench.sync()
         let asking = bench.lines("claude asking ")
