@@ -471,6 +471,7 @@ struct Rule {
             reply.said.spoken.unicodeScalars.first(where: \.properties.isEmojiPresentation).map { String($0) }
         },
         pattern("narration", #"\bscreenshots?\b|\bimages?\b|as an ai|language model"#),
+        pattern("pointer", #"\bpoint(?:ing|ed)? (?:at|to)\b|\bpointer\b"#),
         pattern("opener", #"^(?:great question|sure|certainly|of course|absolutely|happy to)\b"#),
         Rule(name: "length") { reply in
             let count = words(in: reply.said.spoken)
@@ -504,6 +505,7 @@ struct Rule {
 
 extension Case {
     private static let wifiSwitch = CGRect(x: 990, y: 184, width: 52, height: 30)
+    private static let notifications = CGRect(x: 204, y: 332, width: 242, height: 40)
     private static let thirdBubble = CGRect(x: 372, y: 312, width: Canvas().width(of: "Can you send me the slides before 3pm?", size: 20) + 36, height: 48)
     private static let buildTypo = [["reponse", "response", "typo", "misspel", "spelled"]]
 
@@ -548,6 +550,14 @@ extension Case {
         )]),
         Case(name: "wifi", turns: [Turn(question: "Why can't I get online?", scenes: [.wifiSettings], mustMention: [["wi-fi", "wifi", "wi fi"]])]),
         Case(name: "wifiToggle", turns: [Turn(question: "Where do I turn Wi-Fi on?", scenes: [.wifiSettings], aim: .at(screen: 1, wifiSwitch))]),
+        Case(name: "settingsTour", turns: [
+            Turn(question: "Where do I turn Wi-Fi on?", scenes: [.wifiSettings], aim: .at(screen: 1, wifiSwitch)),
+            Turn(question: "And where's Bluetooth?", scenes: [.wifiSettings], aim: .at(screen: 1, CGRect(x: 204, y: 240, width: 242, height: 40))),
+            Turn(question: "What about notifications?", scenes: [.wifiSettings], aim: .at(screen: 1, notifications)),
+            Turn(question: "What's a good name for a golden retriever puppy?", scenes: [.wifiSettings], aim: .nothing, mustNotMention: ["screen", "wi-fi", "bluetooth"]),
+            Turn(question: "Okay, and where's Sound?", scenes: [.wifiSettings], aim: .at(screen: 1, CGRect(x: 204, y: 378, width: 242, height: 40))),
+            Turn(question: "How many ounces are in a cup?", scenes: [.wifiSettings], aim: .nothing, mustNotMention: ["screen", "sound", "settings"]),
+        ]),
         Case(name: "bluetooth", turns: [Turn(
             question: "Where are my Bluetooth settings?", scenes: [.wifiSettings],
             aim: .at(screen: 1, CGRect(x: 204, y: 240, width: 242, height: 40))
@@ -816,6 +826,9 @@ enum VoiceCheck {
             Probe(text: "Take a screenshot with Command Shift Four.", failing: ["narration"]),
             Probe(text: "Take a screenshot with Command Shift Four.", turn: Turn(question: "", scenes: [], allowed: ["narration"]), failing: []),
             Probe(text: "Imagine a loaf of bread.", failing: []),
+            Probe(text: "It isn't about your screen, so I'm not pointing at anything.", failing: ["pointer"]),
+            Probe(text: "The pointer is on the switch.", failing: ["pointer"]),
+            Probe(text: "That point is fair, and it points out a typo.", failing: []),
             Probe(text: "Great question. It is a typo.", failing: ["opener"]),
             Probe(text: "Surely it is a typo.", failing: []),
             Probe(text: "one two three four", turn: Turn(question: "", scenes: [], maxWords: 3), failing: ["length"]),
