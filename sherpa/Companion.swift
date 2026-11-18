@@ -6,21 +6,77 @@ import os
 
 private nonisolated let logger = Logger(subsystem: "my.rooftop.sherpa", category: "companion")
 
+nonisolated struct Flight: Equatable, Sendable {
+    let from: CGPoint
+    let control: CGPoint
+    let to: CGPoint
+    let duration: Duration
+
+    init(from: CGPoint, to: CGPoint) {
+        let distance = hypot(to.x - from.x, to.y - from.y)
+        let lift = min(distance * 0.2, 80)
+        self.from = from
+        self.to = to
+        control = CGPoint(x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 + lift)
+        duration = .seconds(min(max(distance / 1500, 0.5), 1.2))
+    }
+
+    func position(after elapsed: Duration) -> CGPoint {
+        let s = eased(elapsed)
+        let (a, b, c) = ((1 - s) * (1 - s), 2 * (1 - s) * s, s * s)
+        return CGPoint(x: a * from.x + b * control.x + c * to.x, y: a * from.y + b * control.y + c * to.y)
+    }
+
+    func heading(after elapsed: Duration) -> Angle {
+        let s = eased(elapsed)
+        return Angle(clockwiseFromUpTo: CGVector(
+            dx: 2 * (1 - s) * (control.x - from.x) + 2 * s * (to.x - control.x),
+            dy: 2 * (1 - s) * (control.y - from.y) + 2 * s * (to.y - control.y)
+        ))
+    }
+
+    private func eased(_ elapsed: Duration) -> Double {
+        let progress = min(max(elapsed / duration, 0), 1)
+        return progress * progress * (3 - 2 * progress)
+    }
+}
+
+nonisolated extension Angle {
+    init(clockwiseFromUpTo direction: CGVector) {
+        self = .radians(atan2(direction.dx, direction.dy))
+    }
+}
+
 @MainActor
 @Observable
 final class Companion {
     /// The glyph's centre in AppKit global coordinates: bottom-left origin of the primary
     /// display, y up. The same space as NSEvent.mouseLocation and NSScreen.frame.
     private(set) var position: CGPoint
+    private(set) var heading = Companion.restingHeading
 
     /// From the pointer's hotspot to the glyph's centre: right and below, in AppKit y-up terms.
     static let offset = CGVector(dx: 35, dy: -25)
     static let margin: CGFloat = 12
+    /// The apex is drawn pointing up. Turn it to face back along the offset, at the hotspot:
+    /// local offset is (35, 25) down-right, so the hotspot lies at atan2(-35, 25), about -54 degrees.
+    static let restingHeading = Angle(clockwiseFromUpTo: CGVector(dx: -offset.dx, dy: -offset.dy))
     private static let follow = Animation.spring(response: 0.2, dampingFraction: 0.6)
 
     /// True once the pointer has sat still for `restAfter`, five minutes outside tests; the glyph
     /// fades out until the next activity.
     private(set) var resting = false
+
+    private enum Motion {
+        case following
+        case flying(Flight, started: ContinuousClock.Instant, timer: Timer)
+        case pointing
+    }
+
+    @ObservationIgnored private var motion = Motion.following {
+        didSet { if case .flying(_, _, let timer) = oldValue { timer.invalidate() } }
+    }
+    @ObservationIgnored private var target: CGPoint?
 
     // A mouse tap needs the Accessibility grant (an ungranted app gets a non-nil tap that reads
     // tapIsEnabled false), so the companion polls until the grant.
@@ -92,10 +148,69 @@ final class Companion {
     }
 
     func followPointer() {
+        guard case .following = motion else { return }
         let next = Self.position(following: NSEvent.mouseLocation, on: NSScreen.screens.map(\.frame))
         if next == position { return }
         withAnimation(Self.follow) { position = next }
         wake()
+    }
+
+    func point(at target: CGPoint?) {
+        if target == self.target { return }
+        self.target = target
+        if let target {
+            fly(to: Self.position(following: target, on: NSScreen.screens.map(\.frame)))
+        } else if case .pointing = motion {
+            follow()
+        }
+    }
+
+    private func fly(to destination: CGPoint) {
+        let flight = Flight(from: position, to: destination)
+        wake()
+        if hypot(destination.x - position.x, destination.y - position.y) < 1 {
+            land(flight)
+            return
+        }
+        let timer = Timer(timeInterval: 1.0 / 120, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        motion = .flying(flight, started: .now, timer: timer)
+        logger.notice("""
+            companion flying from=\(Self.field(flight.from), privacy: .public) to=\(Self.field(flight.to), privacy: .public) \
+            ms=\(Int((flight.duration / .milliseconds(1)).rounded()))
+            """)
+    }
+
+    private func tick() {
+        guard case .flying(let flight, let started, _) = motion else { return }
+        let elapsed = started.duration(to: .now)
+        position = flight.position(after: elapsed)
+        heading = flight.heading(after: elapsed)
+        if elapsed >= flight.duration { land(flight) }
+    }
+
+    private func land(_ flight: Flight) {
+        position = flight.to
+        withAnimation(.easeOut(duration: 0.2)) { heading = Self.resting(nearest: heading) }
+        logger.notice("companion landed at=\(Self.field(flight.to), privacy: .public)")
+        if target == nil { follow() } else { motion = .pointing }
+    }
+
+    private static func resting(nearest heading: Angle) -> Angle {
+        let turns = ((heading.radians - restingHeading.radians) / (2 * .pi)).rounded()
+        return .radians(restingHeading.radians + turns * 2 * .pi)
+    }
+
+    private func follow() {
+        motion = .following
+        logger.notice("companion following")
+        followPointer()
+    }
+
+    private static func field(_ point: CGPoint) -> String {
+        String(format: "%.1f,%.1f", point.x, point.y)
     }
 
     /// Voice activity counts as activity, so a hold wakes a resting companion and the rest time

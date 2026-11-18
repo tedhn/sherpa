@@ -129,6 +129,8 @@ enum CompanionCheck {
                 await checkPanel(pid: pid)
             } else {
                 checkPlacement()
+                checkArc()
+                await checkPointing()
                 checkLooksRender()
             }
             exit(failures == 0 ? 0 : 1)
@@ -156,6 +158,136 @@ enum CompanionCheck {
         expect(lower == CGPoint(x: 438, y: 25), "local on the lower display", "\(lower)")
         let single = Companion.local(CGPoint(x: 635, y: 375), in: one[0])
         expect(single == CGPoint(x: 635, y: 737), "local on one display", "\(single)")
+    }
+
+    static func exact(_ point: CGPoint) -> String {
+        String(format: "(%.5f, %.5f)", point.x, point.y)
+    }
+
+    static func checkArc() {
+        func close(_ a: CGPoint, _ b: CGPoint) -> Bool { abs(a.x - b.x) <= 0.001 && abs(a.y - b.y) <= 0.001 }
+        func degrees(_ angle: Angle) -> String { String(format: "%.5f degrees", angle.degrees) }
+        func seconds(_ duration: Duration) -> Double { duration / .seconds(1) }
+
+        let across = Flight(from: .zero, to: CGPoint(x: 1000, y: 0))
+        expect(close(across.control, CGPoint(x: 500, y: 80)), "a 1000 pt flight bows toward a point 80 pt above its midpoint",
+               exact(across.control))
+        expect(abs(seconds(across.duration) - 0.6667) <= 0.001, "a 1000 pt flight takes 0.6667 s", "\(across.duration)")
+        let rows: [(Double, CGPoint)] = [
+            (0, CGPoint(x: 0, y: 0)),
+            (0.25, CGPoint(x: 156.25, y: 21.09375)),
+            (0.5, CGPoint(x: 500, y: 40)),
+            (1, CGPoint(x: 1000, y: 0)),
+        ]
+        for (progress, expected) in rows {
+            let actual = across.position(after: across.duration * progress)
+            expect(close(actual, expected), "\(progress) of the way through, the 1000 pt flight is at \(exact(expected))", exact(actual))
+        }
+        expect(abs(across.heading(after: across.duration / 2).degrees - 90) <= 0.001, "halfway through a flight to the right the apex faces right",
+               degrees(across.heading(after: across.duration / 2)))
+        expect(abs(across.heading(after: .zero).radians - atan2(1000, 160)) <= 0.001, "at takeoff the apex faces up the curve, toward the bow",
+               degrees(across.heading(after: .zero)))
+
+        let far = Flight(from: .zero, to: CGPoint(x: 3000, y: 0))
+        expect(abs(far.control.y - 80) <= 0.001 && abs(seconds(far.duration) - 1.2) <= 0.001,
+               "a 3000 pt flight still rises at most 80 pt and takes at most 1.2 s", "\(exact(far.control)), \(far.duration)")
+        let near = Flight(from: .zero, to: CGPoint(x: 100, y: 0))
+        expect(abs(near.control.y - 20) <= 0.001 && abs(seconds(near.duration) - 0.5) <= 0.001,
+               "a 100 pt flight rises 20 pt and takes at least 0.5 s", "\(exact(near.control)), \(near.duration)")
+        let down = Flight(from: .zero, to: CGPoint(x: 0, y: -600))
+        expect(abs(down.heading(after: down.duration / 2).degrees - 180) <= 0.001, "halfway through a downward flight the apex faces down",
+               degrees(down.heading(after: down.duration / 2)))
+    }
+
+    static func checkPointing() async {
+        guard let frame = NSScreen.screens.first?.frame else {
+            expect(false, "a screen to point on")
+            return
+        }
+        let companion = Companion()
+        func following() -> CGPoint { Companion.position(following: NSEvent.mouseLocation, on: NSScreen.screens.map(\.frame)) }
+        func spot(_ target: CGPoint) -> CGPoint { CGPoint(x: target.x + 35, y: target.y - 25) }
+        func distance(_ a: CGPoint, _ b: CGPoint) -> CGFloat { hypot(a.x - b.x, a.y - b.y) }
+        func seconds(_ from: CGPoint, _ to: CGPoint) -> Duration { .seconds(Flight(from: from, to: to).duration / .seconds(1)) }
+        func wait(until deadline: ContinuousClock.Instant) async { try? await Task.sleep(until: deadline, clock: .continuous) }
+        func restingTurns() -> Double {
+            (companion.heading.radians - Companion.restingHeading.radians) / (2 * .pi)
+        }
+        func faces() -> Bool { abs(restingTurns() - restingTurns().rounded()) * 2 * .pi <= 0.001 }
+
+        let home = companion.position
+        let left = CGPoint(x: frame.minX + 300, y: frame.midY)
+        let right = CGPoint(x: frame.maxX - 300, y: frame.midY)
+        let target = distance(home, left) > distance(home, right) ? left : right
+        let destination = spot(target)
+        let started = ContinuousClock.now
+        companion.point(at: target)
+        await wait(until: started + .milliseconds(200))
+        let mid = companion.position
+        let along = (mid.x - home.x) / (destination.x - home.x)
+        let rise = mid.y - (home.y + along * (destination.y - home.y))
+        expect(along > 0 && along < 1 && rise > 5, "0.2 s after pointing the glyph is partway there, above the straight line",
+               "\(describe(mid)) from \(describe(home)) to \(describe(destination))")
+        companion.point(at: target)
+        await wait(until: started + seconds(home, destination) + .milliseconds(150))
+        expect(distance(companion.position, destination) <= 0.001 && faces(),
+               "pointing again at the same target does not restart the flight, which lands on time facing the target",
+               "\(exact(companion.position)) vs \(exact(destination)), heading \(companion.heading.degrees)")
+        companion.followPointer()
+        expect(distance(companion.position, destination) <= 0.001, "while it points, a mouse event leaves it where it is",
+               exact(companion.position))
+        companion.point(at: nil)
+        expect(distance(companion.position, following()) <= 0.001, "once the pointing ends the glyph follows the pointer",
+               "\(exact(companion.position)) vs \(exact(following()))")
+
+        let second = ContinuousClock.now
+        let from = companion.position
+        companion.point(at: target)
+        await wait(until: second + .milliseconds(200))
+        companion.point(at: nil)
+        companion.followPointer()
+        await wait(until: second + .milliseconds(300))
+        expect(distance(companion.position, following()) > 5 && distance(companion.position, destination) > 5,
+               "a pointing that ends mid-flight leaves the glyph flying, whatever the mouse does", exact(companion.position))
+        await wait(until: second + seconds(from, destination) + .milliseconds(150))
+        companion.followPointer()
+        expect(distance(companion.position, following()) <= 0.001, "after that flight lands, a mouse event moves the glyph again",
+               "\(exact(companion.position)) vs \(exact(following()))")
+
+        let topLeft = CGPoint(x: frame.minX + 300, y: frame.maxY - 200)
+        let topRight = CGPoint(x: frame.maxX - 300, y: frame.maxY - 200)
+        let third = ContinuousClock.now
+        companion.point(at: topLeft)
+        await wait(until: third + .milliseconds(200))
+        let turned = companion.position
+        let retargeted = ContinuousClock.now
+        companion.point(at: topRight)
+        await wait(until: retargeted + .milliseconds(30))
+        expect(distance(companion.position, turned) < 10, "a new target mid-flight takes off from where the glyph is",
+               "\(exact(companion.position)) vs \(exact(turned))")
+        await wait(until: retargeted + seconds(turned, spot(topRight)) + .milliseconds(150))
+        expect(distance(companion.position, spot(topRight)) <= 0.001 && faces(), "and lands on the new destination",
+               "\(exact(companion.position)) vs \(exact(spot(topRight)))")
+
+        let bottomRight = CGPoint(x: frame.maxX - 200, y: frame.minY + 200)
+        let fourth = ContinuousClock.now
+        let steep = Flight(from: companion.position, to: spot(bottomRight))
+        companion.point(at: bottomRight)
+        await wait(until: fourth + .seconds(steep.duration / .seconds(1)) + .milliseconds(150))
+        let landing = steep.heading(after: steep.duration).radians
+        expect(distance(companion.position, spot(bottomRight)) <= 0.001 && faces() && abs(companion.heading.radians - landing) <= .pi,
+               "a new target while pointing flies there, and on landing the arrow turns the shorter way to face it",
+               String(format: "heading %.1f degrees after a flight that ends at %.1f", companion.heading.degrees, landing * 180 / .pi))
+        companion.point(at: nil)
+
+        try? await Task.sleep(for: .seconds(1))
+        let logged = companionLog(pid: ProcessInfo.processInfo.processIdentifier).split(separator: "\n").compactMap { line in
+            ["flying", "landed", "following"].first { line.contains("companion \($0)") }
+        }
+        let expected = ["flying", "landed", "following", "flying", "landed", "following",
+                        "flying", "flying", "landed", "flying", "landed", "following"]
+        expect(logged == expected, "the log reads one flight per new target, each landing, then following",
+               logged.joined(separator: ", "))
     }
 
     static func displayID(_ screen: NSScreen) -> CGDirectDisplayID {
@@ -513,7 +645,8 @@ enum CompanionCheck {
             guard let (pixels, scale) = render(look, time: time) else { return .unknown }
             return classify(pixels.rgba, width: pixels.width, height: pixels.height, scale: scale, centre: centre)
         }
-        expect(seen(.arrow) == .arrow, "the idle look is the arrowhead", seen(.arrow).rawValue)
+        let idle = seen(.arrow(heading: Companion.restingHeading))
+        expect(idle == .arrow, "the idle look is the arrowhead", idle.rawValue)
         let quiet = seen(.waveform(level: 0.05))
         let loud = seen(.waveform(level: 1.0))
         expect(quiet == .waveform && loud == .waveform, "the listening look is a waveform", "\(quiet.rawValue), \(loud.rawValue)")
