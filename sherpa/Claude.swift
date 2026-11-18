@@ -275,6 +275,13 @@ nonisolated extension Claude.Question {
     }
 }
 
+nonisolated extension Claude.Target {
+    func appKitPoint(on shots: [Screenshot]) -> CGPoint? {
+        guard case .point(let x, let y, _, let screen) = self, shots.indices.contains(screen - 1) else { return nil }
+        return shots[screen - 1].appKitCentre(ofPixelX: x, y: y)
+    }
+}
+
 final class Conversation {
     private let endpoint: Claude.Endpoint
     private let urlSession: URLSession
