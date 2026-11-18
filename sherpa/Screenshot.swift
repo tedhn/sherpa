@@ -50,6 +50,15 @@ nonisolated struct Screenshot: Equatable, Sendable {
         return "Screen \(number) of \(count). \(cursor) This image is \(pixels.width)x\(pixels.height) pixels."
     }
 
+    func appKitCentre(ofPixelX x: Int, y: Int) -> CGPoint {
+        let column = min(max(x, 0), pixels.width - 1)
+        let row = min(max(y, 0), pixels.height - 1)
+        let localX = (Double(column) + 0.5) * (appKitFrame.width / Double(pixels.width))
+        let localY = (Double(row) + 0.5) * (appKitFrame.height / Double(pixels.height))
+        let flippedY = appKitFrame.height - localY
+        return CGPoint(x: appKitFrame.minX + localX, y: appKitFrame.minY + flippedY)
+    }
+
     static func cursorFirst(_ shots: [Screenshot]) -> [Screenshot] {
         shots.filter(\.holdsCursor) + shots.filter { !$0.holdsCursor }
     }

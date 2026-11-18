@@ -89,6 +89,7 @@ enum ScreenshotCheck {
         checkEncoding()
         checkCursor()
         checkLabels()
+        checkPoint()
         checkFailure()
         exit(failures == 0 ? 0 : 1)
     }
@@ -175,6 +176,36 @@ enum ScreenshotCheck {
         let off = shot(3, mainFrame, cursor: cursor, size: (1280, 720)).label(number: 2, of: 2)
         let wantOff = "Screen 2 of 2. The cursor is not on this screen. This image is 1280x720 pixels."
         expect(off == wantOff, "the other screen reads '\(wantOff)', got '\(off)'")
+    }
+
+    static func checkPoint() {
+        print("point")
+        func at(_ frame: CGRect, _ size: (Int, Int), _ x: Int, _ y: Int) -> CGPoint {
+            shot(1, frame, cursor: .zero, size: size).appKitCentre(ofPixelX: x, y: y)
+        }
+        func near(_ got: CGPoint, _ x: Double, _ y: Double) -> Bool {
+            abs(got.x - x) <= 0.001 && abs(got.y - y) <= 0.001
+        }
+        func check(_ name: String, _ got: CGPoint, _ x: Double, _ y: Double) {
+            expect(near(got, x, y), "\(name) is (\(x), \(y)), got (\(got.x), \(got.y))")
+        }
+        let main = (1280, 720)
+        check("main top-left pixel", at(mainFrame, main, 0, 0), 0.75, 1079.25)
+        check("main bottom-right pixel", at(mainFrame, main, 1279, 719), 1919.25, 0.75)
+        check("main centre pixel", at(mainFrame, main, 640, 360), 960.75, 539.25)
+        check("main far outside clamps to the bottom-left pixel", at(mainFrame, main, -5, 9999), 0.75, 0.75)
+        let builtIn = (1280, 832)
+        check("built-in top-left pixel", at(builtInFrame, builtIn, 0, 0), 97.66796875, -0.668269)
+        check("built-in bottom-right pixel", at(builtInFrame, builtIn, 1279, 831), 1806.33203125, -1111.331731)
+        check("built-in pixel 211,12", at(builtInFrame, builtIn, 211, 12), 379.55078125, -16.706731)
+        check("built-in one past the corner clamps to the last pixel", at(builtInFrame, builtIn, 1280, 832), 1806.33203125, -1111.331731)
+        check("retina without downsample", at(CGRect(x: 0, y: 0, width: 640, height: 400), (1280, 800), 2, 2), 1.25, 398.75)
+        for (name, frame, size) in [("main", mainFrame, main), ("built-in", builtInFrame, builtIn)] {
+            for (x, y) in [(0, 0), (size.0 - 1, 0), (0, size.1 - 1), (size.0 - 1, size.1 - 1)] {
+                let p = at(frame, size, x, y)
+                expect(frame.contains(p) && NSMouseInRect(p, frame, false), "\(name) corner pixel \(x),\(y) lands inside the frame, got \(p)")
+            }
+        }
     }
 
     static let pinned = [2, 2, 2, 2, 2, 2, 3, 2, 2, 3, 4, 3]
@@ -330,4 +361,5 @@ enum ScreenshotCheck {
         }
         finish(own)
     }
+
 }
