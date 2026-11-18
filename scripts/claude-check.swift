@@ -41,6 +41,7 @@ enum ClaudeCheck {
         checkRequest()
         checkHistory()
         checkQuestion()
+        checkSaid()
         checkAnswer()
         checkFailureFields()
         exit(failures == 0 ? 0 : 1)
@@ -134,7 +135,7 @@ enum ClaudeCheck {
         Claude.failure(status: status, body: Data(text.utf8))
     }
 
-    static func stream(_ lines: [String]) -> Result<String, Claude.Failure> {
+    static func stream(_ lines: [String]) -> Result<Claude.Said, Claude.Failure> {
         var reading = Claude.Answer()
         do {
             for line in lines { try reading.read(line) }
@@ -169,10 +170,48 @@ enum ClaudeCheck {
         "",
     ]
 
+    static func checkSaid() {
+        print("said")
+        let point = Claude.Target.point(x: 12, y: 40, label: "Save", screen: 1)
+        let probes: [(text: String, spoken: String, tag: String?, target: Claude.Target?)] = [
+            ("Done. [POINT:none]", "Done.", "[POINT:none]", Claude.Target.none),
+            ("Click it. [POINT:1012,199:Wi-Fi switch:screen2]", "Click it.", "[POINT:1012,199:Wi-Fi switch:screen2]", .point(x: 1012, y: 199, label: "Wi-Fi switch", screen: 2)),
+            ("Click it. [POINT:12,40:Save]", "Click it.", "[POINT:12,40:Save]", point),
+            ("  Click it.  \n [POINT:12 , 40 :  Save  :screen2]\n\n", "Click it.", "[POINT:12 , 40 :  Save  :screen2]", .point(x: 12, y: 40, label: "Save", screen: 2)),
+            ("Click it. [POINT:12,40:Save]  ", "Click it.", "[POINT:12,40:Save]", point),
+            ("Click [POINT:1,2:a] it. [POINT:none]", "Click [POINT:1,2:a] it.", "[POINT:none]", Claude.Target.none),
+            ("Click [POINT:1,2:a] it.", "Click [POINT:1,2:a] it.", nil, nil),
+            ("Click it. [point:none]", "Click it.", "[point:none]", nil),
+            ("Click it. [POINT:12,40]", "Click it.", "[POINT:12,40]", nil),
+            ("Click it. [POINT:12,40:]", "Click it.", "[POINT:12,40:]", nil),
+            ("Click it. [POINT:12,40:Save:screen0]", "Click it.", "[POINT:12,40:Save:screen0]", nil),
+            ("Click it. [POINT:12,40:Save:screen]", "Click it.", "[POINT:12,40:Save:screen]", nil),
+            ("Click it. [POINT:-12,40:Save]", "Click it.", "[POINT:-12,40:Save]", nil),
+            ("Click it. [POINT:none:screen1]", "Click it.", "[POINT:none:screen1]", nil),
+            ("Click it. [", "Click it.", "[", nil),
+            ("Click it. [POI", "Click it.", "[POI", nil),
+            ("Click it. [POINT:12,4", "Click it.", "[POINT:12,4", nil),
+            ("See [note]", "See [note]", nil, nil),
+            ("Pick [1, 2]", "Pick [1, 2]", nil, nil),
+            ("[POINT:none]", "", "[POINT:none]", Claude.Target.none),
+            ("", "", nil, nil),
+        ]
+        for probe in probes {
+            let said = Claude.Said(probe.text)
+            expect(
+                said.spoken == probe.spoken && said.tag == probe.tag && said.target == probe.target,
+                "\(probe.text.debugDescription) splits into \(probe.spoken.debugDescription), \(probe.tag.debugDescription), \(String(describing: probe.target)), got \(said.spoken.debugDescription), \(said.tag.debugDescription), \(String(describing: said.target))"
+            )
+        }
+        for example in Claude.system.matches(of: #/\[POINT:(?:none|[0-9][^\]]*)\]/#).map({ String($0.output) }) {
+            expect(Claude.Said(example).target != nil, "the prompt example \(example) parses")
+        }
+    }
+
     static func checkAnswer() {
         print("answer")
         expect(
-            stream(start + [delta("  A menu bar app"), delta(" is a small"), delta(" tool.\\n")] + end) == .success("A menu bar app is a small tool."),
+            stream(start + [delta("  A menu bar app"), delta(" is a small"), delta(" tool.\\n")] + end).map(\.spoken) == .success("A menu bar app is a small tool."),
             "text deltas concatenate and the result is trimmed"
         )
         var reading = Claude.Answer()
@@ -182,13 +221,29 @@ enum ClaudeCheck {
             if seen.last != reading.shown { seen.append(reading.shown) }
         }
         expect(seen == ["", "A menu", "A menu bar app."], "shown grows with each delta and nothing else changes it, got \(seen)")
+        var tagged = Claude.Answer()
+        var shown: [String] = []
+        for line in start + ["Click File", " in the menu bar. [", "POINT:211,", "12:File menu:sc", "reen1]"].map(delta) {
+            try? tagged.read(line)
+            if shown.last != tagged.shown { shown.append(tagged.shown) }
+        }
+        expect(shown == ["", "Click File", "Click File in the menu bar."], "a tag as it streams in never shows, got \(shown)")
+        let tail = stream(start + [delta("Click File"), delta(" in the menu bar. ["), delta("POINT:211,"), delta("12:File menu:sc"), delta("reen1]")] + end)
+        expect(
+            tail.map(\.spoken) == .success("Click File in the menu bar.") && tail.map(\.target) == .success(Claude.Target.point(x: 211, y: 12, label: "File menu", screen: 1)),
+            "a tag split across deltas is stripped and parsed, got \(tail)"
+        )
+        expect(
+            stream(start + [delta("[POINT:none]")] + end) == .failure(.unanswered(status: 200, detail: "no text, stop_reason=end_turn")),
+            "an answer that is only a tag is unanswered"
+        )
         let thinking = [
             #"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
             #"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}"#,
             #"data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EqQB"}}"#,
             #"data: {"type":"content_block_stop","index":0}"#,
         ]
-        expect(stream(thinking + start + [delta("Hi.")] + end) == .success("Hi."), "a thinking block adds no text")
+        expect(stream(thinking + start + [delta("Hi.")] + end).map(\.spoken) == .success("Hi."), "a thinking block adds no text")
         expect(
             stream(start + [delta("Part of an answer"), #"data: {"type":"message_delta","delta":{"stop_reason":"refusal"}}"#, #"data: {"type":"message_stop"}"#]) == .failure(.declined),
             "a refusal after some text is declined"
@@ -279,11 +334,11 @@ enum ClaudeCheck {
                 if first == nil { first = ms(started) }
             }
             print("  first text \(first ?? 0) ms, total \(ms(started)) ms, \(updates) updates")
-            print("  \(reply)")
+            print("  \(reply.spoken) \(reply.tag ?? "")")
             expect(updates >= 2, "the answer arrived in at least 2 updates, got \(updates)")
             let remembered = try await conversation.answer(followUp, utterance: 2) { _ in }
-            print("  \(remembered)")
-            expect(remembered.lowercased().contains("blue"), "the follow-up recalls the first image's colour")
+            print("  \(remembered.spoken)")
+            expect(remembered.spoken.lowercased().contains("blue"), "the follow-up recalls the first image's colour")
         } catch {
             print("  FAIL \(error.logFields)")
             exit(1)

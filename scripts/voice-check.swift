@@ -431,17 +431,8 @@ struct Finding: Equatable {
 }
 
 struct Answered {
-    let answer: String
+    let said: Claude.Said
     let turn: Turn
-    let split: (spoken: String, target: Claude.Target)?
-
-    init(_ answer: String, for turn: Turn) {
-        self.answer = answer
-        self.turn = turn
-        split = Claude.Target.split(answer)
-    }
-
-    var spoken: String { split?.spoken ?? answer }
 }
 
 struct Rule {
@@ -460,14 +451,14 @@ struct Rule {
     }
 
     private static func pattern(_ name: String, _ pattern: String) -> Rule {
-        Rule(name: name) { match(pattern, in: $0.spoken) }
+        Rule(name: name) { match(pattern, in: $0.said.spoken) }
     }
 
     static let all: [Rule] = [
         pattern("markdown", #"[*`#|]|__|\[[^\]]*\]\([^)]*\)"#),
         pattern("list", #"(?m)^[ \t]*(?:[-\#u{2022}]|\d+[.)])[ \t]"#),
         Rule(name: "paragraphs") { reply in
-            let lines = reply.spoken.split(separator: "\n").filter { !$0.allSatisfy(\.isWhitespace) }
+            let lines = reply.said.spoken.split(separator: "\n").filter { !$0.allSatisfy(\.isWhitespace) }
             return lines.count > 2 ? "\(lines.count) lines" : nil
         },
         pattern(
@@ -477,29 +468,29 @@ struct Rule {
         pattern("link", #"http|www\.|~/|/Users/"#),
         pattern("code", #"\w\(|[{}=]"#),
         Rule(name: "emoji") { reply in
-            reply.spoken.unicodeScalars.first(where: \.properties.isEmojiPresentation).map { String($0) }
+            reply.said.spoken.unicodeScalars.first(where: \.properties.isEmojiPresentation).map { String($0) }
         },
         pattern("narration", #"\bscreenshots?\b|\bimages?\b|as an ai|language model"#),
         pattern("opener", #"^(?:great question|sure|certainly|of course|absolutely|happy to)\b"#),
         Rule(name: "length") { reply in
-            let count = words(in: reply.spoken)
+            let count = words(in: reply.said.spoken)
             return count > reply.turn.maxWords ? "\(count) words, limit \(reply.turn.maxWords)" : nil
         },
         Rule(name: "mustMention") { reply in
-            let lowered = reply.spoken.lowercased()
+            let lowered = reply.said.spoken.lowercased()
             let missing = reply.turn.mustMention.filter { group in !group.contains { lowered.contains($0.lowercased()) } }
             return missing.isEmpty ? nil : "missing " + missing.map { $0.joined(separator: " / ") }.joined(separator: "; ")
         },
         Rule(name: "mustNotMention") { reply in
-            let lowered = reply.spoken.lowercased()
+            let lowered = reply.said.spoken.lowercased()
             let found = reply.turn.mustNotMention.filter { lowered.contains($0.lowercased()) }
             return found.isEmpty ? nil : "found " + found.joined(separator: ", ")
         },
         Rule(name: "tag") { reply in
-            reply.split == nil ? String(reply.answer.suffix(40)).replacingOccurrences(of: "\n", with: " / ") : nil
+            reply.said.target == nil ? (reply.said.tag ?? String(reply.said.spoken.suffix(40))).replacingOccurrences(of: "\n", with: " / ") : nil
         },
         Rule(name: "aim") { reply in
-            reply.split.flatMap { reply.turn.aim.offense($0.target) }
+            reply.said.target.flatMap { reply.turn.aim.offense($0) }
         },
     ]
 
@@ -702,28 +693,28 @@ enum VoiceCheck {
                     let started = ContinuousClock.now
                     let elapsed = { Int((started.duration(to: .now) / .milliseconds(1)).rounded()) }
                     var first = 0
-                    var answer = ""
                     var findings: [Finding] = []
                     var reply: Answered?
                     do throws(Claude.Failure) {
-                        answer = try await conversation.answer(question, utterance: utterance) { _ in
+                        let answered = Answered(said: try await conversation.answer(question, utterance: utterance) { _ in
                             if first == 0 { first = elapsed() }
-                        }
-                        let answered = Answered(answer, for: turn)
+                        }, turn: turn)
                         reply = answered
                         findings = Rule.findings(in: answered)
                     } catch {
                         findings = [Finding(rule: "api", snippet: error.logFields)]
                     }
                     let total = elapsed()
-                    let words = Rule.words(in: answer)
-                    if !answer.isEmpty {
-                        print(answer.split(separator: "\n", omittingEmptySubsequences: false).enumerated().map { "  \($0 == 0 ? "A:" : "  ") \($1)" }.joined(separator: "\n"))
+                    let said = reply?.said
+                    let spoken = said?.spoken ?? ""
+                    let words = Rule.words(in: spoken)
+                    if !spoken.isEmpty {
+                        print(spoken.split(separator: "\n", omittingEmptySubsequences: false).enumerated().map { "  \($0 == 0 ? "A:" : "  ") \($1)" }.joined(separator: "\n"))
                     }
-                    let target = reply?.split?.target
-                    if reply != nil {
+                    let target = said?.target
+                    if let said {
                         switch target {
-                        case nil: print("  T: missing")
+                        case nil: print("  T: missing" + (said.tag.map { " (tag \($0.debugDescription))" } ?? ""))
                         case .some(.none): print("  T: none")
                         case .some(.point(let x, let y, let label, let screen)): print("  T: screen\(screen) \(x),\(y) \"\(label)\"")
                         }
@@ -749,7 +740,7 @@ enum VoiceCheck {
                         writePoint(target, for: turn, to: "\(pointsPath)/\(current.name)-run\(run)-turn\(index + 1).png")
                     }
                     let record: [String: Any] = [
-                        "case": current.name, "run": run, "turn": index + 1, "question": turn.question, "answer": answer,
+                        "case": current.name, "run": run, "turn": index + 1, "question": turn.question, "answer": spoken, "tag": said?.tag ?? NSNull(),
                         "words": words, "firstMs": first, "totalMs": total, "target": targetRecord(target),
                         "failures": findings.map { "\($0.rule): \($0.snippet)" },
                     ]
@@ -843,41 +834,11 @@ enum VoiceCheck {
             Probe(text: "Flip the switch. [POINT:none]", turn: nothingTurn, tagged: false, failing: []),
             Probe(text: "Flip the switch.", tagged: false, failing: ["tag"], detail: "Flip the switch."),
             Probe(text: "Flip the switch. [POINT:1,2:x] and more", turn: aimTurn, tagged: false, failing: ["tag"], detail: "Flip the switch. [POINT:1,2:x] and more"),
+            Probe(text: "Flip it. [POINT:12,40]", tagged: false, failing: ["tag"], detail: "[POINT:12,40]"),
             Probe(text: "Use `reversed()` [POINT:none]", tagged: false, failing: ["markdown", "code"]),
             Probe(text: "Click [POINT:1,2:a](b) here.", tagged: false, failing: ["markdown", "tag"], detail: "Click [POINT:1,2:a](b) here."),
         ]
-        let splits: [(text: String, spoken: String?, target: Claude.Target?)] = [
-            ("Done. [POINT:none]", "Done.", Claude.Target.none),
-            ("Click it. [POINT:1012,199:Wi-Fi switch:screen2]", "Click it.", .point(x: 1012, y: 199, label: "Wi-Fi switch", screen: 2)),
-            ("Click it. [POINT:12,40:Save]", "Click it.", .point(x: 12, y: 40, label: "Save", screen: 1)),
-            ("Click it. [POINT:12 , 40 :  Save button  : screen2]", nil, nil),
-            ("  Click it.  \n [POINT:12 , 40 :  Save button  :screen2]\n\n", "Click it.", .point(x: 12, y: 40, label: "Save button", screen: 2)),
-            ("[POINT:none]", "", Claude.Target.none),
-            ("Click [POINT:1,2:a] it. [POINT:none]", "Click [POINT:1,2:a] it.", Claude.Target.none),
-            ("Click [POINT:1,2:a] it.", nil, nil),
-            ("Click it. [point:12,40:Save]", nil, nil),
-            ("Click it. [POINT:12,40]", nil, nil),
-            ("Click it. [POINT:12,40:]", nil, nil),
-            ("Click it. [POINT:12,40:  ]", nil, nil),
-            ("Click it. [POINT:12,40:Save:screen0]", nil, nil),
-            ("Click it. [POINT:-12,40:Save]", nil, nil),
-            ("Click it. [POINT:12,40:Save:screen]", nil, nil),
-            ("Click it. [POINT:12,40:Sa\nve]", nil, nil),
-            ("Click it. [POINT:none:screen1]", nil, nil),
-        ]
         var mismatches = 0
-        for probe in splits {
-            let got = Claude.Target.split(probe.text)
-            let ok = got?.spoken == probe.spoken && got?.target == probe.target
-            print("  \(ok ? "ok  " : "FAIL") split \(probe.text.replacingOccurrences(of: "\n", with: " / ")) -> \(got.map { "\($0.spoken.debugDescription) \($0.target)" } ?? "nil")")
-            if !ok { mismatches += 1 }
-        }
-        let inPrompt = Claude.system.matches(of: #/\[POINT:(?:none|[0-9][^\]]*)\]/#).map { String($0.output) }
-        for example in inPrompt {
-            let ok = Claude.Target.split(example) != nil
-            print("  \(ok ? "ok  " : "FAIL") prompt example \(example)")
-            if !ok { mismatches += 1 }
-        }
         let png = marked(.wifiSettings, box: CGRect(x: 990, y: 184, width: 52, height: 30), target: .point(x: 700, y: 600, label: "x", screen: 1))
         let pixel = { (x: Int, y: Int) in NSBitmapImageRep(data: png)?.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) }
         let red = pixel(712, 600), box = pixel(1000, 184), bare = pixel(720, 650)
@@ -887,7 +848,7 @@ enum VoiceCheck {
         print("  \(drawn ? "ok  " : "FAIL") marked png has a red crosshair at 700,600 and a green box at 990,184")
         if !drawn { mismatches += 1 }
         for probe in probes {
-            let findings = Rule.findings(in: Answered(probe.tagged ? probe.text + " [POINT:none]" : probe.text, for: probe.turn))
+            let findings = Rule.findings(in: Answered(said: Claude.Said(probe.tagged ? probe.text + " [POINT:none]" : probe.text), turn: probe.turn))
             let got = findings.map(\.rule)
             let ok = got == probe.failing && (probe.detail == nil || findings.last?.snippet == probe.detail)
             print("  \(ok ? "ok  " : "FAIL") \(probe.text.replacingOccurrences(of: "\n", with: " / ")) -> \(got)\(ok ? "" : ", expected \(probe.failing)")")
