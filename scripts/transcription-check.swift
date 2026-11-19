@@ -19,7 +19,7 @@ nonisolated final class LogTail: @unchecked Sendable {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/log")
         process.arguments = [
             "stream", "--level", "debug", "--style", "ndjson", "--predicate",
-            "processIdentifier == \(getpid()) AND subsystem == \"my.rooftop.sherpa\" AND category == \"transcription\"",
+            "processIdentifier == \(getpid()) AND subsystem == \"my.rooftop.sherpa\" AND (category == \"transcription\" OR category == \"claude\")",
         ]
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
@@ -57,6 +57,12 @@ enum TapShape {
     static let converterTail = 440
 }
 
+enum SentBlock: Equatable {
+    case text(String)
+    case image
+    case other(String)
+}
+
 struct Held {
     let transcription: Transcription
     let fed: Data
@@ -85,8 +91,12 @@ final class Bench {
     private let modeFile: URL?
     private let captureFile: URL?
     private let outputFile: URL?
+    private let claude: (server: Process, requests: URL)?
 
-    private init(name: String, tail: LogTail, transcriber: Transcriber, server: Process?, files: (mode: URL, capture: URL, output: URL)?) {
+    private init(
+        name: String, tail: LogTail, transcriber: Transcriber, server: Process?,
+        files: (mode: URL, capture: URL, output: URL)?, claude: (server: Process, requests: URL)? = nil
+    ) {
         self.name = name
         self.tail = tail
         self.transcriber = transcriber
@@ -95,6 +105,7 @@ final class Bench {
         modeFile = files?.mode
         captureFile = files?.capture
         outputFile = files?.output
+        self.claude = claude
     }
 
     static func fake(_ scenario: Scenario, binary: String, tail: LogTail, workspace: URL) async -> Bench? {
@@ -120,8 +131,36 @@ final class Bench {
             limits.idle = idle
             limits.idleWithPanelOpen = idle
         }
-        let transcriber = Transcriber(configuration: .init(key: scenario.key, endpoints: endpoints, limits: limits, screenshots: scenario.screenshots))
-        return Bench(name: scenario.name, tail: tail, transcriber: transcriber, server: server, files: (mode, capture, output))
+        var claude: (server: Process, requests: URL)?
+        var endpoint: Claude.Endpoint?
+        if scenario.claude {
+            let (port, requests, answerMode) = (file("claude-port"), file("claude-requests"), file("claude-mode"))
+            try? Data("ok\n".utf8).write(to: answerMode)
+            let fake = Process()
+            fake.executableURL = URL(fileURLWithPath: binary).deletingLastPathComponent().appending(path: "fake-claude")
+            fake.arguments = [port.path, requests.path, "--answer-delay", "0.5", "--scenario-file", answerMode.path]
+            fake.standardOutput = FileHandle.nullDevice
+            do { try fake.run() } catch {
+                server.terminate()
+                TranscriptionCheck.expect(false, "\(scenario.name): the fake Claude did not start: \(error.localizedDescription)")
+                return nil
+            }
+            claude = (fake, requests)
+            for _ in 0..<100 where endpoint == nil {
+                endpoint = (try? String(contentsOf: port, encoding: .utf8)).flatMap(URL.init(string:)).map { Claude.Endpoint(url: $0, key: scenario.claudeKey) }
+                if endpoint == nil { try? await Task.sleep(for: .milliseconds(100)) }
+            }
+            guard endpoint != nil else {
+                server.terminate()
+                fake.terminate()
+                TranscriptionCheck.expect(false, "\(scenario.name): the fake Claude never wrote its URL to \(port.path)")
+                return nil
+            }
+        }
+        let transcriber = Transcriber(configuration: .init(
+            key: scenario.key, endpoints: endpoints, limits: limits, screenshots: scenario.screenshots, claude: endpoint
+        ))
+        return Bench(name: scenario.name, tail: tail, transcriber: transcriber, server: server, files: (mode, capture, output), claude: claude)
     }
 
     static func live(_ name: String, key: String, tail: LogTail) -> Bench {
@@ -244,6 +283,31 @@ final class Bench {
 
     func stop() {
         server?.terminate()
+        claude?.server.terminate()
+    }
+
+    var requestBlocks: [[SentBlock]] {
+        guard let requests = claude?.requests else { return [] }
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: requests.path)) ?? []
+        return names.compactMap { Int($0.dropLast(".json".count)) }.sorted().compactMap { number in
+            let body = try? Data(contentsOf: requests.appending(path: "\(number).json"))
+            let messages = body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["messages"] as? [[String: Any]]
+            return (messages?.last?["content"] as? [[String: Any]])?.map { block in
+                switch block["type"] as? String {
+                case "text": .text(block["text"] as? String ?? "")
+                case "image": .image
+                case let type: .other(type ?? "none")
+                }
+            }
+        }
+    }
+
+    func reply(of transcription: Transcription, upTo seconds: Double = 8) async -> Claude.Reply? {
+        let deadline = ContinuousClock.now + .seconds(seconds)
+        while ContinuousClock.now < deadline, transcription.reply == .asking {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return transcription.reply
     }
 
     private static func endpoints(in portFile: URL) async -> AssemblyAI.Endpoints? {
@@ -269,6 +333,8 @@ struct Scenario {
     var key: String? = "fake"
     var idle: Duration?
     var screenshots: (@Sendable () async throws -> [Screenshot])?
+    var claude = false
+    var claudeKey: String? = "fake"
     let run: (Bench) async -> Void
 }
 
@@ -298,7 +364,7 @@ enum TranscriptionCheck {
         Scenario(name: "catching-up", arguments: ["--begin-delay", "1.4"], run: behind),
         Scenario(name: "no-endpoint", mode: "no-endpoint", run: unanswered),
         Scenario(name: "late-endpoint", arguments: ["--answer-delay", "3.5"], run: unanswered),
-        Scenario(name: "silent", mode: "silent", run: silent),
+        Scenario(name: "silent", mode: "silent", claude: true, run: silent),
         Scenario(name: "paused", run: paused),
         Scenario(name: "close-1008", mode: "close-1008", run: refused),
         Scenario(name: "no-begin", mode: "no-begin", run: noBegin),
@@ -306,10 +372,11 @@ enum TranscriptionCheck {
         Scenario(name: "no-key", key: nil, run: refused),
         Scenario(name: "expired-once", mode: "expired-once", run: expiredOnce),
         Scenario(name: "no-termination", mode: "no-termination", run: noTermination),
-        Scenario(name: "screenshot", screenshots: capturing(), run: screenshot),
-        Scenario(name: "screenshot-merge", screenshots: capturing(displaysPerCall: [1, 2]), run: screenshotMerge),
-        Scenario(name: "screenshot-slow", screenshots: capturing(delay: .seconds(3)), run: screenshotSlow),
-        Scenario(name: "screenshot-denied", screenshots: capturing(failing: .noAccess), run: screenshotDenied),
+        Scenario(name: "screenshot", screenshots: capturing(), claude: true, run: screenshot),
+        Scenario(name: "screenshot-merge", screenshots: capturing(displaysPerCall: [1, 2]), claude: true, run: screenshotMerge),
+        Scenario(name: "screenshot-slow", screenshots: capturing(delay: .seconds(3)), claude: true, run: screenshotSlow),
+        Scenario(name: "screenshot-denied", screenshots: capturing(failing: .noAccess), claude: true, run: screenshotDenied),
+        Scenario(name: "ask-no-key", claude: true, claudeKey: nil, run: askNoKey),
     ]
 
     static func main() async {
@@ -391,6 +458,20 @@ enum TranscriptionCheck {
         let handoff = lines.firstIndex { $0.hasPrefix("transcription screenshots ") } ?? -1
         expect(bench.lines("transcription screenshots ") == ["transcription screenshots utterance=1 displays=1"], "screenshot: one handoff of one display, got \(bench.lines("transcription screenshots "))")
         expect(delivered < handoff, "screenshot: the handoff came after the delivery, at lines \(delivered) and \(handoff)")
+        expect(held.transcription.reply == .asking, "screenshot: Claude was being asked at delivery, got \(String(describing: held.transcription.reply))")
+        guard case .answered(let text)? = await bench.reply(of: held.transcription) else {
+            expect(false, "screenshot: Claude answered, got \(String(describing: held.transcription.reply))")
+            return
+        }
+        expect(text.hasPrefix("Answer to: \(sentence)\n\n"), "screenshot: the answer opens with the transcript, got '\(text.prefix(60))'")
+        expect(
+            bench.requestBlocks == [[.text("Screen 1 of 1. The cursor is not on this screen. This image is 2x2 pixels."), .image, .text(sentence)]],
+            "screenshot: one request carried the label, the image, then the words, got \(bench.requestBlocks)"
+        )
+        let asking = bench.lines.firstIndex { $0.hasPrefix("claude asking utterance=1 images=1 bytes=") } ?? -1
+        expect(handoff < asking, "screenshot: Claude was asked after the screenshots were handed over, at lines \(handoff) and \(asking)")
+        expect(bench.lines("claude answered ").count == 1 && bench.lines("claude answered ")[0].hasPrefix("claude answered utterance=1 ms="), "screenshot: the answer was logged once")
+        expect(!bench.lines.contains { $0.contains("Answer to") }, "screenshot: the answer text is not logged")
     }
 
     static func screenshotMerge(_ bench: Bench) async {
@@ -402,6 +483,27 @@ enum TranscriptionCheck {
         expect(await bench.waitFor("transcription screenshots ", upTo: 3), "screenshot merge: the handoff logged")
         await bench.sync()
         expect(bench.lines("transcription screenshots ") == ["transcription screenshots utterance=1 displays=2"], "screenshot merge: one handoff, the second release's two displays, got \(bench.lines("transcription screenshots "))")
+        _ = await bench.reply(of: second.transcription)
+        expect(
+            bench.requestBlocks == [[
+                .text("Screen 1 of 2. The cursor is not on this screen. This image is 2x2 pixels."), .image,
+                .text("Screen 2 of 2. The cursor is not on this screen. This image is 2x2 pixels."), .image,
+                .text(merged),
+            ]],
+            "screenshot merge: one request carried both screens in order, then the merged words, got \(bench.requestBlocks)"
+        )
+    }
+
+    static func askNoKey(_ bench: Bench) async {
+        await bench.warm()
+        let held = await bench.hold(tone(0))
+        let outcome = await bench.outcome(held)
+        expect(outcome.final == .heard(sentence), "ask no key: delivered '\(sentence)', got \(outcome.final)")
+        expect(await bench.reply(of: held.transcription) == .failed(.noAPIKey), "ask no key: the reply failed for want of a key, got \(String(describing: held.transcription.reply))")
+        expect(bench.requestBlocks.isEmpty, "ask no key: nothing reached the fake Claude, got \(bench.requestBlocks)")
+        expect(await bench.waitFor("claude failed ", upTo: 3), "ask no key: the failure logged")
+        await bench.sync()
+        expect(bench.lines("claude ").map { $0.replacingOccurrences(of: #"ms=\d+"#, with: "ms=N", options: .regularExpression) } == ["claude failed utterance=1 ms=N reason=noAPIKey"], "ask no key: one failed line and no asking line, got \(bench.lines("claude "))")
     }
 
     static func screenshotSlow(_ bench: Bench) async {
@@ -411,10 +513,18 @@ enum TranscriptionCheck {
         expect(outcome.final == .heard(sentence), "screenshot slow: delivered '\(sentence)', got \(outcome.final)")
         expect((1.2...1.5).contains(outcome.deliveredAfter), "screenshot slow: delivered \(format(outcome.deliveredAfter)) s after the release, expected 1.2 to 1.5 with a 3 s capture")
         expect(bench.lines("transcription screenshots ").isEmpty, "screenshot slow: the handoff was still waiting at delivery")
+        expect(bench.requestBlocks.isEmpty, "screenshot slow: nothing was sent while the capture ran, got \(bench.requestBlocks)")
         expect(await bench.waitFor("transcription screenshots ", upTo: 4), "screenshot slow: the handoff logged")
         let after = bench.seconds(from: "check released ", to: "transcription screenshots ")
         expect(after.map { $0 >= 3 } == true, "screenshot slow: the handoff came \(after.map(format) ?? "never") s after the release, expected at least 3")
         expect(bench.lines("transcription screenshots ") == ["transcription screenshots utterance=1 displays=1"], "screenshot slow: one handoff of one display")
+        expect(held.transcription.reply == .asking, "screenshot slow: Claude was still being asked while the capture ran")
+        guard case .answered? = await bench.reply(of: held.transcription) else {
+            expect(false, "screenshot slow: Claude answered, got \(String(describing: held.transcription.reply))")
+            return
+        }
+        let asking = bench.seconds(from: "check released ", to: "claude asking ")
+        expect(asking.map { $0 >= 3 } == true, "screenshot slow: Claude was asked \(asking.map(format) ?? "never") s after the release, expected at least 3")
     }
 
     static func screenshotDenied(_ bench: Bench) async {
@@ -425,6 +535,9 @@ enum TranscriptionCheck {
         expect((1.2...1.5).contains(outcome.deliveredAfter), "screenshot denied: delivered \(format(outcome.deliveredAfter)) s after the release, expected 1.2 to 1.5")
         expect(await bench.waitFor("transcription screenshots ", upTo: 3), "screenshot denied: the handoff logged")
         expect(bench.lines("transcription screenshots ") == ["transcription screenshots utterance=1 displays=none"], "screenshot denied: displays=none, got \(bench.lines("transcription screenshots "))")
+        _ = await bench.reply(of: held.transcription)
+        expect(bench.requestBlocks == [[.text(sentence)]], "screenshot denied: the request carried only the words, got \(bench.requestBlocks)")
+        expect(bench.lines("claude asking ").first?.hasPrefix("claude asking utterance=1 images=0 bytes=") == true, "screenshot denied: Claude was asked with no images, got \(bench.lines("claude asking "))")
     }
 
     static func warm(_ bench: Bench) async {
@@ -646,6 +759,8 @@ enum TranscriptionCheck {
         let held = await bench.hold(tone(0))
         let outcome = await bench.outcome(held)
         expect(outcome.final == .silence, "silent: delivered silence, got \(outcome.final)")
+        expect(held.transcription.reply == nil, "silent: nothing was asked, got \(String(describing: held.transcription.reply))")
+        expect(bench.requestBlocks.isEmpty && bench.lines("claude ").isEmpty, "silent: no request reached Claude")
         expect((1.2...1.5).contains(outcome.deliveredAfter), "silent: delivered \(format(outcome.deliveredAfter)) s after the release")
         await bench.sync()
         expect(bench.lines("transcription final ").map(head) == ["transcription final session=1 utterance=1 via=endpoint"], "silent: the empty answer settled it via endpoint")
