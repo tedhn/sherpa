@@ -91,7 +91,7 @@ final class Companion {
         CGPoint(x: point.x - screenFrame.minX, y: screenFrame.maxY - point.y)
     }
 
-    fileprivate func followPointer() {
+    func followPointer() {
         let next = Self.position(following: NSEvent.mouseLocation, on: NSScreen.screens.map(\.frame))
         if next == position { return }
         withAnimation(Self.follow) { position = next }

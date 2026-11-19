@@ -121,6 +121,10 @@ enum CompanionCheck {
                 await checkApp(pid: pid, restSeconds: arguments.count == 4 ? Double(arguments[3]) : nil)
             } else if arguments.count == 4, arguments[1] == "--looks", let pid = Int32(arguments[2]), let rest = Double(arguments[3]) {
                 await checkLooks(pid: pid, restSeconds: rest)
+            } else if arguments.count == 3, arguments[1] == "--rearranged", let pid = Int32(arguments[2]) {
+                await checkRearranged(pid: pid)
+            } else if arguments.count == 3, arguments[1] == "--replug", let pid = Int32(arguments[2]) {
+                await checkReplug(pid: pid)
             } else if arguments.count == 3, arguments[1] == "--panel", let pid = Int32(arguments[2]) {
                 await checkPanel(pid: pid)
             } else {
@@ -234,6 +238,18 @@ enum CompanionCheck {
     static func checkApp(pid: Int32, restSeconds: Double?) async {
         let saved = CGEvent(source: nil)?.location ?? .zero
         let all = overlays(pid)
+        await checkDisplays(pid: pid)
+
+        await checkDrag(overlays: all)
+        if let restSeconds { await checkRest(overlays: all, restSeconds: restSeconds, pid: pid) }
+        checkFeed(pid: pid)
+
+        move(to: saved)
+        try? await Task.sleep(for: .milliseconds(300))
+    }
+
+    static func checkDisplays(pid: Int32) async {
+        let all = overlays(pid)
         for screen in NSScreen.screens {
             let id = displayID(screen)
             let b = CGDisplayBounds(id)
@@ -267,10 +283,136 @@ enum CompanionCheck {
                    "display \(id): a still pointer leaves the glyph where it was",
                    "\(describe(corner?.centre)) x\(corner?.count ?? 0) then \(describe(later?.centre)) x\(later?.count ?? 0)")
         }
+    }
 
-        await checkDrag(overlays: all)
-        if let restSeconds { await checkRest(overlays: all, restSeconds: restSeconds, pid: pid) }
-        checkFeed(pid: pid)
+    static func activeDisplays() -> [CGDirectDisplayID] {
+        var count: UInt32 = 0
+        CGGetActiveDisplayList(0, nil, &count)
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        CGGetActiveDisplayList(count, &ids, &count)
+        return Array(ids.prefix(Int(count)))
+    }
+
+    static func displayBounds() -> [CGRect] {
+        activeDisplays().map { CGDisplayBounds($0) }
+    }
+
+    static func sorted(_ rects: [CGRect]) -> [CGRect] {
+        rects.sorted { ($0.minX, $0.minY, $0.width, $0.height) < ($1.minX, $1.minY, $1.width, $1.height) }
+    }
+
+    static func overlaysMatchDisplays(_ pid: Int32, _ label: String) {
+        let found = sorted(overlays(pid).map(\.bounds))
+        let truth = sorted(displayBounds())
+        expect(found == truth, "\(label): each display has exactly one overlay covering it",
+               "overlays \(found) vs displays \(truth)")
+    }
+
+    static func waitForDisplays(_ until: ([CGRect]) -> Bool, seconds: Double) async -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if until(displayBounds()) { return true }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return until(displayBounds())
+    }
+
+    // macOS posts further display notices up to about 5 s after a change, and each one replaces
+    // every overlay, so a window number read before they stop goes stale.
+    static func waitForSettledOverlays(_ pid: Int32) async -> [Overlay] {
+        var current = overlays(pid)
+        var changed = Date()
+        let deadline = Date().addingTimeInterval(30)
+        while Date().timeIntervalSince(changed) < 7, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(100))
+            let now = overlays(pid)
+            if Set(now.map(\.number)) != Set(current.map(\.number)) {
+                current = now
+                changed = Date()
+            }
+        }
+        expect(Date().timeIntervalSince(changed) >= 7, "the overlays stopped changing within 30 s")
+        return current
+    }
+
+    static func expectReplaced(_ before: [Overlay], by after: [Overlay], _ label: String) {
+        let old = Set(before.map(\.number)), new = Set(after.map(\.number))
+        expect(old.isDisjoint(with: new), label, "windows \(old.sorted()) then \(new.sorted())")
+    }
+
+    static func checkRearranged(pid: Int32) async {
+        let saved = CGEvent(source: nil)?.location ?? .zero
+        let main = CGMainDisplayID()
+        let mainBounds = CGDisplayBounds(main)
+        guard let other = activeDisplays().first(where: { $0 != main }) else {
+            print("  info one display, so no rearrangement to check")
+            return
+        }
+        let original = CGDisplayBounds(other)
+        let rightOfMain = CGPoint(x: mainBounds.maxX, y: mainBounds.minY)
+        let target = original.origin == rightOfMain ? CGPoint(x: mainBounds.minX, y: mainBounds.maxY) : rightOfMain
+
+        let before = overlays(pid)
+        var config: CGDisplayConfigRef?
+        var result = CGBeginDisplayConfiguration(&config)
+        if result == .success {
+            result = CGConfigureDisplayOrigin(config, other, Int32(target.x), Int32(target.y))
+        }
+        if result == .success {
+            result = CGCompleteDisplayConfiguration(config, .forAppOnly)
+        } else {
+            CGCancelDisplayConfiguration(config)
+        }
+        expect(result == .success, "the display moved to \(describe(target))", "CGError \(result.rawValue)")
+
+        _ = await waitForDisplays({ $0.contains { $0.origin == target } }, seconds: 5)
+        let rearranged = await waitForSettledOverlays(pid)
+        overlaysMatchDisplays(pid, "after the rearrangement")
+        expectReplaced(before, by: rearranged, "the app rebuilt its overlays")
+        await checkDisplays(pid: pid)
+
+        CGRestorePermanentDisplayConfiguration()
+        _ = await waitForDisplays({ $0.contains { $0 == original } }, seconds: 5)
+        _ = await waitForSettledOverlays(pid)
+        overlaysMatchDisplays(pid, "after the restore")
+
+        move(to: saved)
+        try? await Task.sleep(for: .milliseconds(300))
+    }
+
+    static func checkReplug(pid: Int32) async {
+        let saved = CGEvent(source: nil)?.location ?? .zero
+        let count = activeDisplays().count
+        let before = overlays(pid)
+        print("  info waiting up to 5 minutes for a display to be unplugged")
+        let unplugged = await waitForDisplays({ $0.count < count }, seconds: 300)
+        expect(unplugged, "a display was unplugged")
+        guard unplugged else { return }
+        let afterUnplug = await waitForSettledOverlays(pid)
+        overlaysMatchDisplays(pid, "after the unplug")
+        expectReplaced(before, by: afterUnplug, "the app rebuilt its overlays after the unplug")
+
+        if let remaining = activeDisplays().first, let overlay = overlays(pid).first(where: { $0.bounds == CGDisplayBounds(remaining) }) {
+            let b = overlay.bounds
+            move(to: CGPoint(x: b.midX, y: b.midY))
+            try? await Task.sleep(for: .milliseconds(800))
+            let expected = CGPoint(x: b.width / 2 + 35, y: b.height / 2 + 25)
+            let found = glyph(in: overlay)?.centre
+            expect(near(found, expected, within: 2), "after the unplug the glyph follows on the remaining display",
+                   "\(describe(found)) vs \(describe(expected))")
+        } else {
+            expect(false, "after the unplug the glyph follows on the remaining display", "no overlay on a remaining display")
+        }
+
+        print("  info waiting up to 90 s for the display to come back")
+        let back = await waitForDisplays({ $0.count == count }, seconds: 90)
+        expect(back, "the display came back")
+        if back {
+            let afterReplug = await waitForSettledOverlays(pid)
+            overlaysMatchDisplays(pid, "after the replug")
+            expectReplaced(afterUnplug, by: afterReplug, "the app rebuilt its overlays after the replug")
+            await checkDisplays(pid: pid)
+        }
 
         move(to: saved)
         try? await Task.sleep(for: .milliseconds(300))

@@ -1,5 +1,8 @@
 import AppKit
+import os
 import SwiftUI
+
+private nonisolated let logger = Logger(subsystem: "my.rooftop.sherpa", category: "overlay")
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -16,6 +19,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar = MenuBarController(state: state)
         let companion = Companion()
         self.companion = companion
+        rebuildOverlays()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(screensChanged),
+            name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
+        Task { await companion.start() }
+        let hotkey = Hotkey(state: state)
+        self.hotkey = hotkey
+        Task { await hotkey.start() }
+    }
+
+    @objc private func screensChanged() {
+        rebuildOverlays()
+    }
+
+    private func rebuildOverlays() {
+        guard let companion else { return }
+        let old = overlays
         overlays = NSScreen.screens.map { screen in
             let overlay = OverlayWindow(screen: screen)
             let content = NSHostingView(rootView: CompanionView(companion: companion, state: state, screenFrame: screen.frame))
@@ -25,10 +48,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return overlay
         }
         overlays.forEach { $0.orderFrontRegardless() }
-        Task { await companion.start() }
-        let hotkey = Hotkey(state: state)
-        self.hotkey = hotkey
-        Task { await hotkey.start() }
+        old.forEach { $0.close() }
+        // A removed display makes macOS move the pointer, and a move with no event is missed.
+        companion.followPointer()
+        logger.notice("overlays rebuilt screens=\(self.overlays.count)")
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
