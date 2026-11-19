@@ -1223,13 +1223,38 @@ func hotkey() {
         postModifier(leftControl, down: false, flags: [])
     }
 
+    let shortcut = "chord used as a shortcut"
+    let shortcutLogged = tail.count
+    pressChord()
+    wait(0.05)
+    for down in [true, false] {
+        let key = CGEvent(keyboardEventSource: CGEventSource(stateID: .hidSystemState), virtualKey: 79, keyDown: down)
+        key?.flags = [.maskControl, .maskAlternate]
+        key?.post(tap: .cghidEventTap)
+        wait(0.05)
+    }
+    wait(1.5)
+    releaseChord()
+    wait(0.5)
+    let shortcutLines = tail.lines(after: shortcutLogged)
+    if shortcutLines.contains(where: { $0.hasPrefix("hotkey skipped shortcut") }) {
+        print("  ok   \(shortcut): the app logged 'hotkey skipped shortcut'")
+    } else {
+        fail("\(shortcut): no 'hotkey skipped shortcut' line, the hotkey lines were \(shortcutLines.filter { $0.hasPrefix("hotkey ") })")
+    }
+    if shortcutLines.contains(where: { $0.hasPrefix("hold began") }) {
+        fail("\(shortcut): ctrl+option+F18 began a hold")
+    } else {
+        print("  ok   \(shortcut): no hold began")
+    }
+
     let began = tail.count
     pressChord()
-    guard wait(upTo: 1, until: { tail.lines(after: began).contains { $0.hasPrefix("hold began") } }) else {
-        fail("\(chord): no 'hold began' within 1 s of ctrl+option, check that Sherpa has Accessibility access in System Settings > Privacy & Security > Accessibility, the hotkey lines were \(tail.lines(after: logged).filter { $0.hasPrefix("hotkey ") })")
+    guard wait(upTo: 1.5, until: { tail.lines(after: began).contains { $0.hasPrefix("hold began") } }) else {
+        fail("\(chord): no 'hold began' within 1.5 s of ctrl+option, check that Sherpa has Accessibility access in System Settings > Privacy & Security > Accessibility, the hotkey lines were \(tail.lines(after: logged).filter { $0.hasPrefix("hotkey ") })")
         return
     }
-    print("  ok   \(chord): 'hold began' within 1 s of ctrl+option")
+    print("  ok   \(chord): 'hold began' within 1.5 s of ctrl+option")
     if deviceIsRunning() == true {
         print("  ok   \(chord): the microphone ran while the chord was held")
     } else {
@@ -1294,10 +1319,10 @@ func hotkey() {
     let spokenAt = tail.count
     pressChord()
     let stopped = "voice stopped utterance=\(delivered.utterance + 1) "
-    if wait(upTo: 1, until: { tail.lines(after: spokenAt).contains { $0.hasPrefix(stopped) } }) {
-        print("  ok   \(cuttingOff): within 1 s of the chord the app logged '\(stopped.dropLast())'")
+    if wait(upTo: 1.5, until: { tail.lines(after: spokenAt).contains { $0.hasPrefix(stopped) } }) {
+        print("  ok   \(cuttingOff): within 1.5 s of the chord the app logged '\(stopped.dropLast())'")
     } else {
-        fail("\(cuttingOff): expected '\(stopped.dropLast())' within 1 s of the chord, the voice lines were \(tail.lines(after: spokenAt).filter { $0.hasPrefix("voice ") })")
+        fail("\(cuttingOff): expected '\(stopped.dropLast())' within 1.5 s of the chord, the voice lines were \(tail.lines(after: spokenAt).filter { $0.hasPrefix("voice ") })")
     }
     releaseChord()
     wait(0.5)

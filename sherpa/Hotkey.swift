@@ -6,7 +6,16 @@ private nonisolated let logger = Logger(subsystem: "my.rooftop.sherpa", category
 final class Hotkey {
     private let state: AppState
     private var tap: CFMachPort?
-    private var held = false
+    private enum Chord {
+        case up
+        case waiting(Task<Void, Never>)
+        case held
+        case shortcut
+    }
+
+    private static let shortcutWindow = Duration.milliseconds(300)
+
+    private var chord = Chord.up
 
     init(state: AppState) {
         self.state = state
@@ -24,7 +33,7 @@ final class Hotkey {
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .listenOnly,
-            eventsOfInterest: CGEventMask(1 << CGEventType.flagsChanged.rawValue),
+            eventsOfInterest: CGEventMask(1 << CGEventType.flagsChanged.rawValue | 1 << CGEventType.keyDown.rawValue),
             callback: hotkeyCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
@@ -41,10 +50,29 @@ final class Hotkey {
     }
 
     fileprivate func flagsChanged(_ flags: CGEventFlags) {
-        let chord = flags.contains([.maskControl, .maskAlternate])
-        guard chord != held else { return }
-        held = chord
-        state.setHeld(chord)
+        if flags.contains([.maskControl, .maskAlternate]) {
+            guard case .up = chord else { return }
+            chord = .waiting(Task { [weak self] in
+                try? await Task.sleep(for: Hotkey.shortcutWindow)
+                guard !Task.isCancelled, let self, case .waiting = chord else { return }
+                chord = .held
+                state.setHeld(true)
+            })
+        } else {
+            switch chord {
+            case .waiting(let task): task.cancel()
+            case .held: state.setHeld(false)
+            case .up, .shortcut: break
+            }
+            chord = .up
+        }
+    }
+
+    fileprivate func keyDown() {
+        guard case .waiting(let task) = chord else { return }
+        task.cancel()
+        chord = .shortcut
+        logger.notice("hotkey skipped shortcut")
     }
 }
 
@@ -57,7 +85,13 @@ private nonisolated func hotkeyCallback(
     if let userInfo {
         let flags = event.flags
         let hotkey = Unmanaged<Hotkey>.fromOpaque(userInfo).takeUnretainedValue()
-        MainActor.assumeIsolated { hotkey.flagsChanged(flags) }
+        MainActor.assumeIsolated {
+            if type == .keyDown {
+                hotkey.keyDown()
+            } else {
+                hotkey.flagsChanged(flags)
+            }
+        }
     }
     return Unmanaged.passUnretained(event)
 }
