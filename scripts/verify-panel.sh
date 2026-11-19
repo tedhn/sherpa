@@ -103,6 +103,11 @@ swiftc -parse-as-library -o "$DERIVED/claude-check" \
     sherpa/Screenshot.swift sherpa/Claude.swift sherpa/Companion.swift scripts/claude-check.swift >/dev/null \
     && "$DERIVED/claude-check" || failures=$((failures + 1))
 
+echo "journal"
+swiftc -parse-as-library -o "$DERIVED/journal-check" \
+    sherpa/Journal.swift scripts/journal-check.swift >/dev/null \
+    && "$DERIVED/journal-check" || failures=$((failures + 1))
+
 echo "voice"
 swiftc -parse-as-library -target arm64-apple-macos14.2 -o "$DERIVED/speaker-check" \
     sherpa/Speaker.swift scripts/speaker-check.swift >/dev/null \
