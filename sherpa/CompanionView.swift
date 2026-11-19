@@ -49,9 +49,6 @@ struct CompanionView: View {
     }
 }
 
-/// The person's ink on this overlay. The utterance's ink shows while Sherpa still owes it an answer;
-/// a new utterance is a new record, so the old ink leaves with its number. Ink no hold claimed shows
-/// until the chord goes up. Idle with nothing loose, the stack is empty.
 struct UserInk: View {
     let state: AppState
     let screenFrame: CGRect

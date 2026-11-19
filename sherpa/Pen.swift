@@ -7,41 +7,18 @@ private let penEvents = CGEventMask(
     1 << CGEventType.leftMouseDown.rawValue | 1 << CGEventType.leftMouseUp.rawValue | 1 << CGEventType.leftMouseDragged.rawValue
 )
 
-/// The left button under the chord. While ctrl+option is down, an active session tap takes every
-/// left down, drag and up of a press it took: the app under the pointer gets none of them, the
-/// drags go on as mouse moves so the cursor and the companion keep following, and the points go to
-/// AppState as ink. The tap exists only while the chord is down or a press it took is still down,
-/// so Sherpa never filters the Mac's clicks the rest of the time.
+/// While ctrl+option is down, an active tap takes the left button: the app under the pointer gets
+/// none of a press it takes, and the drags go on as mouse moves. The tap exists only while the
+/// chord is down or a press it took is still down.
 final class Pen {
     nonisolated enum Mark: Equatable, Sendable {
         case began(CGPoint)
         case moved(CGPoint)
-        /// The chord went up. Whatever no hold claimed is dropped.
-        case released
+        case chordUp
     }
 
-    /// Every decision about one event, as a value, so a check can drive it with literal points.
-    ///
-    /// | chord, button         | input                 | verdict | mark      | next                        |
-    /// |-----------------------|-----------------------|---------|-----------|-----------------------------|
-    /// | false, _              | chord(down: true)     | pass    | -         | true, _                     |
-    /// | true, drawing         | chord(down: false)    | pass    | released  | false, sealed               |
-    /// | true, free or sealed  | chord(down: false)    | pass    | released  | false, unchanged            |
-    /// | false, _              | chord(down: false)    | pass    | -         | unchanged                   |
-    /// | _, drawing or sealed  | down                  | the up was lost: finish the stroke, then as from free |
-    /// | true, free            | down(p, chord: true)  | swallow | began(p)  | true, drawing               |
-    /// | true, free            | down(p, chord: false) | pass    | released  | false, free (a stale chord) |
-    /// | false, free           | down                  | pass    | -         | false, free                 |
-    /// | _, drawing            | dragged(p)            | asMove  | moved(p)  | drawing one point more      |
-    /// | _, sealed             | dragged(p)            | asMove  | -         | sealed                      |
-    /// | _, free               | dragged or up         | pass    | -         | free                        |
-    /// | _, drawing or sealed  | up                    | swallow | -         | free, the stroke finished   |
-    ///
-    /// A down without the chord's flags clears a stale chord and any down finishes a lost up, so the
-    /// tap outlives the chord by at most one left click.
     nonisolated struct Hand: Equatable, Sendable {
         enum Button: Equatable, Sendable {
-            /// No press the pen took is down.
             case free
             case drawing(Trace)
             /// The chord went up mid-stroke. The rest of the press is still taken, so the app never
@@ -57,8 +34,7 @@ final class Pen {
 
         enum Input: Equatable, Sendable {
             case chord(down: Bool)
-            /// `chord` is whether the event's own flags hold ctrl+option.
-            case down(CGPoint, chord: Bool)
+            case down(CGPoint, flagged: Bool)
             case dragged(CGPoint)
             case up(CGPoint)
         }
@@ -96,13 +72,13 @@ final class Pen {
                 guard chord else { return Outcome(verdict: .pass) }
                 chord = false
                 if case .drawing(let trace) = button { button = .sealed(trace) }
-                return Outcome(verdict: .pass, mark: .released)
+                return Outcome(verdict: .pass, mark: .chordUp)
             case .down(let point, let flagged):
                 let lost = finish()
                 guard chord else { return Outcome(verdict: .pass, finished: lost) }
                 guard flagged else {
                     chord = false
-                    return Outcome(verdict: .pass, mark: .released, finished: lost)
+                    return Outcome(verdict: .pass, mark: .chordUp, finished: lost)
                 }
                 button = .drawing(Trace(points: 1, from: point, last: point))
                 return Outcome(verdict: .swallow, mark: .began(point), finished: lost)
@@ -149,7 +125,6 @@ final class Pen {
         self.state = state
     }
 
-    /// Hotkey calls this with every flags change. Idempotent.
     func chord(down: Bool) {
         apply(.chord(down: down))
     }
@@ -169,9 +144,8 @@ final class Pen {
         return outcome.verdict
     }
 
-    /// Creation is immediate, because the next left down must be caught. Teardown waits one turn and
-    /// checks again: settle() can run inside the tap's own callback, which still has to hand back
-    /// its verdict, and a chord pressed again in that turn keeps the tap.
+    /// Teardown waits one turn: settle() can run inside the tap's own callback, which still has to
+    /// return its verdict, and a chord pressed again in that turn keeps the tap.
     private func settle() {
         if hand.wantsTap {
             if tap == nil { tap = makeTap() }
@@ -210,12 +184,10 @@ final class Pen {
         return Tap(port: port, source: source)
     }
 
-    /// Points arrive in Quartz global space (top-left of the primary display, y down) and are
-    /// flipped here, once, to AppKit global space.
     fileprivate func decide(_ type: CGEventType, at quartz: CGPoint, flags: CGEventFlags) -> Hand.Verdict {
         let point = CGPoint(x: quartz.x, y: CGDisplayBounds(CGMainDisplayID()).height - quartz.y)
         return switch type {
-        case .leftMouseDown: apply(.down(point, chord: flags.holdsChord))
+        case .leftMouseDown: apply(.down(point, flagged: flags.holdsChord))
         case .leftMouseDragged: apply(.dragged(point))
         case .leftMouseUp: apply(.up(point))
         default: .pass

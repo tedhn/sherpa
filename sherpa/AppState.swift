@@ -36,8 +36,6 @@ enum MicrophonePhase {
 final class AppState {
     private(set) var microphone: MicrophonePhase = .ready
     private(set) var transcription: Transcription?
-    /// Strokes since the chord went down that no hold has claimed: the 0.3 s before a hold begins,
-    /// or a chord that never becomes one.
     private(set) var loose = Ink()
     private let transcriber = Transcriber()
     @ObservationIgnored private var logged: VoiceState?
@@ -83,13 +81,10 @@ final class AppState {
         }
     }
 
-    /// While a hold captures, strokes go to its record; otherwise to `loose`. A hold's strokes are
-    /// already on its record when the chord goes up, so `.released` and setHeld(false) give the
-    /// same capture in either order.
     func draw(_ mark: Pen.Mark) {
         let holding: Transcription? = if case .listening = microphone { transcription } else { nil }
         switch (mark, holding) {
-        case (.released, _):
+        case (.chordUp, _):
             guard !loose.isEmpty else { return }
             inkLogger.notice("ink dropped strokes=\(self.loose.strokes.count)")
             loose = Ink()
@@ -134,8 +129,6 @@ final class AppState {
         }
     }
 
-    /// A merged press returns the same record, so its ink grows; a new utterance's record starts
-    /// with this press's loose strokes.
     private func claimLoose(into record: Transcription) {
         guard !loose.isEmpty else { return }
         record.ink.append(loose)

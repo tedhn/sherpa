@@ -30,7 +30,6 @@ nonisolated struct Screenshot: Equatable, Sendable {
     let appKitFrame: CGRect
     let pixels: Pixels
     let holdsCursor: Bool
-    /// Whether the user's ink was drawn on this display.
     let inked: Bool
     let jpeg: Data
 

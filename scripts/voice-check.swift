@@ -134,10 +134,8 @@ struct Scene {
     var ink = Ink()
     let draw: (Canvas) -> Void
 
-    /// The built-in display the scenes stand for, so ink lands at the 3 px the app draws there.
     static let display = CGRect(x: 0, y: 0, width: 1710, height: 1112)
 
-    /// Strokes in canvas pixels, drawn by the app's own compositor.
     func inked(_ strokes: [[CGPoint]]) -> Scene {
         func global(_ pixel: CGPoint) -> CGPoint {
             CGPoint(x: pixel.x * Scene.display.width / Canvas.width, y: Scene.display.maxY - pixel.y * Scene.display.height / Canvas.height)
