@@ -14,6 +14,27 @@ nonisolated struct Screenshot: Equatable, Sendable {
         let height: Int
     }
 
+    /// Whole pixels of the image, from the top-left pixel to the bottom-right one, both included.
+    /// A box of one pixel is a point.
+    struct Box: Equatable, Sendable {
+        let x1: Int
+        let y1: Int
+        let x2: Int
+        let y2: Int
+
+        init(x1: Int, y1: Int, x2: Int, y2: Int) {
+            (self.x1, self.x2) = (min(x1, x2), max(x1, x2))
+            (self.y1, self.y2) = (min(y1, y2), max(y1, y2))
+        }
+
+        init(x: Int, y: Int) {
+            self.init(x1: x, y1: y, x2: x, y2: y)
+        }
+
+        var isPoint: Bool { x1 == x2 && y1 == y2 }
+        var centre: (x: Int, y: Int) { ((x1 + x2) / 2, (y1 + y2) / 2) }
+    }
+
     enum Failure: Error, Equatable, Sendable {
         case noAccess
         case listing(String)
@@ -60,6 +81,16 @@ nonisolated struct Screenshot: Equatable, Sendable {
         let localY = (Double(row) + 0.5) * (appKitFrame.height / Double(pixels.height))
         let flippedY = appKitFrame.height - localY
         return CGPoint(x: appKitFrame.minX + localX, y: appKitFrame.minY + flippedY)
+    }
+
+    /// By pixel edges, not centres, so a box covers its last column and row.
+    func appKitRect(of box: Box) -> CGRect {
+        let (sx, sy) = (appKitFrame.width / Double(pixels.width), appKitFrame.height / Double(pixels.height))
+        let column = { (x: Int) in Double(min(max(x, 0), pixels.width - 1)) }
+        let row = { (y: Int) in Double(min(max(y, 0), pixels.height - 1)) }
+        let (left, right) = (column(box.x1) * sx, (column(box.x2) + 1) * sx)
+        let (top, bottom) = (row(box.y1) * sy, (row(box.y2) + 1) * sy)
+        return CGRect(x: appKitFrame.minX + left, y: appKitFrame.maxY - bottom, width: right - left, height: bottom - top)
     }
 
     static func cursorFirst(_ shots: [Screenshot]) -> [Screenshot] {
