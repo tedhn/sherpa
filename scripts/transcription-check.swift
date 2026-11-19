@@ -371,7 +371,7 @@ enum TranscriptionCheck {
             data: nil, width: 2, height: 2, bitsPerComponent: 8, bytesPerRow: 8,
             space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         )!
-        let shot = Screenshot(encoding: context.makeImage()!, display: 1, points: CGSize(width: 2, height: 2))!
+        let shot = Screenshot(encoding: context.makeImage()!, display: 1, appKitFrame: CGRect(x: 0, y: 0, width: 2, height: 2), cursor: .zero)!
         let calls = OSAllocatedUnfairLock(initialState: 0)
         return { () async throws -> [Screenshot] in
             let call = calls.withLock { $0 += 1; return $0 }

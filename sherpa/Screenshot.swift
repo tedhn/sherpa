@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -26,19 +27,35 @@ nonisolated struct Screenshot: Equatable, Sendable {
     }
 
     let display: CGDirectDisplayID
+    let appKitFrame: CGRect
     let pixels: Pixels
-    let points: CGSize
+    let holdsCursor: Bool
     let jpeg: Data
 
-    init?(encoding image: CGImage, display: CGDirectDisplayID, points: CGSize) {
+    init?(encoding image: CGImage, display: CGDirectDisplayID, appKitFrame: CGRect, cursor: CGPoint) {
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
         CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary)
         guard CGImageDestinationFinalize(destination) else { return nil }
         self.display = display
         pixels = Pixels(width: image.width, height: image.height)
-        self.points = points
+        self.appKitFrame = appKitFrame
+        // The mouse on a display's top pixel row reads y == appKitFrame.maxY, which half-open CGRect.contains would drop.
+        holdsCursor = NSMouseInRect(cursor, appKitFrame, false)
         jpeg = data as Data
+    }
+
+    func label(number: Int, of count: Int) -> String {
+        let cursor = holdsCursor ? "The cursor is on this screen." : "The cursor is not on this screen."
+        return "Screen \(number) of \(count). \(cursor) This image is \(pixels.width)x\(pixels.height) pixels."
+    }
+
+    static func cursorFirst(_ shots: [Screenshot]) -> [Screenshot] {
+        shots.filter(\.holdsCursor) + shots.filter { !$0.holdsCursor }
+    }
+
+    static func appKitFrame(of displayFrame: CGRect, primaryHeight: CGFloat) -> CGRect {
+        CGRect(x: displayFrame.minX, y: primaryHeight - displayFrame.maxY, width: displayFrame.width, height: displayFrame.height)
     }
 
     @concurrent static func everyDisplay() async throws(Failure) -> [Screenshot] {
@@ -59,6 +76,8 @@ nonisolated struct Screenshot: Equatable, Sendable {
             throw failure
         }
         let own = content.applications.filter { $0.processID == ProcessInfo.processInfo.processIdentifier }
+        let cursor = NSEvent.mouseLocation
+        let primaryHeight = CGDisplayBounds(CGMainDisplayID()).height
         var shots: [Screenshot] = []
         for display in content.displays {
             let started = ContinuousClock.now
@@ -75,18 +94,25 @@ nonisolated struct Screenshot: Equatable, Sendable {
                 logger.error("screenshot failed display=\(display.displayID) reason=capture detail=\(error.localizedDescription, privacy: .public)")
                 continue
             }
-            guard let shot = Screenshot(encoding: image, display: display.displayID, points: points) else {
+            guard let shot = Screenshot(
+                encoding: image, display: display.displayID,
+                appKitFrame: appKitFrame(of: display.frame, primaryHeight: primaryHeight), cursor: cursor
+            ) else {
                 logger.error("screenshot failed display=\(display.displayID) reason=encode")
                 continue
             }
             let elapsed = started.duration(to: .now) / .milliseconds(1)
             logger.notice("""
                 screenshot taken display=\(shot.display) pixels=\(shot.pixels.width)x\(shot.pixels.height) \
-                points=\(Int(points.width))x\(Int(points.height)) self=\(own.isEmpty ? "offscreen" : "hidden", privacy: .public) bytes=\(shot.jpeg.count) ms=\(Int(elapsed.rounded()))
+                points=\(Int(shot.appKitFrame.width))x\(Int(shot.appKitFrame.height)) cursor=\(shot.holdsCursor ? "yes" : "no", privacy: .public) self=\(own.isEmpty ? "offscreen" : "hidden", privacy: .public) bytes=\(shot.jpeg.count) ms=\(Int(elapsed.rounded()))
                 """)
             shots.append(shot)
         }
-        return shots
+        let ordered = cursorFirst(shots)
+        for (index, shot) in ordered.enumerated() {
+            logger.notice("screenshot labelled display=\(shot.display) label=\(shot.label(number: index + 1, of: ordered.count), privacy: .public)")
+        }
+        return ordered
     }
 }
 
