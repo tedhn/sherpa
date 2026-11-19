@@ -18,6 +18,7 @@ struct CompanionView: View {
         .animation(.easeInOut(duration: 0.15), value: kind)
         .opacity(companion.resting && voice == .idle ? 0 : 1)
         .position(Companion.local(companion.position, in: screenFrame))
+        .background { UserInk(state: state, screenFrame: screenFrame) }
         .overlay {
             if let bubble = companion.bubble {
                 let centre = Companion.local(CGPoint(x: bubble.frame.midX, y: bubble.frame.midY), in: screenFrame)
@@ -44,6 +45,28 @@ struct CompanionView: View {
         case .idle, .responding: .arrow(heading: heading)
         case .listening: .waveform(level: state.microphone.level.fraction)
         case .processing: .spinner
+        }
+    }
+}
+
+/// The person's ink on this overlay. The utterance's ink shows while Sherpa still owes it an answer;
+/// a new utterance is a new record, so the old ink leaves with its number. Ink no hold claimed shows
+/// until the chord goes up. Idle with nothing loose, the stack is empty.
+struct UserInk: View {
+    let state: AppState
+    let screenFrame: CGRect
+
+    var body: some View {
+        ZStack {
+            if state.voice != .idle, let record = state.transcription, !record.ink.isEmpty {
+                InkLayer(ink: record.ink, screenFrame: screenFrame)
+                    .id(record.number)
+                    .transition(InkLayer.fade)
+            }
+            if !state.loose.isEmpty {
+                InkLayer(ink: state.loose, screenFrame: screenFrame)
+                    .transition(InkLayer.fade)
+            }
         }
     }
 }

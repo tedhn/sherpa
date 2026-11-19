@@ -250,6 +250,7 @@ enum CompanionCheck {
                 await checkPointing()
                 checkLooksRender()
                 checkBubbleRender()
+                checkInkRender()
             }
             exit(failures == 0 ? 0 : 1)
         }
@@ -891,6 +892,33 @@ enum CompanionCheck {
             blobs($0.baseAddress!, width: pixels.width, height: pixels.height, row: pixels.width * 4, scale: scale)
         }
         return (pixels, found)
+    }
+
+    @MainActor
+    static func checkInkRender() {
+        let screen = CGRect(x: -200, y: 300, width: 200, height: 100)
+        func drawn(_ ink: Ink) -> (pixels: Pixels, blobs: [Blob]) {
+            rendered(InkLayer(ink: ink, screenFrame: screen).frame(width: screen.width, height: screen.height), scale: 2)
+                ?? (Pixels(rgba: [], width: 0, height: 0), [])
+        }
+        func rgba(_ pixels: Pixels, _ x: Int, _ y: Int) -> [Int] {
+            let offset = (y * pixels.width + x) * 4
+            return pixels.rgba.count > offset + 3 ? pixels.rgba[offset...(offset + 3)].map(Int.init) : []
+        }
+        let line = drawn(Ink([Stroke(CGPoint(x: -180, y: 380), [CGPoint(x: -120, y: 380)])]))
+        let box = line.blobs.first?.box ?? .zero
+        expect(line.blobs.count == 1, "a stroke renders as one blob", "\(line.blobs.count) blobs")
+        expect(abs(box.minX - 18) <= 1 && abs(box.width - 64) <= 1 && box.minY == 18 && box.height == 4,
+               "a stroke from -180,380 to -120,380 fills 18,18 64x4 on the overlay at -200,300", "\(box)")
+        let colour = rgba(line.pixels, 100, 40)
+        expect(colour.count == 4 && zip(colour, [255, 48, 43, 255]).allSatisfy { abs($0 - $1) <= 2 },
+               "its middle pixel is the ink red 255,48,43", "\(colour)")
+        let dot = drawn(Ink([Stroke(CGPoint(x: -100, y: 350))])).blobs
+        expect(dot.count == 1 && near(dot.first?.centre, CGPoint(x: 100, y: 50), within: 0.5),
+               "a one-point stroke at -100,350 is a dot centred on 100,50", "\(dot.map { "\($0.box)" })")
+        let away = drawn(Ink([Stroke(CGPoint(x: 500, y: 350), [CGPoint(x: 600, y: 350)])]))
+        let opaque = stride(from: 3, to: away.pixels.rgba.count, by: 4).filter { away.pixels.rgba[$0] > 0 }.count
+        expect(away.pixels.width == 400 && opaque == 0, "a stroke on another screen draws nothing here", "\(opaque) pixels with alpha")
     }
 
     @MainActor
