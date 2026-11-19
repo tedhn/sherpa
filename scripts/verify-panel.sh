@@ -91,7 +91,7 @@ swiftc -parse-as-library -o "$DERIVED/assemblyai-check" \
 
 echo "supabase"
 swiftc -parse-as-library -o "$DERIVED/supabase-check" \
-    sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Supabase.swift \
+    sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Journal.swift sherpa/Supabase.swift \
     scripts/supabase-check.swift >/dev/null \
     && "$DERIVED/supabase-check" || failures=$((failures + 1))
 
@@ -147,12 +147,19 @@ swiftc -parse-as-library -O "${app_swift_flags[@]}" -o "$DERIVED/companion-check
     sherpa/Companion.swift sherpa/CompanionGlyph.swift scripts/companion-check.swift >/dev/null \
     && "$DERIVED/companion-check" || failures=$((failures + 1))
 
+echo "backup"
+swiftc -o "$DERIVED/fake-supabase" scripts/fake-supabase.swift >/dev/null \
+    && swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/backup-check" \
+        sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Journal.swift sherpa/Supabase.swift sherpa/Backup.swift \
+        scripts/backup-check.swift >/dev/null \
+    && "$DERIVED/backup-check" "$DERIVED/fake-supabase" || failures=$((failures + 1))
+
 echo "transcription"
 swiftc -o "$DERIVED/fake-assemblyai" scripts/fake-assemblyai.swift >/dev/null \
     && swiftc -o "$DERIVED/fake-claude" scripts/fake-claude.swift >/dev/null \
     && swiftc -o "$DERIVED/fake-voice" scripts/fake-voice.swift >/dev/null \
     && swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/transcription-check" \
-        sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Supabase.swift sherpa/Screenshot.swift sherpa/Journal.swift sherpa/Claude.swift sherpa/Speaker.swift sherpa/Transcription.swift sherpa/Companion.swift \
+        sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Supabase.swift sherpa/Screenshot.swift sherpa/Journal.swift sherpa/Backup.swift sherpa/Claude.swift sherpa/Speaker.swift sherpa/Transcription.swift sherpa/Companion.swift \
         scripts/transcription-check.swift >/dev/null \
     && "$DERIVED/transcription-check" "$DERIVED/fake-assemblyai" || failures=$((failures + 1))
 

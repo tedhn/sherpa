@@ -79,6 +79,47 @@ nonisolated enum Supabase {
         return try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
     }
 
+    static func shotPath(_ id: UUID, screen: Int) -> String {
+        "\(id.uuidString.lowercased())-\(screen).jpg"
+    }
+
+    static func upload(shot jpeg: Data, path: String, to project: Project) -> URLRequest {
+        var request = request(project.url.appending(path: "storage/v1/object/exchanges/\(path)"), project)
+        request.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        request.httpBody = jpeg
+        return request
+    }
+
+    static func insert(_ entry: Journal.Entry, shots: [String], to project: Project) -> URLRequest {
+        var request = request(project.url.appending(path: "rest/v1/exchanges"), project)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("return=minimal", forHTTPHeaderField: "Prefer")
+        request.httpBody = row(entry, shots: shots)
+        return request
+    }
+
+    static func row(_ entry: Journal.Entry, shots: [String]) -> Data {
+        let pointed: Any = entry.pointed.map { ["label": $0.label, "screen": $0.screen, "x": $0.x, "y": $0.y] as [String: Any] } ?? NSNull()
+        let object: [String: Any] = [
+            "id": entry.id.uuidString.lowercased(),
+            "asked_at": entry.asked.formatted(Date.ISO8601FormatStyle(includingFractionalSeconds: true)),
+            "recalled": entry.recalled,
+            "question": entry.question,
+            "answer": entry.answer,
+            "screens": entry.shots.count,
+            "pointed": pointed,
+            "shots": shots,
+        ]
+        return try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+    }
+
+    /// Storage reports a second write of one name as 400 with "Duplicate" in
+    /// the body. Postgres reports a second row with one id as 409.
+    static func stored(status: Int, body: Data) -> Bool {
+        (200..<300).contains(status) || status == 409
+            || (status == 400 && String(decoding: body, as: UTF8.self).contains("Duplicate"))
+    }
+
     static func check(status: Int, body: Data) throws(Failure) {
         guard (200..<300).contains(status) else {
             throw .refused(status: status, detail: String(decoding: body.prefix(200), as: UTF8.self))

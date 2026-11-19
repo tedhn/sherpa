@@ -124,6 +124,7 @@ final class Transcriber {
     private let archive: Archive?
     private let conversation: Conversation?
     let journal: Journal?
+    private let backup: Backup?
     private let speaker: Speaker?
 
     init(configuration: Configuration = .current) {
@@ -139,6 +140,10 @@ final class Transcriber {
         speaker = configuration.voice.map { Speaker(endpoint: $0, urlSession: urlSession) }
         tokens = Tokens(key: configuration.key, url: configuration.endpoints.token, urlSession: urlSession)
         dictation = Dictation(limits: configuration.limits)
+        backup = journal.flatMap { journal in
+            configuration.archive.map { Backup(journal: journal, project: $0, urlSession: urlSession) }
+        }
+        backup?.start()
     }
 
     func warm() {
