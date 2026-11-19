@@ -62,17 +62,34 @@ nonisolated enum Claude {
             case .point(let x, let y, _, let screen): "screen\(screen):\(x),\(y)"
             }
         }
+    }
 
-        static func split(_ answer: String) -> (spoken: String, target: Target)? {
-            let tag = #/\[POINT:(?:(none)|([0-9]+)\s*,\s*([0-9]+)\s*:([^\]:\n\r]+?)(?::screen([0-9]+))?)\]\s*\z/#
-            guard let match = answer.firstMatch(of: tag) else { return nil }
-            let spoken = answer[..<match.range.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+    struct Said: Equatable, Sendable {
+        let spoken: String
+        let tag: String?
+        let target: Target?
+
+        init(_ text: String) {
+            let suffix = #/(?i)\[(?:POINT:[^\]\n\r]*\]?|P(?:O(?:I(?:N(?:T)?)?)?)?)?\s*\z/#
+            guard let match = text.firstMatch(of: suffix) else {
+                (spoken, tag, target) = (text.trimmingCharacters(in: .whitespacesAndNewlines), nil, nil)
+                return
+            }
+            let removed = match.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            spoken = text[..<match.range.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+            tag = removed
+            target = Self.parse(removed)
+        }
+
+        private static func parse(_ tag: String) -> Target? {
+            let strict = #/\[POINT:(?:(none)|([0-9]+)\s*,\s*([0-9]+)\s*:([^\]:\n\r]+?)(?::screen([0-9]+))?)\]/#
+            guard let match = tag.wholeMatch(of: strict) else { return nil }
             let (_, none, x, y, label, screen) = match.output
-            if none != nil { return (spoken, Target.none) }
+            if none != nil { return Target.none }
             let name = label?.trimmingCharacters(in: .whitespaces) ?? ""
-            let number = screen.map { Int($0) ?? 0 } ?? cursorScreen
+            let number = screen.map { Int($0) ?? 0 } ?? Target.cursorScreen
             guard let x = x.flatMap({ Int($0) }), let y = y.flatMap({ Int($0) }), !name.isEmpty, number > 0 else { return nil }
-            return (spoken, .point(x: x, y: y, label: name, screen: number))
+            return .point(x: x, y: y, label: name, screen: number)
         }
     }
 
@@ -155,7 +172,7 @@ nonisolated enum Claude {
         private var text = ""
         private var stopReason: String?
 
-        var shown: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        var shown: String { Said(text).spoken }
 
         mutating func read(_ line: String) throws(Failure) {
             guard line.hasPrefix("data:"),
@@ -178,11 +195,12 @@ nonisolated enum Claude {
             }
         }
 
-        func finished() throws(Failure) -> String {
+        func finished() throws(Failure) -> Said {
             if stopReason == "refusal" { throw .declined }
             guard let stopReason else { throw .unanswered(status: 200, detail: "the stream ended without a stop_reason") }
-            guard !shown.isEmpty else { throw .unanswered(status: 200, detail: "no text, stop_reason=\(stopReason)") }
-            return shown
+            let said = Said(text)
+            guard !said.spoken.isEmpty else { throw .unanswered(status: 200, detail: "no text, stop_reason=\(stopReason)") }
+            return said
         }
     }
 
@@ -268,7 +286,7 @@ final class Conversation {
         history = Claude.History(forgetAfter: forgetAfter)
     }
 
-    func answer(_ question: Claude.Question, utterance: Int, writing: (String) -> Void) async throws(Claude.Failure) -> String {
+    func answer(_ question: Claude.Question, utterance: Int, writing: (String) -> Void) async throws(Claude.Failure) -> Claude.Said {
         let started = ContinuousClock.now
         let elapsed = { Int((started.duration(to: .now) / .milliseconds(1)).rounded()) }
         do throws(Claude.Failure) {
@@ -301,11 +319,11 @@ final class Conversation {
             } catch {
                 throw .transport(error.localizedDescription)
             }
-            let text = try reading.finished()
-            history.remember(Claude.Exchange(question: question.text, screens: question.images.count, answer: text), at: .now)
-            let target = Claude.Target.split(text)?.target.logField ?? "missing"
-            logger.notice("claude answered utterance=\(utterance) first=\(first) ms=\(elapsed()) chars=\(text.count) updates=\(updates) target=\(target, privacy: .public)")
-            return text
+            let said = try reading.finished()
+            history.remember(Claude.Exchange(question: question.text, screens: question.images.count, answer: said.spoken), at: .now)
+            let target = said.target?.logField ?? "missing"
+            logger.notice("claude answered utterance=\(utterance) first=\(first) ms=\(elapsed()) chars=\(said.spoken.count) updates=\(updates) target=\(target, privacy: .public)")
+            return said
         } catch {
             if Task.isCancelled {
                 logger.notice("claude stopped utterance=\(utterance) ms=\(elapsed())")

@@ -248,10 +248,10 @@ final class Transcriber {
                 responding = Task {
                     let question = Claude.Question(text: text, screenshots: await handoff(taken, utterance: utterance))
                     do throws(Claude.Failure) {
-                        let answer = try await conversation.answer(question, utterance: utterance) { record.reply = .answering($0) }
+                        let said = try await conversation.answer(question, utterance: utterance) { record.reply = .answering($0) }
                         record.speaking = speaker != nil
-                        record.reply = .answered(answer)
-                        await speaker?.speak(answer, utterance: utterance)
+                        record.reply = .answered(said.spoken)
+                        await speaker?.speak(said.spoken, utterance: utterance)
                         record.speaking = false
                     } catch {
                         record.reply = .failed(error)
