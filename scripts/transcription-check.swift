@@ -520,10 +520,10 @@ enum TranscriptionCheck {
         expect(handoff < asking, "screenshot: Claude was asked after the screenshots were handed over, at lines \(handoff) and \(asking)")
         expect(bench.lines("claude answered ").count == 1 && bench.lines("claude answered ")[0].hasPrefix("claude answered utterance=1 first="), "screenshot: the answer was logged once")
         expect(!bench.lines.contains { $0.contains("Answer to") }, "screenshot: the answer text is not logged")
-        expect(bench.lines("claude answered ").first?.hasSuffix(" target=screen1:640,400") == true, "screenshot: the answered line ends with the target, got \(bench.lines("claude answered "))")
+        expect(bench.lines("claude answered ").first?.hasSuffix(" target=screen1:600,380,680,420") == true, "screenshot: the answered line ends with the target, got \(bench.lines("claude answered "))")
         _ = await bench.waitFor("transcription pointing ", upTo: 3)
         expect(
-            bench.lines("transcription pointing ") == ["transcription pointing utterance=1 target=screen1:640,400 at=1.5,0.5"],
+            bench.lines("transcription pointing ") == ["transcription pointing utterance=1 target=screen1:600,380,680,420 at=1.5,0.5"],
             "screenshot: the point is clamped to the last pixel of the 2x2 shot and flipped, got \(bench.lines("transcription pointing "))"
         )
     }
@@ -671,7 +671,7 @@ enum TranscriptionCheck {
         expect(bench.lines("claude asking ").first?.hasPrefix("claude asking utterance=1 images=0 bytes=") == true, "screenshot denied: Claude was asked with no images, got \(bench.lines("claude asking "))")
         _ = await bench.waitFor("transcription pointing ", upTo: 3)
         expect(
-            bench.lines("transcription pointing ") == ["transcription pointing utterance=1 target=screen1:640,400 at=noScreen"],
+            bench.lines("transcription pointing ") == ["transcription pointing utterance=1 target=screen1:600,380,680,420 at=noScreen"],
             "screenshot denied: a point with no screenshot logs noScreen, got \(bench.lines("transcription pointing "))"
         )
     }
