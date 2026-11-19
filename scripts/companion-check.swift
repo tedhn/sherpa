@@ -4,6 +4,7 @@ import CoreMedia
 import ImageIO
 import ScreenCaptureKit
 import SwiftUI
+import Vision
 
 final class RecordingView: NSView {
     var downs = 0
@@ -20,9 +21,65 @@ struct Overlay {
 
 enum Seen: String { case none, arrow, waveform, spinner, unknown }
 
-struct Frame {
+nonisolated struct Blob {
+    let box: CGRect
+    let centre: CGPoint
+    let count: Int
+}
+
+nonisolated func blobs(_ bytes: UnsafePointer<UInt8>, width: Int, height: Int, row: Int, scale: Double) -> [Blob] {
+    var opaque = Set<Int>()
+    for y in 0..<height {
+        for x in 0..<width where bytes[y * row + x * 4 + 3] >= 230 { opaque.insert(y * width + x) }
+    }
+    var found: [Blob] = []
+    while let seed = opaque.popFirst() {
+        var stack = [seed]
+        var (minX, minY, maxX, maxY) = (Int.max, Int.max, Int.min, Int.min)
+        var (sumX, sumY, count) = (0.0, 0.0, 0)
+        while let index = stack.popLast() {
+            let (x, y) = (index % width, index / width)
+            (minX, minY, maxX, maxY) = (min(minX, x), min(minY, y), max(maxX, x), max(maxY, y))
+            sumX += Double(x) + 0.5
+            sumY += Double(y) + 0.5
+            count += 1
+            for dy in -1...1 {
+                for dx in -1...1 where (0..<width).contains(x + dx) && (0..<height).contains(y + dy) {
+                    if let next = opaque.remove((y + dy) * width + x + dx) { stack.append(next) }
+                }
+            }
+        }
+        found.append(Blob(
+            box: CGRect(x: Double(minX) / scale, y: Double(minY) / scale,
+                        width: Double(maxX - minX + 1) / scale, height: Double(maxY - minY + 1) / scale),
+            centre: CGPoint(x: sumX / Double(count) / scale, y: sumY / Double(count) / scale),
+            count: count))
+    }
+    return found.sorted { $0.count > $1.count }
+}
+
+func bubbleZone(_ frame: CGRect, side: String) -> CGRect {
+    let overshoot = frame.width * 0.15
+    return CGRect(x: frame.minX - 4 - (side == "left" ? overshoot : 0), y: frame.minY - 4,
+                  width: frame.width + 8 + overshoot, height: frame.height + 8)
+}
+
+nonisolated struct Frame {
     let time: Double
-    let centre: CGPoint?
+    let blobs: [Blob]
+
+    func bubble(in zone: CGRect?) -> Blob? {
+        guard let zone else { return nil }
+        return blobs.first { zone.contains($0.box) }
+    }
+
+    func glyph(besides zone: CGRect?) -> CGPoint? {
+        let parts = blobs.filter { blob in zone.map { !$0.contains(blob.box) } ?? true }
+        let count = Double(parts.reduce(0) { $0 + $1.count })
+        guard count > 0 else { return nil }
+        return CGPoint(x: parts.reduce(0) { $0 + $1.centre.x * Double($1.count) } / count,
+                       y: parts.reduce(0) { $0 + $1.centre.y * Double($1.count) } / count)
+    }
 }
 
 nonisolated final class FrameRecorder: NSObject, SCStreamOutput, @unchecked Sendable {
@@ -68,19 +125,9 @@ nonisolated final class FrameRecorder: NSObject, SCStreamOutput, @unchecked Send
         defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
         guard let base = CVPixelBufferGetBaseAddress(buffer) else { return }
         let (w, h, row) = (CVPixelBufferGetWidth(buffer), CVPixelBufferGetHeight(buffer), CVPixelBufferGetBytesPerRow(buffer))
-        let bytes = base.assumingMemoryBound(to: UInt8.self)
-        var (sumX, sumY, count) = (0.0, 0.0, 0)
-        for y in 0..<h {
-            for x in 0..<w where bytes[y * row + x * 4 + 3] >= 230 {
-                sumX += Double(x) + 0.5
-                sumY += Double(y) + 0.5
-                count += 1
-            }
-        }
-        let scale = Double(w) / width
-        let centre = count > 0 ? CGPoint(x: sumX / Double(count) / scale, y: sumY / Double(count) / scale) : nil
+        let found = blobs(base.assumingMemoryBound(to: UInt8.self), width: w, height: h, row: row, scale: Double(w) / width)
         lock.lock()
-        recorded.append(Frame(time: CACurrentMediaTime(), centre: centre))
+        recorded.append(Frame(time: CACurrentMediaTime(), blobs: Array(found.prefix(8))))
         lock.unlock()
     }
 }
@@ -199,8 +246,10 @@ enum CompanionCheck {
             } else {
                 checkPlacement()
                 checkArc()
+                checkBubble()
                 await checkPointing()
                 checkLooksRender()
+                checkBubbleRender()
             }
             exit(failures == 0 ? 0 : 1)
         }
@@ -268,94 +317,172 @@ enum CompanionCheck {
                degrees(down.heading(after: down.duration / 2)))
     }
 
+    static func checkBubble() {
+        let screen = [CGRect(x: 0, y: 0, width: 1920, height: 1080)]
+        let reveals = (0...5).map { Bubble.reveal($0) / .milliseconds(1) }
+        expect(reveals == [0, 30, 77, 110, 160, 196], "characters show at 0, 30, 77, 110, 160 and 196 ms", "\(reveals)")
+        let bubble = Bubble(label: "panel", beside: CGPoint(x: 600, y: 400), on: screen, appeared: .now)
+        let shown = [0, 29, 30, 76, 77, 160, 5000].map { bubble.revealed(after: .milliseconds($0)) }
+        expect(shown == [1, 1, 2, 2, 3, 5, 5], "0, 29, 30, 76, 77, 160 and 5000 ms in, 1, 1, 2, 2, 3, 5 and 5 characters of five show",
+               "\(shown)")
+        expect(bubble.typing == .milliseconds(160), "a five-character label is typed 160 ms after the bubble appears", "\(bubble.typing)")
+        expect(bubble.side == .right && bubble.frame.minX == 610 && bubble.frame.midY == 382,
+               "mid-screen the bubble starts 10 pt right of the glyph, its middle 18 pt below", "\(bubble.side) \(bubble.frame)")
+        let edge = Bubble(label: "panel", beside: CGPoint(x: 1900, y: 500), on: screen, appeared: .now)
+        expect(edge.side == .left && edge.frame.maxX == 1890 && screen[0].contains(edge.frame),
+               "near the right edge it flips left, ending 10 pt left of the glyph, inside the screen", "\(edge.side) \(edge.frame)")
+        let low = Bubble(label: "panel", beside: CGPoint(x: 600, y: 15), on: screen, appeared: .now)
+        expect(low.side == .right && low.frame.minY == 12, "near the bottom edge it clamps up to 12 pt inside", "\(low.side) \(low.frame)")
+        let long = Bubble(label: String(repeating: "a long label ", count: 10), beside: CGPoint(x: 600, y: 400), on: screen, appeared: .now)
+        expect(long.frame.width == 240, "a long label is cut to a 240 pt bubble", "\(long.frame)")
+    }
+
     static func checkPointing() async {
         guard let frame = NSScreen.screens.first?.frame else {
             expect(false, "a screen to point on")
             return
         }
-        let companion = Companion()
-        func following() -> CGPoint { Companion.position(following: NSEvent.mouseLocation, on: NSScreen.screens.map(\.frame)) }
+        let companion = Companion(hold: .milliseconds(300))
         func spot(_ target: CGPoint) -> CGPoint { CGPoint(x: target.x + 35, y: target.y - 25) }
         func distance(_ a: CGPoint, _ b: CGPoint) -> CGFloat { hypot(a.x - b.x, a.y - b.y) }
-        func seconds(_ from: CGPoint, _ to: CGPoint) -> Duration { .seconds(Flight(from: from, to: to).duration / .seconds(1)) }
         func wait(until deadline: ContinuousClock.Instant) async { try? await Task.sleep(until: deadline, clock: .continuous) }
+        func wait(upTo limit: Duration, for done: () -> Bool) async -> Bool {
+            let deadline = ContinuousClock.now + limit
+            while !done(), ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(2)) }
+            return done()
+        }
+        func offCurve(_ point: CGPoint, _ flight: Flight) -> CGFloat {
+            (0..<1000).map { distance(point, flight.position(after: flight.duration * (Double($0) / 999))) }.min() ?? .infinity
+        }
         func restingTurns() -> Double {
             (companion.heading.radians - Companion.restingHeading.radians) / (2 * .pi)
         }
         func faces() -> Bool { abs(restingTurns() - restingTurns().rounded()) * 2 * .pi <= 0.001 }
+        nonisolated final class Latch: @unchecked Sendable { var pointer: CGPoint? }
+        func pointerAtNextChange() -> Latch {
+            let latch = Latch()
+            withObservationTracking { _ = companion.bubble } onChange: { latch.pointer = MainActor.assumeIsolated { NSEvent.mouseLocation } }
+            return latch
+        }
+        func following(_ latch: Latch) -> CGPoint {
+            Companion.position(following: latch.pointer ?? NSEvent.mouseLocation, on: NSScreen.screens.map(\.frame))
+        }
 
         let home = companion.position
         let left = CGPoint(x: frame.minX + 300, y: frame.midY)
         let right = CGPoint(x: frame.maxX - 300, y: frame.midY)
         let target = distance(home, left) > distance(home, right) ? left : right
+        let callout = Callout(point: target, label: "panel")
         let destination = spot(target)
+        let outbound = Flight(from: home, to: destination)
         let started = ContinuousClock.now
-        companion.point(at: target)
+        companion.point(at: callout)
         await wait(until: started + .milliseconds(200))
         let mid = companion.position
         let along = (mid.x - home.x) / (destination.x - home.x)
         let rise = mid.y - (home.y + along * (destination.y - home.y))
         expect(along > 0 && along < 1 && rise > 5, "0.2 s after pointing the glyph is partway there, above the straight line",
                "\(describe(mid)) from \(describe(home)) to \(describe(destination))")
-        companion.point(at: target)
-        await wait(until: started + seconds(home, destination) + .milliseconds(150))
+        companion.followPointer()
+        expect(distance(companion.position, mid) <= 0.001, "on the way out a mouse event leaves the glyph on its arc",
+               "\(exact(companion.position)) vs \(exact(mid))")
+        companion.point(at: callout)
+        await wait(until: started + outbound.duration + .milliseconds(150))
+        let landed = companion.bubble
         expect(distance(companion.position, destination) <= 0.001 && faces(),
-               "pointing again at the same target does not restart the flight, which lands on time facing the target",
+               "pointing again at the same callout does not restart the flight, which lands on time facing the target",
                "\(exact(companion.position)) vs \(exact(destination)), heading \(companion.heading.degrees)")
-        companion.followPointer()
-        expect(distance(companion.position, destination) <= 0.001, "while it points, a mouse event leaves it where it is",
-               exact(companion.position))
-        companion.point(at: nil)
-        expect(distance(companion.position, following()) <= 0.001, "once the pointing ends the glyph follows the pointer",
-               "\(exact(companion.position)) vs \(exact(following()))")
+        expect(landed?.label == "panel" && landed?.side == .right && landed?.frame.minX == destination.x + 10,
+               "on landing the bubble shows the label 10 pt right of the glyph", "\(String(describing: landed))")
 
-        let second = ContinuousClock.now
-        let from = companion.position
-        companion.point(at: target)
-        await wait(until: second + .milliseconds(200))
+        let release = pointerAtNextChange()
         companion.point(at: nil)
+        await wait(until: started + outbound.duration + .milliseconds(400))
         companion.followPointer()
-        await wait(until: second + .milliseconds(300))
-        expect(distance(companion.position, following()) > 5 && distance(companion.position, destination) > 5,
-               "a pointing that ends mid-flight leaves the glyph flying, whatever the mouse does", exact(companion.position))
-        await wait(until: second + seconds(from, destination) + .milliseconds(150))
-        companion.followPointer()
-        expect(distance(companion.position, following()) <= 0.001, "after that flight lands, a mouse event moves the glyph again",
-               "\(exact(companion.position)) vs \(exact(following()))")
+        expect(distance(companion.position, destination) <= 0.001 && companion.bubble != nil,
+               "a voice that stops before typing plus the hold leaves the glyph and bubble beside the target, whatever the mouse does",
+               "\(exact(companion.position)), bubble \(companion.bubble != nil)")
+        let released = await wait(upTo: .seconds(1)) { companion.bubble == nil }
+        let releasedAt = ContinuousClock.now
+        let typedAndHeld = started + outbound.duration + .milliseconds(160 + 300)
+        expect(released && releasedAt >= typedAndHeld && releasedAt < typedAndHeld + .milliseconds(100),
+               "the bubble goes 160 ms of typing plus the 300 ms hold after landing",
+               "\(released ? "\((releasedAt - typedAndHeld) / .milliseconds(1)) ms after that" : "still up")")
+        let back = Flight(from: destination, to: following(release))
+        let arrival = pointerAtNextChange()
+        await wait(until: releasedAt + .milliseconds(100))
+        let homeward = companion.position
+        expect(offCurve(homeward, back) <= 0.5 && distance(homeward, destination) > 5 && distance(homeward, back.to) > 5,
+               "then the glyph flies home along an arc from the spot to where following puts the pointer",
+               String(format: "%.2f pt off the arc at %@", offCurve(homeward, back), describe(homeward)))
+        let drift = distance(NSEvent.mouseLocation, release.pointer ?? .zero)
+        if drift < 20 {
+            companion.followPointer()
+            expect(distance(companion.position, homeward) <= 0.001, "a mouse event inside the dead zone leaves the flight home going",
+                   "\(exact(companion.position)) vs \(exact(homeward))")
+        } else {
+            print(String(format: "  info the mouse moved %.0f pt during the flight home, so the dead-zone check did not run", drift))
+        }
+        let arrived = await wait(upTo: back.duration + .milliseconds(500)) { arrival.pointer != nil }
+        expect(arrived && distance(companion.position, following(arrival)) <= 0.001 && faces(),
+               "and lands home, following the pointer and facing it", "\(exact(companion.position)) vs \(exact(following(arrival)))")
 
         let topLeft = CGPoint(x: frame.minX + 300, y: frame.maxY - 200)
         let topRight = CGPoint(x: frame.maxX - 300, y: frame.maxY - 200)
-        let third = ContinuousClock.now
-        companion.point(at: topLeft)
-        await wait(until: third + .milliseconds(200))
+        let second = ContinuousClock.now
+        let early = Flight(from: companion.position, to: spot(topLeft))
+        companion.point(at: Callout(point: topLeft, label: "Wi-Fi"))
+        await wait(until: second + .milliseconds(200))
+        companion.point(at: nil)
+        await wait(until: second + early.duration + .milliseconds(150))
+        expect(distance(companion.position, spot(topLeft)) <= 0.001 && companion.bubble?.label == "Wi-Fi",
+               "a voice that stops mid-flight still lands with the bubble up", "\(exact(companion.position)), \(String(describing: companion.bubble))")
+        let returning = await wait(upTo: .seconds(1)) { companion.bubble == nil }
+        await wait(until: .now + .milliseconds(100))
         let turned = companion.position
         let retargeted = ContinuousClock.now
-        companion.point(at: topRight)
+        companion.point(at: Callout(point: topRight, label: "switch"))
         await wait(until: retargeted + .milliseconds(30))
-        expect(distance(companion.position, turned) < 10, "a new target mid-flight takes off from where the glyph is",
-               "\(exact(companion.position)) vs \(exact(turned))")
-        await wait(until: retargeted + seconds(turned, spot(topRight)) + .milliseconds(150))
-        expect(distance(companion.position, spot(topRight)) <= 0.001 && faces(), "and lands on the new destination",
-               "\(exact(companion.position)) vs \(exact(spot(topRight)))")
+        expect(returning && distance(turned, spot(topLeft)) > 5 && distance(companion.position, turned) < 10,
+               "a new callout on the way home takes off from where the glyph is",
+               "\(exact(companion.position)) vs \(exact(turned)), \(returning ? "returning" : "never left")")
+        let across = Flight(from: turned, to: spot(topRight))
+        await wait(until: retargeted + across.duration + .milliseconds(150))
+        expect(distance(companion.position, spot(topRight)) <= 0.001 && faces() && companion.bubble?.label == "switch",
+               "and lands on the new spot with the new label", "\(exact(companion.position)) vs \(exact(spot(topRight)))")
+        await wait(until: retargeted + across.duration + .milliseconds(1000))
+        expect(distance(companion.position, spot(topRight)) <= 0.001 && companion.bubble?.label == "switch",
+               "while the voice still speaks the glyph stays past typing plus the hold", exact(companion.position))
 
         let bottomRight = CGPoint(x: frame.maxX - 200, y: frame.minY + 200)
         let fourth = ContinuousClock.now
         let steep = Flight(from: companion.position, to: spot(bottomRight))
-        companion.point(at: bottomRight)
-        await wait(until: fourth + .seconds(steep.duration / .seconds(1)) + .milliseconds(150))
+        companion.point(at: Callout(point: bottomRight, label: "panel"))
+        expect(companion.bubble == nil, "a new callout while the glyph pauses takes the bubble down")
+        await wait(until: fourth + .milliseconds(30))
+        expect(distance(companion.position, spot(topRight)) < 10, "and takes off from the spot",
+               "\(exact(companion.position)) vs \(exact(spot(topRight)))")
+        await wait(until: fourth + steep.duration + .milliseconds(150))
         let landing = steep.heading(after: steep.duration).radians
         expect(distance(companion.position, spot(bottomRight)) <= 0.001 && faces() && abs(companion.heading.radians - landing) <= .pi,
-               "a new target while pointing flies there, and on landing the arrow turns the shorter way to face it",
+               "it flies there, and on landing the arrow turns the shorter way to face the target",
                String(format: "heading %.1f degrees after a flight that ends at %.1f", companion.heading.degrees, landing * 180 / .pi))
         companion.point(at: nil)
+        let gone = await wait(upTo: .seconds(1)) { companion.bubble == nil }
+        let last = pointerAtNextChange()
+        let home2 = await wait(upTo: .seconds(2)) { last.pointer != nil }
+        expect(gone && home2 && distance(companion.position, following(last)) <= 0.001,
+               "once the voice stops and the hold runs out it flies home and follows the pointer",
+               "\(exact(companion.position)) vs \(exact(following(last)))")
 
         try? await Task.sleep(for: .seconds(1))
         let logged = companionLog(pid: ProcessInfo.processInfo.processIdentifier).split(separator: "\n").compactMap { line in
-            ["flying", "landed", "following"].first { line.contains("companion \($0)") }
+            ["flying", "landed", "pausing", "returning", "cancelled", "following"].first { line.contains("companion \($0)") }
         }
-        let expected = ["flying", "landed", "following", "flying", "landed", "following",
-                        "flying", "flying", "landed", "flying", "landed", "following"]
-        expect(logged == expected, "the log reads one flight per new target, each landing, then following",
+        let expected = ["flying", "landed", "pausing", "returning", "landed", "following",
+                        "flying", "landed", "pausing", "returning", "flying", "landed", "pausing",
+                        "flying", "landed", "pausing", "returning", "landed", "following"]
+        expect(logged == expected, "the log reads each flight out, its landing and pause, and each flight home landing before following",
                logged.joined(separator: ", "))
     }
 
@@ -391,7 +518,7 @@ enum CompanionCheck {
         try? await Task.sleep(for: .milliseconds(800))
     }
 
-    static func capture(_ overlay: Overlay) -> (pixels: Pixels, scale: Double)? {
+    static func capturedImage(_ overlay: Overlay) -> CGImage? {
         let path = NSTemporaryDirectory() + "companion-check-\(UUID().uuidString).png"
         defer { try? FileManager.default.removeItem(atPath: path) }
         let capture = Process()
@@ -399,11 +526,33 @@ enum CompanionCheck {
         capture.arguments = ["-o", "-x", "-l\(overlay.number)", path]
         guard (try? capture.run()) != nil else { return nil }
         capture.waitUntilExit()
-        guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
-              let pixels = decode(image)
+        // ImageIO decodes lazily, so the image must not depend on the file the defer deletes.
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let source = CGImageSourceCreateWithData(data as CFData, nil)
         else { return nil }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil)
+    }
+
+    static func capture(_ overlay: Overlay) -> (pixels: Pixels, scale: Double)? {
+        guard let image = capturedImage(overlay), let pixels = decode(image) else { return nil }
         return (pixels, Double(pixels.width) / overlay.bounds.width)
+    }
+
+    static func text(in rect: CGRect, of overlay: Overlay) -> String {
+        guard let image = capturedImage(overlay) else { return "" }
+        let scale = Double(image.width) / overlay.bounds.width
+        guard let crop = image.cropping(to: CGRect(x: rect.minX * scale, y: rect.minY * scale, width: rect.width * scale, height: rect.height * scale)),
+              let large = CGContext(data: nil, width: Int(rect.width * 4), height: Int(rect.height * 4), bitsPerComponent: 8, bytesPerRow: 0,
+                                    space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return "" }
+        large.interpolationQuality = .high
+        large.draw(crop, in: CGRect(x: 0, y: 0, width: large.width, height: large.height))
+        guard let enlarged = large.makeImage() else { return "" }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        try? VNImageRequestHandler(cgImage: enlarged).perform([request])
+        return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
     }
 
     static func glyph(in overlay: Overlay) -> (centre: CGPoint, count: Int)? {
@@ -733,6 +882,58 @@ enum CompanionCheck {
                "\(spinning.map { $0?.rawValue ?? "nil" })")
     }
 
+    @MainActor
+    static func rendered(_ view: some View, scale: Double) -> (pixels: Pixels, blobs: [Blob])? {
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = scale
+        guard let image = renderer.cgImage, let pixels = decode(image) else { return nil }
+        let found = pixels.rgba.withUnsafeBufferPointer {
+            blobs($0.baseAddress!, width: pixels.width, height: pixels.height, row: pixels.width * 4, scale: scale)
+        }
+        return (pixels, found)
+    }
+
+    @MainActor
+    static func checkBubbleRender() {
+        let screen = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        let right = Bubble(label: "Wi-Fi switch", beside: CGPoint(x: 600, y: 400), on: [screen], appeared: .now)
+        let left = Bubble(label: "Wi-Fi switch", beside: CGPoint(x: 1900, y: 400), on: [screen], appeared: .now)
+        func drawn(_ bubble: Bubble, _ shown: Int) -> (box: CGRect, white: Int) {
+            guard let (pixels, found) = rendered(CompanionBubble(bubble: bubble, shown: shown), scale: 2) else { return (.zero, 0) }
+            let white = stride(from: 0, to: pixels.rgba.count, by: 4).filter { pixels.rgba[$0] >= 200 && pixels.rgba[$0 + 3] >= 230 }.count
+            return (found.first?.box ?? .zero, white)
+        }
+        let two = drawn(right, 2)
+        let all = drawn(right, right.label.count)
+        expect(two.white > 0 && two.white < all.white, "two typed characters draw fewer white text pixels than the whole label",
+               "\(two.white) vs \(all.white)")
+        expect(abs(all.box.width - right.frame.width) <= 1 && abs(all.box.height - right.frame.height) <= 1,
+               "typed out, the bubble fills the frame Bubble measured for it", "\(all.box.size) vs \(right.frame.size)")
+        expect(two.box.minX <= 0.5 && two.box.width < all.box.width - 10, "while typing it grows away from a glyph on its left",
+               "\(two.box) then \(all.box)")
+        let leftTwo = drawn(left, 2)
+        expect(left.side == .left && abs(leftTwo.box.maxX - left.frame.width) <= 0.5, "and away from a glyph on its right",
+               "\(leftTwo.box) in \(left.frame.size)")
+
+        let overlay = CGRect(x: 0, y: 0, width: 400, height: 300)
+        let spot = CGPoint(x: 150, y: 200)
+        let landed = Bubble(label: "panel", beside: spot, on: [overlay], appeared: .now)
+        let zone = bubbleZone(CGRect(origin: Companion.local(CGPoint(x: landed.frame.minX, y: landed.frame.maxY), in: overlay),
+                                     size: landed.frame.size), side: landed.side.rawValue)
+        let scene = ZStack {
+            CompanionGlyph(look: .arrow(heading: Companion.restingHeading), time: 0)
+                .position(Companion.local(spot, in: overlay))
+            CompanionBubble(bubble: landed, shown: landed.label.count)
+                .position(Companion.local(CGPoint(x: landed.frame.midX, y: landed.frame.midY), in: overlay))
+        }
+        .frame(width: overlay.width, height: overlay.height)
+        let sampled = Frame(time: 0, blobs: rendered(scene, scale: 1)?.blobs ?? [])
+        let glyph = sampled.glyph(besides: zone)
+        expect(sampled.bubble(in: zone) != nil && near(glyph, Companion.local(spot, in: overlay), within: 1),
+               "at the stream's scale the glyph and the bubble beside it read as separate blobs",
+               "\(sampled.blobs.map { "\($0.box) x\($0.count)" }), glyph \(describe(glyph))")
+    }
+
     static func checkLooks(pid: Int32, restSeconds: Double) async {
         let saved = CGEvent(source: nil)?.location ?? .zero
         guard let display = NSScreen.screens.map(displayID).first(where: { CGDisplayBounds($0).contains(saved) }),
@@ -761,7 +962,7 @@ enum CompanionCheck {
         let state = await waitForVoice("idle", pid: pid, seconds: 20)
         expect(state?.contains("voice=idle") ?? true, "the previous turn has ended in idle", state ?? "no state line in 2 minutes")
 
-        let before = seen(in: overlay, centre: centre)
+        let before = sample(upTo: 6, until: .arrow)
         expect(before == .arrow, "before the hold the companion is the arrowhead", before.rawValue)
 
         try? await Task.sleep(for: .seconds(restSeconds + 1.5))
@@ -829,11 +1030,18 @@ enum CompanionCheck {
         return state
     }
 
-    static func loggedPoint(_ key: String, in line: String?) -> CGPoint? {
+    static func loggedField(_ key: String, in line: String?) -> Substring? {
         guard let line, let range = line.range(of: " \(key)=") else { return nil }
-        let fields = line[range.upperBound...].prefix { !$0.isWhitespace }.split(separator: ",")
-        guard fields.count == 2, let x = Double(fields[0]), let y = Double(fields[1]) else { return nil }
-        return CGPoint(x: x, y: y)
+        return line[range.upperBound...].prefix { !$0.isWhitespace }
+    }
+
+    static func loggedNumbers(_ key: String, in line: String?) -> [Double] {
+        loggedField(key, in: line)?.split(separator: ",").compactMap { Double($0) } ?? []
+    }
+
+    static func loggedPoint(_ key: String, in line: String?) -> CGPoint? {
+        let fields = loggedNumbers(key, in: line)
+        return fields.count == 2 ? CGPoint(x: fields[0], y: fields[1]) : nil
     }
 
     static func checkFlight(pid: Int32, voiceScenario: String) async {
@@ -848,11 +1056,96 @@ enum CompanionCheck {
         let primaryHeight = CGDisplayBounds(CGMainDisplayID()).height
         func appKit(_ local: CGPoint) -> CGPoint { CGPoint(x: b.minX + local.x, y: primaryHeight - b.minY - local.y) }
         func local(_ point: CGPoint) -> CGPoint { CGPoint(x: point.x - b.minX, y: primaryHeight - b.minY - point.y) }
+        func follows(_ pointer: CGPoint) -> CGPoint { CGPoint(x: pointer.x - b.minX + 35, y: pointer.y - b.minY + 25) }
 
         let recorder = FrameRecorder(overlayWidth: b.width)
         guard let stream = await recorder.start(window: overlay.number) else {
             expect(false, "the overlay window can be streamed", "window \(overlay.number)")
             return
+        }
+        func glyphs(after time: Double, besides zone: CGRect? = nil) -> [(time: Double, centre: CGPoint)] {
+            recorder.frames.filter { $0.time >= time }.compactMap { frame in frame.glyph(besides: zone).map { (frame.time, $0) } }
+        }
+        func settled(at point: CGPoint, besides zone: CGRect? = nil) -> Bool {
+            let now = CACurrentMediaTime()
+            let recent = glyphs(after: now - 0.5, besides: zone)
+            return near(recorder.frames.last?.glyph(besides: zone), point, within: 2) && recent.allSatisfy { near($0.centre, point, within: 2) }
+        }
+        func poll(upTo seconds: Double, every interval: Duration = .milliseconds(10), until done: () -> Bool) async -> Bool {
+            let deadline = CACurrentMediaTime() + seconds
+            while !done() {
+                if CACurrentMediaTime() > deadline { return false }
+                try? await Task.sleep(for: interval)
+            }
+            return true
+        }
+        func offCurve(_ centre: CGPoint, _ flight: Flight) -> CGFloat {
+            let point = appKit(centre)
+            return (0..<1000).map { step -> CGFloat in
+                let on = flight.position(after: flight.duration * (Double(step) / 999))
+                return hypot(on.x - point.x, on.y - point.y)
+            }.min() ?? .infinity
+        }
+        func turnLines() -> [String] {
+            let lines = companionLog(pid: pid, categories: ["companion", "transcription", "state"]).split(separator: "\n").map(String.init)
+            return lines.lastIndex { $0.contains("state voice=listening") }.map { Array(lines[$0...]) } ?? []
+        }
+        func order(_ lines: [String]) -> [String] {
+            lines.compactMap { line in ["flying", "landed", "pausing", "returning", "cancelled", "following"].first { line.contains("companion \($0)") } }
+        }
+
+        struct Outing {
+            let released: Double
+            let departed: Double
+            let arrived: Double
+            let from: CGPoint
+            let to: CGPoint
+            let target: CGPoint
+            let bubble: CGRect
+            let zone: CGRect
+            let side: String
+            let typed: Double
+        }
+        func pointOut(from home: CGPoint, onTakeoff: () async -> Void) async -> Outing? {
+            await chord(down: true)
+            try? await Task.sleep(for: .seconds(3))
+            await chord(down: false)
+            let released = CACurrentMediaTime()
+            var departed: Double?
+            _ = await poll(upTo: 15) {
+                departed = glyphs(after: released).first { hypot($0.centre.x - home.x, $0.centre.y - home.y) > 20 }?.time
+                return departed != nil
+            }
+            guard let departed else {
+                expect(false, "the glyph took off within 15 s of the release")
+                return nil
+            }
+            await onTakeoff()
+            var lines: [String] = []
+            _ = await poll(upTo: 10, every: .milliseconds(200)) {
+                lines = turnLines()
+                return lines.contains { $0.contains("companion pausing") }
+            }
+            let flying = lines.last { $0.contains("companion flying") }
+            let named = lines.last { $0.contains("transcription pointing") }
+            let pausing = lines.last { $0.contains("companion pausing") }
+            let frame = loggedNumbers("bubble", in: pausing)
+            guard let from = loggedPoint("from", in: flying), let to = loggedPoint("to", in: flying), let target = loggedPoint("at", in: named),
+                  frame.count == 4, let side = loggedField("side", in: pausing), let typed = loggedNumbers("typed", in: pausing).first
+            else {
+                expect(false, "the log names the flight, the point Claude named and the bubble",
+                       "\(flying ?? "no companion flying line"); \(named ?? "no transcription pointing line"); \(pausing ?? "no companion pausing line")")
+                return nil
+            }
+            let bubble = CGRect(origin: local(CGPoint(x: frame[0], y: frame[1] + frame[3])), size: CGSize(width: frame[2], height: frame[3]))
+            let zone = bubbleZone(bubble, side: String(side))
+            let destination = local(to)
+            _ = await poll(upTo: 5) { settled(at: destination, besides: zone) }
+            let arrived = glyphs(after: departed, besides: zone).first { near($0.centre, destination, within: 2) }?.time
+            expect(arrived != nil, "the glyph landed on the destination",
+                   "\(describe(recorder.frames.last?.glyph(besides: zone))) vs \(describe(destination))")
+            return arrived.map { Outing(released: released, departed: departed, arrived: $0, from: from, to: to, target: target,
+                                        bubble: bubble, zone: zone, side: String(side), typed: typed) }
         }
 
         let previous = try? String(contentsOfFile: voiceScenario, encoding: .utf8)
@@ -864,102 +1157,146 @@ enum CompanionCheck {
         let pointer = CGPoint(x: b.minX + 150, y: b.maxY - 150)
         move(to: pointer)
         try? await Task.sleep(for: .milliseconds(800))
-        let home = CGPoint(x: 150 + 35, y: b.height - 150 + 25)
-        let homeRadius: CGFloat = 12
-        let start = glyph(in: overlay)?.centre
+        let home = follows(pointer)
+        var start = glyph(in: overlay)?.centre
+        let deadline = Date().addingTimeInterval(6)
+        while !near(start, home, within: 2), Date() < deadline {
+            start = glyph(in: overlay)?.centre
+        }
         expect(near(start, home, within: 2), "before the hold the glyph follows the pointer near the bottom-left corner",
                "\(describe(start)) vs \(describe(home))")
 
-        await chord(down: true)
-        try? await Task.sleep(for: .seconds(3))
-        await chord(down: false)
-        let released = CACurrentMediaTime()
-
-        while CACurrentMediaTime() - released < 15 {
-            let centres = recorder.frames.filter { $0.time >= released }.compactMap(\.centre)
-            let last = centres.suffix(3)
-            if centres.contains(where: { hypot($0.x - home.x, $0.y - home.y) > 20 }),
-               last.count == 3, last.allSatisfy({ near($0, last[last.startIndex], within: 0.5) }) { break }
-            try? await Task.sleep(for: .milliseconds(50))
-        }
-
-        let lines = companionLog(pid: pid, categories: ["companion", "transcription", "state"])
-            .split(separator: "\n").map(String.init)
-        let turn = lines.lastIndex { $0.contains("state voice=listening") }.map { lines[$0...] } ?? []
-        let flying = turn.last { $0.contains("companion flying") }
-        let named = turn.last { $0.contains("transcription pointing") }
-        if let from = loggedPoint("from", in: flying), let to = loggedPoint("to", in: flying), let target = loggedPoint("at", in: named) {
-            expect(near(to, CGPoint(x: target.x + 35, y: target.y - 25), within: 0.2),
-                   "the companion flew to 35 right of and 25 below the point Claude named",
-                   "to \(describe(to)) for \(describe(target))")
-            let destination = local(to)
-            while CACurrentMediaTime() - released < 15 {
-                let now = CACurrentMediaTime()
-                let frames = recorder.frames.filter { $0.time >= released }
-                if let last = frames.last?.centre, near(last, destination, within: 2),
-                   frames.filter({ now - $0.time <= 0.5 }).compactMap(\.centre).allSatisfy({ near($0, last, within: 0.5) }) { break }
-                try? await Task.sleep(for: .milliseconds(50))
-            }
-            try? await stream.stopCapture()
-            let frames = recorder.frames.filter { $0.time >= released }
-            let landed = frames.last?.centre
-            expect(near(landed, destination, within: 2), "the glyph landed on the destination",
-                   "\(describe(landed)) vs \(describe(destination))")
-
-            let flight = Flight(from: from, to: to)
-            let curve = (0..<1000).map { flight.position(after: flight.duration * (Double($0) / 999)) }
-            let airborne = frames.compactMap(\.centre).filter { hypot($0.x - home.x, $0.y - home.y) > homeRadius && !near($0, destination, within: 2) }
-            let offCurve = airborne.map { centre -> CGFloat in
-                let point = appKit(centre)
-                return curve.map { hypot($0.x - point.x, $0.y - point.y) }.min() ?? .infinity
-            }
-            let farthest = offCurve.max() ?? 0
-            let rises = airborne.compactMap { centre -> CGFloat? in
-                let point = appKit(centre)
-                guard abs(to.x - from.x) >= 1 else { return nil }
-                let along = (point.x - from.x) / (to.x - from.x)
-                guard along > 0, along < 1 else { return nil }
-                return point.y - (from.y + along * (to.y - from.y))
-            }
-            let highest = rises.max() ?? 0
-            print(String(format: "  info %d frames, %d in flight, highest %.1f pt above the line, at most %.1f pt from the curve",
-                         frames.count, airborne.count, highest, farthest))
-            expect(airborne.count >= 10, "at least 10 frames caught the glyph between home and the destination",
-                   "\(airborne.count) of \(frames.count)")
-            expect(farthest <= 3, "every in-flight frame lies on the flight's curve", String(format: "%.1f pt off it", farthest))
-            expect(highest > 5, "mid-flight the glyph rose above the straight line from start to destination",
-                   String(format: "at most %.1f pt above it", highest))
-
+        func gesture() async {
+            var jumped = 0.0
+            guard let out = await pointOut(from: home, onTakeoff: {
+                jumped = CACurrentMediaTime()
+                move(to: CGPoint(x: pointer.x + 150, y: pointer.y))
+                try? await Task.sleep(for: .milliseconds(100))
+                move(to: pointer)
+            }) else { return }
+            let destination = local(out.to)
             let nudged = CGPoint(x: pointer.x + 40, y: pointer.y)
             move(to: nudged)
             try? await Task.sleep(for: .seconds(1))
-            let held = glyph(in: overlay)?.centre
+            let held = recorder.frames.last?.glyph(besides: out.zone)
             let voice = lastVoice(pid: pid)
-            expect(near(held, destination, within: 2), "while the voice responds the glyph stays on the destination, though the pointer moved",
+            expect(near(held, destination, within: 2), "while the voice responds the glyph stays on the spot, though the pointer moved",
                    "\(describe(held)) vs \(describe(destination))")
-            expect(voice?.contains("voice=responding") ?? false, "the voice was still responding when that was read",
-                   voice ?? "no state line")
+            expect(voice?.contains("voice=responding") ?? false, "the voice was still responding when that was read", voice ?? "no state line")
+            expect(near(out.to, CGPoint(x: out.target.x + 35, y: out.target.y - 25), within: 0.2),
+                   "the companion flew to 35 right of and 25 below the point Claude named",
+                   "to \(describe(out.to)) for \(describe(out.target))")
+
+            let flight = Flight(from: out.from, to: out.to)
+            let airborne = glyphs(after: out.released, besides: out.zone)
+                .filter { $0.time < out.arrived && hypot($0.centre.x - home.x, $0.centre.y - home.y) > 12 }.map(\.centre)
+            let farthest = airborne.map { offCurve($0, flight) }.max() ?? 0
+            let highest = airborne.compactMap { centre -> CGFloat? in
+                let point = appKit(centre)
+                guard abs(out.to.x - out.from.x) >= 1 else { return nil }
+                let along = (point.x - out.from.x) / (out.to.x - out.from.x)
+                guard along > 0, along < 1 else { return nil }
+                return point.y - (out.from.y + along * (out.to.y - out.from.y))
+            }.max() ?? 0
+            print(String(format: "  info %d frames in flight, highest %.1f pt above the line, at most %.1f pt from the curve",
+                         airborne.count, highest, farthest))
+            expect(jumped > out.departed && jumped < out.arrived, "the pointer jumped 150 pt while the glyph flew out",
+                   String(format: "jump %.2f s after takeoff, landing %.2f s after", jumped - out.departed, out.arrived - out.departed))
+            expect(airborne.count >= 10, "at least 10 frames caught the glyph between home and the destination", "\(airborne.count)")
+            expect(farthest <= 3, "every frame on the way out lies on the flight's curve, pointer jump or not", String(format: "%.1f pt off it", farthest))
+            expect(highest > 5, "mid-flight the glyph rose above the straight line from start to destination",
+                   String(format: "at most %.1f pt above it", highest))
+
+            let landed = recorder.frames.last
+            let blob = landed?.bubble(in: out.zone)
+            let spot = landed?.glyph(besides: out.zone)
+            expect(blob != nil && near(spot, destination, within: 2), "after landing a bubble shows inside its logged frame, beside the glyph on the spot",
+                   "blobs \(landed?.blobs.map { "\($0.box)" } ?? []), zone \(out.zone), glyph \(describe(spot))")
+            expect(blob.map { out.side == "right" ? $0.box.minX > destination.x : $0.box.maxX < destination.x } ?? false,
+                   "the bubble sits on the \(out.side) side of the glyph, as logged", "\(String(describing: blob?.box)) vs glyph x \(destination.x)")
+            let read = text(in: out.bubble.insetBy(dx: -2, dy: -2), of: overlay)
+            expect(read.lowercased().contains("panel"), "Vision reads the label panel in the bubble", "read \"\(read)\"")
 
             let idle = await waitForVoice("idle", pid: pid, seconds: 20)
             expect(idle?.contains("voice=idle") ?? false, "the voice finished and the state went back to idle", idle ?? "no state line")
-            try? await Task.sleep(for: .milliseconds(800))
-            let back = glyph(in: overlay)?.centre
-            let following = CGPoint(x: nudged.x - b.minX + 35, y: nudged.y - b.minY + 25)
-            expect(near(back, following, within: 2), "once the voice stops the glyph follows the pointer again",
-                   "\(describe(back)) vs \(describe(following))")
+            let homeTo = follows(nudged)
+            var leftSpot: Double?
+            _ = await poll(upTo: 8) {
+                leftSpot = glyphs(after: out.arrived, besides: out.zone).first { !near($0.centre, destination, within: 2) }?.time
+                return leftSpot != nil
+            }
+            _ = await poll(upTo: 5) { settled(at: homeTo) }
+            let returning = turnLines().last { $0.contains("companion returning") }
+            let paused = loggedNumbers("paused", in: returning).first
+            expect(paused.map { $0 >= out.typed + 3000 } ?? false, "the glyph stayed at least 3 s after typing the label",
+                   "paused \(paused.map { "\(Int($0)) ms" } ?? "not logged"), typed \(Int(out.typed)) ms")
+            if let leftSpot, let from = loggedPoint("from", in: returning), let to = loggedPoint("to", in: returning) {
+                expect(near(from, out.to, within: 0.2) && near(to, appKit(homeTo), within: 0.2),
+                       "it flew home from the spot to where following puts the pointer", "\(describe(from)) to \(describe(to))")
+                let back = Flight(from: from, to: to)
+                let reached = glyphs(after: leftSpot).first { near($0.centre, homeTo, within: 2) }?.time ?? .infinity
+                let homeward = glyphs(after: leftSpot, besides: out.zone).filter { $0.time < reached }.map(\.centre)
+                let off = homeward.map { offCurve($0, back) }.max() ?? 0
+                expect(homeward.count >= 5 && off <= 3, "every frame on the way home lies on the arc from the spot to the pointer",
+                       String(format: "%d frames, at most %.1f pt off it", homeward.count, off))
+                let lastBubble = recorder.frames.last { $0.time >= out.arrived && $0.bubble(in: out.zone) != nil }?.time
+                expect(lastBubble.map { $0 <= leftSpot + 0.6 } ?? false && recorder.frames.last?.bubble(in: out.zone) == nil,
+                       "the bubble is gone within 0.6 s of the glyph leaving the spot",
+                       lastBubble.map { String(format: "last seen %.2f s after", $0 - leftSpot) } ?? "never seen")
+            } else {
+                expect(false, "the glyph left the spot and the log names the flight home", returning ?? "no companion returning line")
+            }
 
-            let after = companionLog(pid: pid, categories: ["companion", "state"]).split(separator: "\n").map(String.init)
-            let pressed = after.lastIndex { $0.contains("state voice=listening") }
-            let order = pressed.map { start in
-                after[start...].compactMap { line in ["flying", "landed", "following"].first { line.contains("companion \($0)") } }
-            } ?? []
-            expect(order == ["flying", "landed", "following"], "the companion logged flying, landed and following, in that order",
-                   order.joined(separator: ", "))
-        } else {
-            try? await stream.stopCapture()
-            expect(false, "the log names the flight and the point Claude named",
-                   "\(flying ?? "no companion flying line"); \(named ?? "no transcription pointing line")")
+            let later = CGPoint(x: nudged.x, y: nudged.y - 30)
+            move(to: later)
+            try? await Task.sleep(for: .milliseconds(800))
+            let again = recorder.frames.last?.glyph(besides: nil)
+            expect(near(again, follows(later), within: 2), "home again, the glyph follows the pointer",
+                   "\(describe(again)) vs \(describe(follows(later)))")
+            let logged = order(turnLines())
+            expect(logged == ["flying", "landed", "pausing", "returning", "landed", "following"],
+                   "the companion logged flying, landed, pausing, returning, landed and following, in that order", logged.joined(separator: ", "))
         }
+
+        func cancel() async {
+            try? "ok\n".write(toFile: voiceScenario, atomically: true, encoding: .utf8)
+            move(to: pointer)
+            try? await Task.sleep(for: .milliseconds(800))
+            guard let out = await pointOut(from: home, onTakeoff: {}) else { return }
+            let destination = local(out.to)
+            var leaving: Double?
+            let left = await poll(upTo: 10) {
+                leaving = glyphs(after: out.arrived, besides: out.zone).first { !near($0.centre, destination, within: 2) }?.time
+                return leaving != nil
+            }
+            let shifted = CGPoint(x: pointer.x + 120, y: pointer.y)
+            move(to: shifted)
+            let moved = CACurrentMediaTime()
+            guard left, let leaving else {
+                expect(false, "the glyph left the spot to fly home within 10 s of landing")
+                return
+            }
+            try? await Task.sleep(for: .seconds(1.5))
+            let target = follows(shifted)
+            let reached = glyphs(after: moved, besides: out.zone).first { near($0.centre, target, within: 3) }?.time
+            print(String(format: "  info the pointer moved %.0f ms after the glyph left the spot", (moved - leaving) * 1000))
+            expect(reached.map { $0 - moved <= 0.5 } ?? false, "a 120 pt pointer move on the way home brings the glyph to the pointer within 0.5 s",
+                   reached.map { String(format: "after %.2f s", $0 - moved) } ?? describe(recorder.frames.last?.glyph(besides: out.zone)))
+            expect(near(recorder.frames.last?.glyph(besides: out.zone), target, within: 2), "and it stays there, following",
+                   "\(describe(recorder.frames.last?.glyph(besides: out.zone))) vs \(describe(target))")
+            let lines = turnLines()
+            let paused = loggedNumbers("paused", in: lines.last { $0.contains("companion returning") }).first
+            expect(paused.map { $0 >= out.typed + 3000 && $0 <= out.typed + 3600 } ?? false,
+                   "with a short voice the hold decides the pause: 3 s after typing",
+                   "paused \(paused.map { "\(Int($0)) ms" } ?? "not logged"), typed \(Int(out.typed)) ms")
+            let logged = order(lines)
+            expect(logged == ["flying", "landed", "pausing", "returning", "cancelled", "following"],
+                   "the flight home was cancelled, not landed", logged.joined(separator: ", "))
+        }
+
+        await gesture()
+        await cancel()
+        try? await stream.stopCapture()
 
         if let previous {
             try? previous.write(toFile: voiceScenario, atomically: true, encoding: .utf8)
