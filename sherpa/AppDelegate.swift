@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -8,12 +9,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // method returns, taking the status item (and its icon) down with it.
     private var menuBar: MenuBarController?
     private var hotkey: Hotkey?
+    private var companion: Companion?
     private var overlays: [OverlayWindow] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         menuBar = MenuBarController(state: state)
-        overlays = NSScreen.screens.map(OverlayWindow.init(screen:))
+        let companion = Companion()
+        self.companion = companion
+        overlays = NSScreen.screens.map { screen in
+            let overlay = OverlayWindow(screen: screen)
+            let content = NSHostingView(rootView: CompanionView(companion: companion, screenFrame: screen.frame))
+            // A hosting view sizes its window to the content by default; the overlay must stay the screen's size.
+            content.sizingOptions = []
+            overlay.contentView = content
+            return overlay
+        }
         overlays.forEach { $0.orderFrontRegardless() }
+        Task { await companion.start() }
         let hotkey = Hotkey(state: state)
         self.hotkey = hotkey
         Task { await hotkey.start() }
