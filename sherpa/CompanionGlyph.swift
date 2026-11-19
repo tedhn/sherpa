@@ -140,15 +140,15 @@ struct BubblePop: Transition {
 struct CompanionRing: View {
     /// The thing's bounds in the overlay's SwiftUI space.
     let around: CGRect
-    /// How much of the ring is drawn, from 0 to 1.
     let drawn: Double
 
     static let gap: CGFloat = 6
+    static let lineWidth: CGFloat = 2.5
 
     var body: some View {
         RoundedRectangle(cornerRadius: 8, style: .continuous)
             .trim(from: 0, to: drawn)
-            .stroke(CompanionGlyph.tint, lineWidth: 2.5)
+            .stroke(CompanionGlyph.tint, lineWidth: Self.lineWidth)
             .frame(width: around.width + 2 * Self.gap, height: around.height + 2 * Self.gap)
             .position(x: around.midX, y: around.midY)
     }

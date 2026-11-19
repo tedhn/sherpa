@@ -418,7 +418,6 @@ enum Aim {
         return Double(hypot(gap.dx, gap.dy))
     }
 
-    /// Overlap of Claude's box with the expected one, intersection over union, when both are on the same screen.
     func iou(_ target: Claude.Target) -> Double? {
         guard case .at(let screen, let box) = self, case .point(let named, _, let onScreen) = target, !named.isPoint, onScreen == screen else { return nil }
         return Aim.iou(Aim.rect(named), box)

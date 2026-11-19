@@ -15,7 +15,6 @@ nonisolated struct Screenshot: Equatable, Sendable {
     }
 
     /// Whole pixels of the image, from the top-left pixel to the bottom-right one, both included.
-    /// A box of one pixel is a point.
     struct Box: Equatable, Sendable {
         let x1: Int
         let y1: Int
@@ -83,7 +82,6 @@ nonisolated struct Screenshot: Equatable, Sendable {
         return CGPoint(x: appKitFrame.minX + localX, y: appKitFrame.minY + flippedY)
     }
 
-    /// By pixel edges, not centres, so a box covers its last column and row.
     func appKitRect(of box: Box) -> CGRect {
         let (sx, sy) = (appKitFrame.width / Double(pixels.width), appKitFrame.height / Double(pixels.height))
         let column = { (x: Int) in Double(min(max(x, 0), pixels.width - 1)) }

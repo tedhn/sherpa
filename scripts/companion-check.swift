@@ -66,9 +66,9 @@ func bubbleZone(_ frame: CGRect, side: String) -> CGRect {
                   width: frame.width + 8 + overshoot, height: frame.height + 8)
 }
 
-/// Where the ring around `bounds` can draw: 6 pt out plus half its 2.5 pt line, with room for anti-aliasing.
 func ringZone(_ bounds: CGRect) -> CGRect {
-    bounds.insetBy(dx: -12, dy: -12)
+    let reach = CompanionRing.gap + CompanionRing.lineWidth / 2 + 5
+    return bounds.insetBy(dx: -reach, dy: -reach)
 }
 
 nonisolated struct Frame {
@@ -1231,8 +1231,7 @@ enum CompanionCheck {
             let recent = glyphs(after: now - 0.5, besides: zones)
             return near(recorder.frames.last?.glyph(besides: zones), point, within: 2) && recent.allSatisfy { near($0.centre, point, within: 2) }
         }
-        /// Every blob in the zone together: on a Retina display the stream scales the ring down and its thin sides can break apart.
-        func ringBlob(_ frame: Frame?, in zone: CGRect) -> (box: CGRect, count: Int)? {
+        func ringPieces(_ frame: Frame?, in zone: CGRect) -> (box: CGRect, count: Int)? {
             let parts = frame?.blobs.filter { zone.contains($0.box) } ?? []
             guard let first = parts.first else { return nil }
             return (parts.dropFirst().reduce(first.box) { $0.union($1.box) }, parts.reduce(0) { $0 + $1.count })
@@ -1399,13 +1398,13 @@ enum CompanionCheck {
                    "the bubble sits on the \(out.side) side of the glyph, as logged", "\(String(describing: blob?.box)) vs glyph x \(destination.x)")
             let read = text(in: out.bubble.insetBy(dx: -2, dy: -2), of: overlay)
             expect(read.lowercased().contains("panel"), "Vision reads the label panel in the bubble", "read \"\(read)\"")
-            let outer = out.ring.insetBy(dx: -CompanionRing.gap - 1.25, dy: -CompanionRing.gap - 1.25)
-            let ringed = ringBlob(landed, in: out.ringZone)
+            let outer = out.ring.insetBy(dx: -(CompanionRing.gap + CompanionRing.lineWidth / 2), dy: -(CompanionRing.gap + CompanionRing.lineWidth / 2))
+            let ringed = ringPieces(landed, in: out.ringZone)
             expect(ringed.map { [($0.box.minX, outer.minX), ($0.box.minY, outer.minY), ($0.box.maxX, outer.maxX), ($0.box.maxY, outer.maxY)]
                                     .allSatisfy { abs($0 - $1) <= 2 } } ?? false,
                    "while it pauses a ring 6 pt outside the logged ring frame surrounds the thing",
                    "\(landed?.blobs.filter { out.ringZone.contains($0.box) }.map { "\($0.box) x\($0.count)" } ?? []) vs \(outer)")
-            let drawing = recorder.frames.filter { $0.time >= out.arrived - 0.1 }.compactMap { ringBlob($0, in: out.ringZone)?.count }
+            let drawing = recorder.frames.filter { $0.time >= out.arrived - 0.1 }.compactMap { ringPieces($0, in: out.ringZone)?.count }
             print("  info the ring showed \(drawing.prefix(24).map(String.init).joined(separator: " ")) opaque pixels in its first frames, "
                   + "in \(landed?.blobs.filter { out.ringZone.contains($0.box) }.count ?? 0) pieces once drawn")
             expect((drawing.first ?? .max) < (ringed?.count ?? 0) * 4 / 5, "the ring drew itself on: its first frame had under 4/5 of its pixels",
@@ -1441,8 +1440,8 @@ enum CompanionCheck {
                 expect(lastBubble.map { $0 <= leftSpot + 0.6 } ?? false && recorder.frames.last?.bubble(in: out.zone) == nil,
                        "the bubble is gone within 0.6 s of the glyph leaving the spot",
                        lastBubble.map { String(format: "last seen %.2f s after", $0 - leftSpot) } ?? "never seen")
-                let lastRing = recorder.frames.last { $0.time >= out.arrived && ringBlob($0, in: out.ringZone) != nil }?.time
-                expect(lastRing.map { $0 <= leftSpot + 0.6 } ?? false && ringBlob(recorder.frames.last, in: out.ringZone) == nil,
+                let lastRing = recorder.frames.last { $0.time >= out.arrived && ringPieces($0, in: out.ringZone) != nil }?.time
+                expect(lastRing.map { $0 <= leftSpot + 0.6 } ?? false && ringPieces(recorder.frames.last, in: out.ringZone) == nil,
                        "the ring is gone within 0.6 s of the glyph leaving the spot, and stays gone once it is home",
                        lastRing.map { String(format: "last seen %.2f s after", $0 - leftSpot) } ?? "never seen")
             } else {
@@ -1478,7 +1477,7 @@ enum CompanionCheck {
                 expect(false, "the glyph left the spot to fly home within 10 s of landing")
                 return
             }
-            let drawing = recorder.frames.filter { $0.time >= out.arrived - 0.1 && $0.time < leaving }.compactMap { ringBlob($0, in: out.ringZone)?.count }
+            let drawing = recorder.frames.filter { $0.time >= out.arrived - 0.1 && $0.time < leaving }.compactMap { ringPieces($0, in: out.ringZone)?.count }
             expect((drawing.first ?? .max) < (drawing.max() ?? 0) * 4 / 5, "a second ring also draws itself on, without first flashing whole",
                    "first frames \(drawing.prefix(8).map(String.init).joined(separator: " ")) of \(drawing.max() ?? 0)")
             try? await Task.sleep(for: .seconds(1.5))
