@@ -377,7 +377,7 @@ enum CompanionCheck {
         let left = CGPoint(x: frame.minX + 300, y: frame.midY)
         let right = CGPoint(x: frame.maxX - 300, y: frame.midY)
         let target = distance(home, left) > distance(home, right) ? left : right
-        let callout = Callout(point: target, label: "panel")
+        let callout = Callout(point: target, label: "panel", bounds: nil)
         let destination = spot(target)
         let outbound = Flight(from: home, to: destination)
         let started = ContinuousClock.now
@@ -436,7 +436,7 @@ enum CompanionCheck {
         let topRight = CGPoint(x: frame.maxX - 300, y: frame.maxY - 200)
         let second = ContinuousClock.now
         let early = Flight(from: companion.position, to: spot(topLeft))
-        companion.point(at: Callout(point: topLeft, label: "Wi-Fi"))
+        companion.point(at: Callout(point: topLeft, label: "Wi-Fi", bounds: nil))
         await wait(until: second + .milliseconds(200))
         companion.point(at: nil)
         await wait(until: second + early.duration + .milliseconds(150))
@@ -446,7 +446,7 @@ enum CompanionCheck {
         await wait(until: .now + .milliseconds(100))
         let turned = companion.position
         let retargeted = ContinuousClock.now
-        companion.point(at: Callout(point: topRight, label: "switch"))
+        companion.point(at: Callout(point: topRight, label: "switch", bounds: nil))
         await wait(until: retargeted + .milliseconds(30))
         expect(returning && distance(turned, spot(topLeft)) > 5 && distance(companion.position, turned) < 10,
                "a new callout on the way home takes off from where the glyph is",
@@ -462,7 +462,7 @@ enum CompanionCheck {
         let bottomRight = CGPoint(x: frame.maxX - 200, y: frame.minY + 200)
         let fourth = ContinuousClock.now
         let steep = Flight(from: companion.position, to: spot(bottomRight))
-        companion.point(at: Callout(point: bottomRight, label: "panel"))
+        companion.point(at: Callout(point: bottomRight, label: "panel", bounds: nil))
         expect(companion.bubble == nil, "a new callout while the glyph pauses takes the bubble down")
         await wait(until: fourth + .milliseconds(30))
         expect(distance(companion.position, spot(topRight)) < 10, "and takes off from the spot",

@@ -41,7 +41,7 @@ enum ClaudeCheck {
         checkRequest()
         checkHistory()
         checkQuestion()
-        checkPoint()
+        checkCallout()
         checkSaid()
         checkAnswer()
         checkFailureFields()
@@ -132,8 +132,8 @@ enum ClaudeCheck {
         expect(Claude.Question(text: "hi", screenshots: []).images.isEmpty, "no screenshots means no images")
     }
 
-    static func checkPoint() {
-        print("point")
+    static func checkCallout() {
+        print("callout")
         func sized(_ frame: CGRect) -> Screenshot {
             let context = CGContext(
                 data: nil, width: 4, height: 2, bitsPerComponent: 8, bytesPerRow: 16,
@@ -142,14 +142,21 @@ enum ClaudeCheck {
             return Screenshot(encoding: context.makeImage()!, display: 1, appKitFrame: frame, cursor: .zero)!
         }
         let shots = [sized(CGRect(x: 0, y: 0, width: 8, height: 4)), sized(CGRect(x: 100, y: -40, width: 40, height: 20))]
-        func point(_ screen: Int) -> CGPoint? {
-            Claude.Target.point(x: 1, y: 0, label: "a", screen: screen).appKitPoint(on: shots)
+        let want: [(Claude.Target, Callout?)] = [
+            (.point(.init(x: 1, y: 0), label: "a", screen: 1), Callout(point: CGPoint(x: 3, y: 3), label: "a", bounds: nil)),
+            (.point(.init(x: 1, y: 0), label: "a", screen: 2), Callout(point: CGPoint(x: 115, y: -25), label: "a", bounds: nil)),
+            (.point(.init(x1: 1, y1: 0, x2: 2, y2: 1), label: "b", screen: 1),
+             Callout(point: CGPoint(x: 3, y: 3), label: "b", bounds: CGRect(x: 2, y: 0, width: 4, height: 4))),
+            (.point(.init(x1: 0, y1: 1, x2: 3, y2: 9), label: "c", screen: 2),
+             Callout(point: CGPoint(x: 115, y: -35), label: "c", bounds: CGRect(x: 100, y: -40, width: 40, height: 10))),
+            (.point(.init(x: 1, y: 0), label: "a", screen: 3), nil),
+            (.point(.init(x: 1, y: 0), label: "a", screen: 0), nil),
+            (.none, nil),
+        ]
+        for (target, expected) in want {
+            let got = target.callout(on: shots)
+            expect(got == expected, "\(target) calls out \(String(describing: expected)), got \(String(describing: got))")
         }
-        let want: [(Int, CGPoint?)] = [(1, CGPoint(x: 3, y: 3)), (2, CGPoint(x: 115, y: -25)), (3, nil), (0, nil)]
-        for (screen, expected) in want {
-            expect(point(screen) == expected, "screen \(screen) converts to \(String(describing: expected)), got \(String(describing: point(screen)))")
-        }
-        expect(Claude.Target.none.appKitPoint(on: shots) == nil, "no target has no point")
     }
 
     static func failure(_ status: Int, _ text: String) -> Claude.Failure {
@@ -193,12 +200,28 @@ enum ClaudeCheck {
 
     static func checkSaid() {
         print("said")
-        let point = Claude.Target.point(x: 12, y: 40, label: "Save", screen: 1)
+        let point = Claude.Target.point(.init(x: 12, y: 40), label: "Save", screen: 1)
+        let panel = Claude.Target.point(.init(x1: 600, y1: 380, x2: 680, y2: 420), label: "panel", screen: 1)
         let probes: [(text: String, spoken: String, tag: String?, target: Claude.Target?)] = [
             ("Done. [POINT:none]", "Done.", "[POINT:none]", Claude.Target.none),
-            ("Click it. [POINT:1012,199:Wi-Fi switch:screen2]", "Click it.", "[POINT:1012,199:Wi-Fi switch:screen2]", .point(x: 1012, y: 199, label: "Wi-Fi switch", screen: 2)),
+            ("Click it. [POINT:600,380,680,420:panel:screen1]", "Click it.", "[POINT:600,380,680,420:panel:screen1]", panel),
+            ("Click it. [POINT:1212,72,1260,120:profile picture:screen2]", "Click it.", "[POINT:1212,72,1260,120:profile picture:screen2]",
+             .point(.init(x1: 1212, y1: 72, x2: 1260, y2: 120), label: "profile picture", screen: 2)),
+            ("Click it. [POINT:600,380,680,420:panel]", "Click it.", "[POINT:600,380,680,420:panel]", panel),
+            ("Click it. [POINT:600 , 380, 680 ,420 :  panel  :screen1]\n", "Click it.", "[POINT:600 , 380, 680 ,420 :  panel  :screen1]", panel),
+            ("Click it. [POINT:680,420,600,380:panel:screen1]", "Click it.", "[POINT:680,420,600,380:panel:screen1]", panel),
+            ("Click it. [POINT:640,400,640,400:panel:screen1]", "Click it.", "[POINT:640,400,640,400:panel:screen1]", .point(.init(x: 640, y: 400), label: "panel", screen: 1)),
+            ("Click it. [POINT:600,380,680:panel]", "Click it.", "[POINT:600,380,680:panel]", nil),
+            ("Click it. [POINT:600,380,680,420,9:panel]", "Click it.", "[POINT:600,380,680,420,9:panel]", nil),
+            ("Click it. [POINT:600,380,-680,420:panel]", "Click it.", "[POINT:600,380,-680,420:panel]", nil),
+            ("Click it. [POINT:600,380,680,420:]", "Click it.", "[POINT:600,380,680,420:]", nil),
+            ("Click it. [POINT:600,380,680,420]", "Click it.", "[POINT:600,380,680,420]", nil),
+            ("Click it. [POINT:600,38", "Click it.", "[POINT:600,38", nil),
+            ("Click it. [POINT:600,380,680,42", "Click it.", "[POINT:600,380,680,42", nil),
+            ("Click it. [POINT:600,380,680,420:pan", "Click it.", "[POINT:600,380,680,420:pan", nil),
+            ("Click it. [POINT:1012,199:Wi-Fi switch:screen2]", "Click it.", "[POINT:1012,199:Wi-Fi switch:screen2]", .point(.init(x: 1012, y: 199), label: "Wi-Fi switch", screen: 2)),
             ("Click it. [POINT:12,40:Save]", "Click it.", "[POINT:12,40:Save]", point),
-            ("  Click it.  \n [POINT:12 , 40 :  Save  :screen2]\n\n", "Click it.", "[POINT:12 , 40 :  Save  :screen2]", .point(x: 12, y: 40, label: "Save", screen: 2)),
+            ("  Click it.  \n [POINT:12 , 40 :  Save  :screen2]\n\n", "Click it.", "[POINT:12 , 40 :  Save  :screen2]", .point(.init(x: 12, y: 40), label: "Save", screen: 2)),
             ("Click it. [POINT:12,40:Save]  ", "Click it.", "[POINT:12,40:Save]", point),
             ("Click [POINT:1,2:a] it. [POINT:none]", "Click [POINT:1,2:a] it.", "[POINT:none]", Claude.Target.none),
             ("Click [POINT:1,2:a] it.", "Click [POINT:1,2:a] it.", nil, nil),
@@ -251,8 +274,22 @@ enum ClaudeCheck {
         expect(shown == ["", "Click File", "Click File in the menu bar."], "a tag as it streams in never shows, got \(shown)")
         let tail = stream(start + [delta("Click File"), delta(" in the menu bar. ["), delta("POINT:211,"), delta("12:File menu:sc"), delta("reen1]")] + end)
         expect(
-            tail.map(\.spoken) == .success("Click File in the menu bar.") && tail.map(\.target) == .success(Claude.Target.point(x: 211, y: 12, label: "File menu", screen: 1)),
+            tail.map(\.spoken) == .success("Click File in the menu bar.") && tail.map(\.target) == .success(Claude.Target.point(.init(x: 211, y: 12), label: "File menu", screen: 1)),
             "a tag split across deltas is stripped and parsed, got \(tail)"
+        )
+        let boxed = ["Click File", " in the menu bar. [", "POINT:196,", "2,22", "6,22:File menu:sc", "reen1]"].map(delta)
+        var boxShown: [String] = []
+        var boxReading = Claude.Answer()
+        for line in start + boxed {
+            try? boxReading.read(line)
+            if boxShown.last != boxReading.shown { boxShown.append(boxReading.shown) }
+        }
+        expect(boxShown == ["", "Click File", "Click File in the menu bar."], "a box tag as it streams in never shows, got \(boxShown)")
+        let boxTail = stream(start + boxed + end)
+        expect(
+            boxTail.map(\.spoken) == .success("Click File in the menu bar.")
+                && boxTail.map(\.target) == .success(Claude.Target.point(.init(x1: 196, y1: 2, x2: 226, y2: 22), label: "File menu", screen: 1)),
+            "a box tag split across deltas is stripped and parsed, got \(boxTail)"
         )
         expect(
             stream(start + [delta("[POINT:none]")] + end) == .failure(.unanswered(status: 200, detail: "no text, stop_reason=end_turn")),

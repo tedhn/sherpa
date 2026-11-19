@@ -52,14 +52,15 @@ nonisolated enum Claude {
 
     enum Target: Equatable, Sendable {
         case none
-        case point(x: Int, y: Int, label: String, screen: Int)
+        case point(Screenshot.Box, label: String, screen: Int)
 
         static let cursorScreen = 1
 
         var logField: String {
             switch self {
             case .none: "none"
-            case .point(let x, let y, _, let screen): "screen\(screen):\(x),\(y)"
+            case .point(let box, _, let screen) where box.isPoint: "screen\(screen):\(box.x1),\(box.y1)"
+            case .point(let box, _, let screen): "screen\(screen):\(box.x1),\(box.y1),\(box.x2),\(box.y2)"
             }
         }
     }
@@ -81,15 +82,19 @@ nonisolated enum Claude {
             target = Self.parse(removed)
         }
 
+        /// The prompt asks for a box, but a model can still write the older two-number form, one pixel.
         private static func parse(_ tag: String) -> Target? {
-            let strict = #/\[POINT:(?:(none)|([0-9]+)\s*,\s*([0-9]+)\s*:([^\]:\n\r]+?)(?::screen([0-9]+))?)\]/#
+            let strict = #/\[POINT:(?:(none)|([0-9]+)\s*,\s*([0-9]+)(?:\s*,\s*([0-9]+)\s*,\s*([0-9]+))?\s*:([^\]:\n\r]+?)(?::screen([0-9]+))?)\]/#
             guard let match = tag.wholeMatch(of: strict) else { return nil }
-            let (_, none, x, y, label, screen) = match.output
+            let (_, none, x1, y1, x2, y2, label, screen) = match.output
             if none != nil { return Target.none }
             let name = label?.trimmingCharacters(in: .whitespaces) ?? ""
             let number = screen.map { Int($0) ?? 0 } ?? Target.cursorScreen
-            guard let x = x.flatMap({ Int($0) }), let y = y.flatMap({ Int($0) }), !name.isEmpty, number > 0 else { return nil }
-            return .point(x: x, y: y, label: name, screen: number)
+            guard let x1 = x1.flatMap({ Int($0) }), let y1 = y1.flatMap({ Int($0) }),
+                  let x2 = x2.map({ Int($0) }) ?? x1, let y2 = y2.map({ Int($0) }) ?? y1,
+                  !name.isEmpty, number > 0
+            else { return nil }
+            return .point(Screenshot.Box(x1: x1, y1: y1, x2: x2, y2: y2), label: name, screen: number)
         }
     }
 
@@ -276,21 +281,20 @@ nonisolated extension Claude.Question {
 }
 
 nonisolated extension Claude.Target {
-    func appKitPoint(on shots: [Screenshot]) -> CGPoint? {
-        guard case .point(let x, let y, _, let screen) = self, shots.indices.contains(screen - 1) else { return nil }
-        return shots[screen - 1].appKitCentre(ofPixelX: x, y: y)
-    }
-
     func callout(on shots: [Screenshot]) -> Callout? {
-        guard case .point(_, _, let label, _) = self, let point = appKitPoint(on: shots) else { return nil }
-        return Callout(point: point, label: label)
+        guard case .point(let box, let label, let screen) = self, shots.indices.contains(screen - 1) else { return nil }
+        let shot = shots[screen - 1]
+        return Callout(
+            point: shot.appKitCentre(ofPixelX: box.centre.x, y: box.centre.y), label: label,
+            bounds: box.isPoint ? nil : shot.appKitRect(of: box)
+        )
     }
 }
 
 nonisolated extension Journal.Point {
     init?(_ target: Claude.Target?) {
-        guard case .point(let x, let y, let label, let screen)? = target else { return nil }
-        self.init(label: label, screen: screen, x: x, y: y)
+        guard case .point(let box, let label, let screen)? = target else { return nil }
+        self.init(label: label, screen: screen, x: box.centre.x, y: box.centre.y)
     }
 }
 

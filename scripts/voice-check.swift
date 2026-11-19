@@ -413,22 +413,43 @@ enum Aim {
     }
 
     func distance(to target: Claude.Target) -> Double? {
-        guard case .at(let screen, let box) = self, case .point(let x, let y, _, let onScreen) = target, onScreen == screen else { return nil }
-        let gap = Aim.gap(box, x, y)
+        guard case .at(let screen, let box) = self, case .point(let named, _, let onScreen) = target, onScreen == screen else { return nil }
+        let gap = Aim.gap(box, named.centre.x, named.centre.y)
         return Double(hypot(gap.dx, gap.dy))
+    }
+
+    /// Overlap of Claude's box with the expected one, intersection over union, when both are on the same screen.
+    func iou(_ target: Claude.Target) -> Double? {
+        guard case .at(let screen, let box) = self, case .point(let named, _, let onScreen) = target, !named.isPoint, onScreen == screen else { return nil }
+        return Aim.iou(Aim.rect(named), box)
+    }
+
+    static func iou(_ a: CGRect, _ b: CGRect) -> Double {
+        let overlap = a.intersection(b)
+        guard !overlap.isNull else { return 0 }
+        let shared = overlap.width * overlap.height
+        return Double(shared / (a.width * a.height + b.width * b.height - shared))
+    }
+
+    static func rect(_ box: Screenshot.Box) -> CGRect {
+        CGRect(x: box.x1, y: box.y1, width: box.x2 - box.x1, height: box.y2 - box.y1)
+    }
+
+    static func spot(_ box: Screenshot.Box) -> String {
+        box.isPoint ? "\(box.x1),\(box.y1)" : "box \(box.x1),\(box.y1),\(box.x2),\(box.y2) centred on \(box.centre.x),\(box.centre.y)"
     }
 
     func offense(_ target: Claude.Target) -> String? {
         switch (self, target) {
         case (.anything, _): return nil
         case (.nothing, .none): return nil
-        case (.nothing, .point(let x, let y, _, let screen)): return "pointed at screen\(screen) \(x),\(y) but expected none"
+        case (.nothing, .point(let named, _, let screen)): return "pointed at screen\(screen) \(Aim.spot(named)) but expected none"
         case (.at(let screen, _), .none): return "none but expected a point on screen\(screen)"
-        case (.at(let screen, let box), .point(let x, let y, _, let onScreen)):
+        case (.at(let screen, let box), .point(let named, _, let onScreen)):
             guard onScreen == screen else { return "screen\(onScreen) but expected screen\(screen)" }
-            let gap = Aim.gap(box, x, y)
+            let gap = Aim.gap(box, named.centre.x, named.centre.y)
             guard gap.dx > Aim.slack || gap.dy > Aim.slack else { return nil }
-            return "screen\(screen) \(x),\(y) is \(Int(hypot(gap.dx, gap.dy).rounded())) px from the box"
+            return "screen\(screen) \(Aim.spot(named)) is \(Int(hypot(gap.dx, gap.dy).rounded())) px from the box"
         }
     }
 }
@@ -660,6 +681,7 @@ struct Tally {
     var aimed = 0
     var inside = 0
     var misses: [Double] = []
+    var ious: [Double] = []
 }
 
 @main
@@ -700,9 +722,13 @@ enum VoiceCheck {
             if let box {
                 canvas.outline(box.minX, box.minY, box.width, box.height, NSColor(hex: 0x00B050), thickness: 3)
             }
-            guard case .point(let x, let y, _, _) = target else { return }
-            let center = CGPoint(x: x, y: y)
+            guard case .point(let named, _, _) = target else { return }
             let red = NSColor(hex: 0xFF0000)
+            if !named.isPoint {
+                let drawn = Aim.rect(named)
+                canvas.outline(drawn.minX, drawn.minY, drawn.width, drawn.height, red, thickness: 2)
+            }
+            let center = CGPoint(x: named.centre.x, y: named.centre.y)
             canvas.line(from: CGPoint(x: center.x - 16, y: center.y), to: CGPoint(x: center.x + 16, y: center.y), red, thickness: 2)
             canvas.line(from: CGPoint(x: center.x, y: center.y - 16), to: CGPoint(x: center.x, y: center.y + 16), red, thickness: 2)
             canvas.outline(center.x - 9, center.y - 9, 18, 18, red, radius: 9, thickness: 2)
@@ -710,7 +736,7 @@ enum VoiceCheck {
     }
 
     static func writePoint(_ target: Claude.Target, for turn: Turn, to path: String) {
-        guard case .point(_, _, _, let screen) = target, turn.scenes.indices.contains(screen - 1) else { return }
+        guard case .point(_, _, let screen) = target, turn.scenes.indices.contains(screen - 1) else { return }
         var box: CGRect?
         if case .at(screen, let expected) = turn.aim { box = expected }
         do {
@@ -765,7 +791,7 @@ enum VoiceCheck {
                         switch target {
                         case nil: print("  T: missing" + (said.tag.map { " (tag \($0.debugDescription))" } ?? ""))
                         case .some(.none): print("  T: none")
-                        case .some(.point(let x, let y, let label, let screen)): print("  T: screen\(screen) \(x),\(y) \"\(label)\"")
+                        case .some(.point(let named, let label, let screen)): print("  T: screen\(screen) \(Aim.spot(named)) \"\(label)\"")
                         }
                     }
                     print("  \(words) words, first text \(first) ms, total \(total) ms")
@@ -779,6 +805,7 @@ enum VoiceCheck {
                     for finding in findings { tally.byRule[finding.rule, default: 0] += 1 }
                     if reply != nil, case .at = turn.aim {
                         tally.aimed += 1
+                        if let target, let overlap = turn.aim.iou(target) { tally.ious.append(overlap) }
                         if !findings.contains(where: { $0.rule == "tag" || $0.rule == "aim" }) {
                             tally.inside += 1
                         } else if let target, let miss = turn.aim.distance(to: target) {
@@ -788,11 +815,15 @@ enum VoiceCheck {
                     if let pointsPath, let target {
                         writePoint(target, for: turn, to: "\(pointsPath)/\(current.name)-run\(run)-turn\(index + 1).png")
                     }
-                    let record: [String: Any] = [
+                    var record: [String: Any] = [
                         "case": current.name, "run": run, "turn": index + 1, "question": turn.question, "answer": spoken, "tag": said?.tag ?? NSNull(),
                         "words": words, "firstMs": first, "totalMs": total, "target": targetRecord(target),
                         "failures": findings.map { "\($0.rule): \($0.snippet)" },
                     ]
+                    if case .at(let screen, let box) = turn.aim {
+                        record["expected"] = ["screen": screen, "x1": Int(box.minX), "y1": Int(box.minY), "x2": Int(box.maxX), "y2": Int(box.maxY)]
+                        if let target, let overlap = turn.aim.iou(target) { record["iou"] = overlap }
+                    }
                     if let line = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .withoutEscapingSlashes]) {
                         out?.write(line + Data("\n".utf8))
                     }
@@ -807,7 +838,8 @@ enum VoiceCheck {
         switch target {
         case nil: NSNull()
         case .some(.none): "none"
-        case .some(.point(let x, let y, let label, let screen)): ["screen": screen, "x": x, "y": y, "label": label]
+        case .some(.point(let named, let label, let screen)) where named.isPoint: ["screen": screen, "x": named.x1, "y": named.y1, "label": label]
+        case .some(.point(let named, let label, let screen)): ["screen": screen, "x1": named.x1, "y1": named.y1, "x2": named.x2, "y2": named.y2, "label": label]
         }
     }
 
@@ -816,10 +848,14 @@ enum VoiceCheck {
         for name in Rule.all.map(\.name) + ["api"] {
             print("  \(name.padding(toLength: 15, withPad: " ", startingAt: 0)) \(tally.byRule[name, default: 0])")
         }
-        let sorted = tally.misses.sorted()
-        let median = sorted.isEmpty ? nil : (sorted[(sorted.count - 1) / 2] + sorted[sorted.count / 2]) / 2
-        print("  pointing        \(tally.inside) of \(tally.aimed) inside the box, median miss \(median.map { "\(Int($0.rounded())) px" } ?? "none")")
+        print("  pointing        \(tally.inside) of \(tally.aimed) inside the box, median miss \(median(tally.misses).map { "\(Int($0.rounded())) px" } ?? "none")")
+        print("  boxes           \(tally.ious.count) of \(tally.aimed) boxed on the right screen, median IoU \(median(tally.ious).map { String(format: "%.2f", $0) } ?? "none")")
         print("  failing answers \(tally.failed) of \(tally.answers)")
+    }
+
+    static func median(_ values: [Double]) -> Double? {
+        let sorted = values.sorted()
+        return sorted.isEmpty ? nil : (sorted[(sorted.count - 1) / 2] + sorted[sorted.count / 2]) / 2
     }
 
     static func selfTest() -> Bool {
@@ -886,12 +922,19 @@ enum VoiceCheck {
             Probe(text: "Flip the switch. [POINT:none]", turn: nothingTurn, tagged: false, failing: []),
             Probe(text: "Flip the switch.", tagged: false, failing: ["tag"], detail: "Flip the switch."),
             Probe(text: "Flip the switch. [POINT:1,2:x] and more", turn: aimTurn, tagged: false, failing: ["tag"], detail: "Flip the switch. [POINT:1,2:x] and more"),
+            Probe(text: "Flip the switch. [POINT:990,184,1042,214:Wi-Fi switch:screen1]", turn: aimTurn, tagged: false, failing: []),
+            Probe(text: "Flip the switch. [POINT:1000,190,1100,230:Wi-Fi switch:screen1]", turn: aimTurn, tagged: false, failing: []),
+            Probe(text: "Flip the switch. [POINT:1100,190,1200,230:Wi-Fi switch:screen1]", turn: aimTurn, tagged: false, failing: ["aim"],
+                  detail: "screen1 box 1100,190,1200,230 centred on 1150,210 is 108 px from the box"),
+            Probe(text: "Flip the switch. [POINT:990,184,1042,214:Wi-Fi switch:screen1]", turn: nothingTurn, tagged: false, failing: ["aim"],
+                  detail: "pointed at screen1 box 990,184,1042,214 centred on 1016,199 but expected none"),
+            Probe(text: "Flip the switch. [POINT:1,2,3,4:x] and more", turn: aimTurn, tagged: false, failing: ["tag"]),
             Probe(text: "Flip it. [POINT:12,40]", tagged: false, failing: ["tag"], detail: "[POINT:12,40]"),
             Probe(text: "Use `reversed()` [POINT:none]", tagged: false, failing: ["markdown", "code"]),
             Probe(text: "Click [POINT:1,2:a](b) here.", tagged: false, failing: ["markdown", "tag"], detail: "Click [POINT:1,2:a](b) here."),
         ]
         var mismatches = 0
-        let png = marked(.wifiSettings, box: CGRect(x: 990, y: 184, width: 52, height: 30), target: .point(x: 700, y: 600, label: "x", screen: 1))
+        let png = marked(.wifiSettings, box: CGRect(x: 990, y: 184, width: 52, height: 30), target: .point(.init(x: 700, y: 600), label: "x", screen: 1))
         let pixel = { (x: Int, y: Int) in NSBitmapImageRep(data: png)?.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) }
         let red = pixel(712, 600), box = pixel(1000, 184), bare = pixel(720, 650)
         let drawn = (red?.redComponent ?? 0) > 0.9 && (red?.greenComponent ?? 1) < 0.2
@@ -912,6 +955,24 @@ enum VoiceCheck {
         let labelled = labels[0].contains(marks) && !labels[1].contains(marks)
         print("  \(labelled ? "ok  " : "FAIL") an inked scene's label says the user drew the red marks, a plain scene's does not")
         if !labelled { mismatches += 1 }
+        let boxPng = marked(.wifiSettings, box: nil, target: .point(.init(x1: 600, y1: 500, x2: 800, y2: 700), label: "x", screen: 1))
+        let boxPixel = { (x: Int, y: Int) in NSBitmapImageRep(data: boxPng)?.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) }
+        let boxEdge = boxPixel(600, 600), boxCross = boxPixel(712, 600), boxInside = boxPixel(650, 650)
+        let outlined = [boxEdge, boxCross].allSatisfy { ($0?.redComponent ?? 0) > 0.9 && ($0?.greenComponent ?? 1) < 0.2 }
+            && (boxInside?.greenComponent ?? 1) > 0.2
+        print("  \(outlined ? "ok  " : "FAIL") a boxed target draws a red outline at 600,500 to 800,700 and a crosshair on its centre 700,600")
+        if !outlined { mismatches += 1 }
+        let boxSaid = Claude.Said("Flip the switch. [POINT:990,184,1042,214:Wi-Fi switch:screen1]")
+        let boxTarget = Claude.Target.point(.init(x1: 990, y1: 184, x2: 1042, y2: 214), label: "Wi-Fi switch", screen: 1)
+        let boxOK = boxSaid.spoken == "Flip the switch." && boxSaid.target == boxTarget
+        print("  \(boxOK ? "ok  " : "FAIL") Said strips a box tag and parses its box")
+        if !boxOK { mismatches += 1 }
+        let halves = Aim.iou(CGRect(x: 0, y: 0, width: 10, height: 10), CGRect(x: 5, y: 0, width: 10, height: 10))
+        let exact = switchAim.iou(boxTarget)
+        let elsewhere = Aim.at(screen: 2, CGRect(x: 990, y: 184, width: 52, height: 30)).iou(boxTarget)
+        let iouOK = abs(halves - 1.0 / 3.0) < 1e-9 && exact == 1 && elsewhere == nil && switchAim.iou(.point(.init(x: 1016, y: 199), label: "x", screen: 1)) == nil
+        print("  \(iouOK ? "ok  " : "FAIL") IoU is 1/3 for half-overlapping squares, 1 for the switch's own box, none on another screen or for a point")
+        if !iouOK { mismatches += 1 }
         for probe in probes {
             let findings = Rule.findings(in: Answered(said: Claude.Said(probe.tagged ? probe.text + " [POINT:none]" : probe.text), turn: probe.turn))
             let got = findings.map(\.rule)
