@@ -8,9 +8,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // method returns, taking the status item (and its icon) down with it.
     private var menuBar: MenuBarController?
     private var hotkey: Hotkey?
+    private var overlays: [OverlayWindow] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         menuBar = MenuBarController(state: state)
+        overlays = NSScreen.screens.map(OverlayWindow.init(screen:))
+        overlays.forEach { $0.orderFrontRegardless() }
         let hotkey = Hotkey(state: state)
         self.hotkey = hotkey
         Task { await hotkey.start() }
