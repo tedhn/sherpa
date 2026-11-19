@@ -44,7 +44,7 @@ nonisolated struct Flight: Equatable, Sendable {
 nonisolated struct Callout: Equatable, Sendable {
     let point: CGPoint
     let label: String
-    /// The thing's bounds, when Claude named a box and not a single pixel.
+    /// The thing's bounds in AppKit global space. Nil when Claude named a single pixel.
     let bounds: CGRect?
 }
 
