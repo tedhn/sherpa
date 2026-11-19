@@ -49,6 +49,7 @@ final class Transcriber {
         var archive: Supabase.Project? = nil
         var screenshots: (@Sendable () async throws -> [Screenshot])? = nil
         var claude: Claude.Endpoint? = nil
+        var forgetAfter = Claude.History.idle
 
         static var current: Configuration {
             func planted(_ name: String) -> String? {
@@ -109,7 +110,7 @@ final class Transcriber {
         self.configuration = configuration
         self.urlSession = urlSession
         archive = configuration.archive.map { Archive(project: $0, urlSession: urlSession) }
-        conversation = configuration.claude.map { Conversation(endpoint: $0, urlSession: urlSession) }
+        conversation = configuration.claude.map { Conversation(endpoint: $0, urlSession: urlSession, forgetAfter: configuration.forgetAfter) }
         tokens = Tokens(key: configuration.key, url: configuration.endpoints.token, urlSession: urlSession)
         dictation = Dictation(limits: configuration.limits)
     }

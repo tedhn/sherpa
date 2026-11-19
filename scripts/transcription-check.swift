@@ -63,6 +63,11 @@ enum SentBlock: Equatable {
     case other(String)
 }
 
+struct SentTurn: Equatable {
+    let role: String
+    let blocks: [SentBlock]
+}
+
 struct Held {
     let transcription: Transcription
     let fed: Data
@@ -158,7 +163,8 @@ final class Bench {
             }
         }
         let transcriber = Transcriber(configuration: .init(
-            key: scenario.key, endpoints: endpoints, limits: limits, screenshots: scenario.screenshots, claude: endpoint
+            key: scenario.key, endpoints: endpoints, limits: limits, screenshots: scenario.screenshots, claude: endpoint,
+            forgetAfter: scenario.forgetAfter
         ))
         return Bench(name: scenario.name, tail: tail, transcriber: transcriber, server: server, files: (mode, capture, output), claude: claude)
     }
@@ -286,21 +292,25 @@ final class Bench {
         claude?.server.terminate()
     }
 
-    var requestBlocks: [[SentBlock]] {
+    var sentTurns: [[SentTurn]] {
         guard let requests = claude?.requests else { return [] }
         let names = (try? FileManager.default.contentsOfDirectory(atPath: requests.path)) ?? []
         return names.compactMap { Int($0.dropLast(".json".count)) }.sorted().compactMap { number in
             let body = try? Data(contentsOf: requests.appending(path: "\(number).json"))
             let messages = body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["messages"] as? [[String: Any]]
-            return (messages?.last?["content"] as? [[String: Any]])?.map { block in
-                switch block["type"] as? String {
-                case "text": .text(block["text"] as? String ?? "")
-                case "image": .image
-                case let type: .other(type ?? "none")
-                }
+            return messages?.map { message in
+                SentTurn(role: message["role"] as? String ?? "none", blocks: (message["content"] as? [[String: Any]] ?? []).map { block in
+                    switch block["type"] as? String {
+                    case "text": .text(block["text"] as? String ?? "")
+                    case "image": .image
+                    case let type: .other(type ?? "none")
+                    }
+                })
             }
         }
     }
+
+    var requestBlocks: [[SentBlock]] { sentTurns.compactMap { $0.last?.blocks } }
 
     private(set) var partials: [String] = []
 
@@ -344,6 +354,7 @@ struct Scenario {
     var claude = false
     var claudeMode = "ok"
     var claudeKey: String? = "fake"
+    var forgetAfter = Claude.History.idle
     let run: (Bench) async -> Void
 }
 
@@ -382,6 +393,7 @@ enum TranscriptionCheck {
         Scenario(name: "expired-once", mode: "expired-once", run: expiredOnce),
         Scenario(name: "no-termination", mode: "no-termination", run: noTermination),
         Scenario(name: "screenshot", screenshots: capturing(), claude: true, run: screenshot),
+        Scenario(name: "follow-up", screenshots: capturing(), claude: true, forgetAfter: .seconds(6), run: followUp),
         Scenario(name: "screenshot-merge", screenshots: capturing(displaysPerCall: [1, 2]), claude: true, run: screenshotMerge),
         Scenario(name: "screenshot-slow", screenshots: capturing(delay: .seconds(3)), claude: true, run: screenshotSlow),
         Scenario(name: "screenshot-denied", screenshots: capturing(failing: .noAccess), claude: true, run: screenshotDenied),
@@ -485,6 +497,43 @@ enum TranscriptionCheck {
         expect(handoff < asking, "screenshot: Claude was asked after the screenshots were handed over, at lines \(handoff) and \(asking)")
         expect(bench.lines("claude answered ").count == 1 && bench.lines("claude answered ")[0].hasPrefix("claude answered utterance=1 first="), "screenshot: the answer was logged once")
         expect(!bench.lines.contains { $0.contains("Answer to") }, "screenshot: the answer text is not logged")
+    }
+
+    static func followUp(_ bench: Bench) async {
+        await bench.warm()
+        var questions: [String] = []
+        var answers: [String] = []
+        for index in 0..<3 {
+            if index == 2 { try? await Task.sleep(for: .seconds(6)) }
+            let held = await bench.hold(tone(index, seconds: 1))
+            guard case .heard(let spoken) = await bench.outcome(held).final, case .answered(let text)? = await bench.reply(of: held.transcription) else {
+                expect(false, "follow-up: utterance \(index + 1) was heard and answered, got \(String(describing: held.transcription.reply))")
+                return
+            }
+            questions.append(spoken)
+            answers.append(text)
+        }
+        let note = SentBlock.text("[You were shown 1 screenshot with this question and answered from it. It has been removed from the history to save space.]")
+        let screens: [SentBlock] = [.text("Screen 1 of 1. The cursor is not on this screen. This image is 2x2 pixels."), .image]
+        let sent = bench.sentTurns
+        expect(sent.count == 3, "follow-up: three requests reached Claude, got \(sent.count)")
+        guard sent.count == 3 else { return }
+        expect(sent[0] == [SentTurn(role: "user", blocks: screens + [.text(questions[0])])], "follow-up: request 1 is the current turn alone, got \(sent[0])")
+        expect(
+            sent[1] == [
+                SentTurn(role: "user", blocks: [note, .text(questions[0])]),
+                SentTurn(role: "assistant", blocks: [.text(answers[0])]),
+                SentTurn(role: "user", blocks: screens + [.text(questions[1])]),
+            ],
+            "follow-up: request 2 carries utterance 1 as the note and words, then the whole answer, then the current turn, got \(sent[1])"
+        )
+        expect(sent[2] == [SentTurn(role: "user", blocks: screens + [.text(questions[2])])], "follow-up: request 3 forgot everything after the idle gap, got \(sent[2])")
+        await bench.sync()
+        let asking = bench.lines("claude asking ")
+        expect(
+            asking.map { $0.split(separator: " ").last.map(String.init) ?? "" } == ["history=0", "history=1", "history=0"],
+            "follow-up: the asking lines end in history=0, 1, 0, got \(asking)"
+        )
     }
 
     static func screenshotMerge(_ bench: Bench) async {

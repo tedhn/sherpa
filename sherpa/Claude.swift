@@ -21,6 +21,35 @@ nonisolated enum Claude {
         let text: String
     }
 
+    struct Exchange: Equatable, Sendable {
+        let question: String
+        let screens: Int
+        let answer: String
+    }
+
+    struct History: Equatable, Sendable {
+        static let kept = 10
+        static let idle: Duration = .seconds(30 * 60)
+
+        let forgetAfter: Duration
+        private(set) var exchanges: [Exchange] = []
+        private var last: ContinuousClock.Instant?
+
+        init(forgetAfter: Duration = idle) {
+            self.forgetAfter = forgetAfter
+        }
+
+        func recalled(at now: ContinuousClock.Instant) -> [Exchange] {
+            guard let last, last.duration(to: now) < forgetAfter else { return [] }
+            return exchanges
+        }
+
+        mutating func remember(_ exchange: Exchange, at now: ContinuousClock.Instant) {
+            exchanges = Array((recalled(at: now) + [exchange]).suffix(Self.kept))
+            last = now
+        }
+    }
+
     enum Reply: Equatable, Sendable {
         case asking
         case answering(String)
@@ -48,20 +77,34 @@ nonisolated enum Claude {
         }
     }
 
-    static func request(_ question: Question, to endpoint: Endpoint) throws(Failure) -> URLRequest {
+    static func request(_ question: Question, after history: [Exchange], to endpoint: Endpoint) throws(Failure) -> URLRequest {
         guard let key = endpoint.key, !key.isEmpty else { throw .noAPIKey }
+        var messages: [[String: Any]] = []
+        for exchange in history {
+            var turn: [[String: Any]] = []
+            switch exchange.screens {
+            case 0: break
+            case 1: turn.append(["type": "text", "text": "[You were shown 1 screenshot with this question and answered from it. It has been removed from the history to save space.]"])
+            default: turn.append(["type": "text", "text": "[You were shown \(exchange.screens) screenshots with this question and answered from them. They have been removed from the history to save space.]"])
+            }
+            turn.append(["type": "text", "text": exchange.question])
+            messages.append(["role": "user", "content": turn])
+            messages.append(["role": "assistant", "content": [["type": "text", "text": exchange.answer]]])
+        }
         var content: [[String: Any]] = []
         for image in question.images {
             content.append(["type": "text", "text": image.label])
             content.append(["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": image.jpeg.base64EncodedString()]])
         }
         content.append(["type": "text", "text": question.text])
+        messages.append(["role": "user", "content": content])
         let body: [String: Any] = [
             "model": model,
             "max_tokens": maxTokens,
             "output_config": ["effort": effort],
-            "messages": [["role": "user", "content": content]],
+            "messages": messages,
             "stream": true,
+            "system": system,
         ]
         var request = URLRequest(url: endpoint.url)
         request.httpMethod = "POST"
@@ -121,6 +164,7 @@ nonisolated enum Claude {
     private static let version = "2026-10-21"
     private static let effort = "low"
     private static let maxTokens = 16000
+    private static let system = "Each question comes with fresh screenshots of the user's screens. Earlier questions also came with screenshots, which you saw and answered from, but they are removed from the history to save space. Your earlier answers are accurate descriptions of what was on screen then. Don't retract them because the old images are missing."
 
     private struct WireError: Decodable {
         struct Detail: Decodable {
@@ -158,18 +202,21 @@ nonisolated extension Claude.Question {
 final class Conversation {
     private let endpoint: Claude.Endpoint
     private let urlSession: URLSession
+    private var history: Claude.History
 
-    init(endpoint: Claude.Endpoint, urlSession: URLSession) {
+    init(endpoint: Claude.Endpoint, urlSession: URLSession, forgetAfter: Duration = Claude.History.idle) {
         self.endpoint = endpoint
         self.urlSession = urlSession
+        history = Claude.History(forgetAfter: forgetAfter)
     }
 
     func answer(_ question: Claude.Question, utterance: Int, writing: (String) -> Void) async throws(Claude.Failure) -> String {
         let started = ContinuousClock.now
         let elapsed = { Int((started.duration(to: .now) / .milliseconds(1)).rounded()) }
         do throws(Claude.Failure) {
-            let request = try Claude.request(question, to: endpoint)
-            logger.notice("claude asking utterance=\(utterance) images=\(question.images.count) bytes=\(request.httpBody?.count ?? 0)")
+            let recalled = history.recalled(at: .now)
+            let request = try Claude.request(question, after: recalled, to: endpoint)
+            logger.notice("claude asking utterance=\(utterance) images=\(question.images.count) bytes=\(request.httpBody?.count ?? 0) history=\(recalled.count)")
             var reading = Claude.Answer()
             var written = ""
             var updates = 0
@@ -197,6 +244,7 @@ final class Conversation {
                 throw .transport(error.localizedDescription)
             }
             let text = try reading.finished()
+            history.remember(Claude.Exchange(question: question.text, screens: question.images.count, answer: text), at: .now)
             logger.notice("claude answered utterance=\(utterance) first=\(first) ms=\(elapsed()) chars=\(text.count) updates=\(updates)")
             return text
         } catch {
