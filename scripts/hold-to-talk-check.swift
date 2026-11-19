@@ -13,6 +13,7 @@ let archivePath = arguments.dropFirst(4).first.flatMap { $0.isEmpty ? nil : $0 }
 let requestsPath = arguments.dropFirst(5).first.flatMap { $0.isEmpty ? nil : $0 }
 let claudeScenarioPath = arguments.dropFirst(6).first.flatMap { $0.isEmpty ? nil : $0 }
 let voiceRequestsPath = arguments.dropFirst(7).first.flatMap { $0.isEmpty ? nil : $0 }
+let voiceScenarioPath = arguments.dropFirst(8).first.flatMap { $0.isEmpty ? nil : $0 }
 
 var failures = 0
 
@@ -370,6 +371,11 @@ func useScenario(_ name: String) {
 func useClaudeScenario(_ name: String) {
     guard let claudeScenarioPath else { return }
     try? Data("\(name)\n".utf8).write(to: URL(fileURLWithPath: claudeScenarioPath))
+}
+
+func useVoiceScenario(_ name: String) {
+    guard let voiceScenarioPath else { return }
+    try? Data("\(name)\n".utf8).write(to: URL(fileURLWithPath: voiceScenarioPath))
 }
 
 func requestNumbers() -> [Int] {
@@ -957,6 +963,7 @@ func newUtterance() {
     guard capturePath != nil else { return }
     let label = "press again 1.5 s after the release"
     let logged = tail.count
+    let requestsBefore = requestNumbers().count
     _ = talk(for: 3)
     wait(1.5)
     press()
@@ -989,6 +996,113 @@ func newUtterance() {
         print("  ok   \(label): two utterances, \(first.utterance) then \(second.utterance), on session \(first.session)")
     } else {
         fail("\(label): expected utterance \(first.utterance + 1) on session \(first.session), got \(second.utterance) on \(second.session)")
+    }
+    guard let requestsPath else { return }
+    guard let secondPress = lines.indices.filter({ lines[$0].hasPrefix("hold began") }).dropFirst().first, secondPress < firstAt else {
+        fail("""
+            \(label): utterance \(first.utterance) was delivered before the second press, expected after it, so this run cannot show \
+            a superseded answer, the log order was \(lines.filter { $0.hasPrefix("hold began") || $0.hasPrefix("transcription delivered ") })
+            """)
+        return
+    }
+    print("  ok   \(label): utterance \(first.utterance) was delivered after the second press")
+    let after = tail.lines(after: logged)
+    let superseded = "transcription superseded utterance=\(first.utterance) by=\(second.utterance)"
+    if after.contains(superseded) {
+        print("  ok   \(label): the app logged '\(superseded)'")
+    } else {
+        fail("\(label): expected '\(superseded)', got \(after.filter { $0.hasPrefix("transcription superseded") })")
+    }
+    let asking = "claude asking utterance=\(first.utterance) "
+    if after.contains(where: { $0.hasPrefix(asking) }) {
+        fail("\(label): the app logged '\(asking.dropLast())', expected no request for the superseded utterance")
+    } else {
+        print("  ok   \(label): no '\(asking.dropLast())' line")
+    }
+    _ = wait(upTo: 3) { requestNumbers().count > requestsBefore }
+    let asked = requestNumbers().dropFirst(requestsBefore).map { number in
+        FileManager.default.contents(atPath: URL(fileURLWithPath: requestsPath).appending(path: "\(number).json").path)
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            .flatMap { ($0["messages"] as? [[String: Any]])?.last?["content"] as? [[String: Any]] }
+            .flatMap { $0.last?["text"] as? String } ?? ""
+    }
+    if asked == [second.text] {
+        print("  ok   \(label): one Claude request arrived, asking '\(second.text)'")
+    } else {
+        fail("\(label): expected one Claude request whose last text block is '\(second.text)', got \(asked)")
+    }
+}
+
+func cutOff() {
+    guard capturePath != nil, requestsPath != nil, claudeScenarioPath != nil, voiceRequestsPath != nil, voiceScenarioPath != nil else { return }
+    let writing = "press while Claude writes"
+    let speaking = "press while the voice speaks"
+    let restarted = "answer after a stop"
+    useClaudeScenario("slow")
+    defer {
+        useClaudeScenario("ok")
+        useVoiceScenario("ok")
+    }
+    let logged = tail.count
+    _ = talk(for: 3)
+    guard wait(upTo: 8, until: { reply().hasPrefix("Answer to:") }), let first = deliveries(in: tail.lines(after: logged)).first else {
+        fail("\(writing): 8 s after the release the reply read '\(reply().prefix(80))', expected the slow answer to begin 'Answer to:'")
+        return
+    }
+    let written = tail.count
+    press()
+    let claudeStopped = "claude stopped utterance=\(first.utterance) "
+    if wait(upTo: 1, until: { tail.lines(after: written).contains { $0.hasPrefix(claudeStopped) } }) {
+        print("  ok   \(writing): within 1 s of the press the app logged '\(claudeStopped.dropLast())'")
+    } else {
+        fail("\(writing): expected '\(claudeStopped.dropLast())' within 1 s of the press, the claude lines were \(tail.lines(after: logged).filter { $0.hasPrefix("claude ") })")
+    }
+    wait(2)
+    let answered = tail.lines(after: logged).filter { $0.hasPrefix("claude answered utterance=\(first.utterance) ") }
+    let spokenCut = voiceRequests().filter { $0.text.hasPrefix("Answer to: \(first.text)\n\n") }
+    if answered.isEmpty, spokenCut.isEmpty {
+        print("  ok   \(writing): 2 s later utterance \(first.utterance) had no 'claude answered' line and the fake voice had no request for it")
+    } else {
+        fail("\(writing): expected no answer and no speech for utterance \(first.utterance), got \(answered) and \(spokenCut.count) voice request(s)")
+    }
+
+    useClaudeScenario("ok")
+    useVoiceScenario("long")
+    release()
+    let asking = "voice asking utterance=\(first.utterance + 1) "
+    guard wait(upTo: 10, until: { tail.lines(after: written).contains { $0.hasPrefix(asking) } }) else {
+        fail("\(speaking): expected '\(asking.dropLast())' within 10 s of the release, the voice lines were \(tail.lines(after: written).filter { $0.hasPrefix("voice ") })")
+        return
+    }
+    wait(1)
+    let spoken = tail.count
+    press()
+    let voiceStopped = "voice stopped utterance=\(first.utterance + 1) "
+    _ = wait(upTo: 1) { tail.lines(after: spoken).contains { $0.hasPrefix(voiceStopped) } }
+    if let line = tail.lines(after: spoken).first(where: { $0.hasPrefix(voiceStopped) }),
+       let played = fields(of: line)["played"], let audio = fields(of: line)["audio"], played < 3, audio > played {
+        print("  ok   \(speaking): within 1 s of the press the app logged '\(line)'")
+    } else {
+        fail("""
+            \(speaking): expected '\(voiceStopped)' within 1 s of the press with played under 3 s and less than had arrived, \
+            the voice lines were \(tail.lines(after: spoken).filter { $0.hasPrefix("voice ") })
+            """)
+    }
+
+    useVoiceScenario("ok")
+    wait(1.5)
+    release()
+    let spoke = "voice spoke utterance=\(first.utterance + 2) "
+    if wait(upTo: 10, until: { tail.lines(after: spoken).contains { $0.hasPrefix(spoke) } }) {
+        print("  ok   \(restarted): the app logged '\(spoke.dropLast())', so the voice plays again after a stop")
+    } else {
+        fail("\(restarted): expected '\(spoke.dropLast())' within 10 s of the release, the voice lines were \(tail.lines(after: spoken).filter { $0.hasPrefix("voice ") })")
+    }
+    let spokeCut = "voice spoke utterance=\(first.utterance + 1) "
+    if tail.lines(after: written).contains(where: { $0.hasPrefix(spokeCut) }) {
+        fail("\(speaking): the app logged '\(spokeCut.dropLast())', expected the stopped answer never to finish")
+    } else {
+        print("  ok   \(speaking): no '\(spokeCut.dropLast())' line by the end")
     }
 }
 
@@ -1076,6 +1190,8 @@ wait(0.5)
 mergedHolds()
 wait(0.5)
 newUtterance()
+wait(0.5)
+cutOff()
 if let warmed {
     let session = sessionLines(after: holdsBegan)
     if session.isEmpty {

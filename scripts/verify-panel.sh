@@ -157,8 +157,10 @@ echo ok > "$fake_claude_scenario"
 fake_claude_pid=$!
 fake_voice_port="$DERIVED/fake-voice.port"
 fake_voice_requests="$DERIVED/fake-voice-requests"
+fake_voice_scenario="$DERIVED/fake-voice.scenario"
 rm -rf "$fake_voice_port" "$fake_voice_requests"
-"$DERIVED/fake-voice" "$fake_voice_port" "$fake_voice_requests" >/dev/null &
+echo ok > "$fake_voice_scenario"
+"$DERIVED/fake-voice" "$fake_voice_port" "$fake_voice_requests" --scenario-file "$fake_voice_scenario" >/dev/null &
 fake_voice_pid=$!
 trap 'kill "$fake_pid" "$fake_supabase_pid" "$fake_claude_pid" "$fake_voice_pid" 2>/dev/null' EXIT
 deadline=$((SECONDS + 10))
@@ -179,6 +181,7 @@ else
     echo "  FAIL the fake voice never wrote its port"
     failures=$((failures + 1))
     fake_voice_requests=""
+    fake_voice_scenario=""
 fi
 supabase_flags=(-SupabaseURL '')
 if [[ -s "$fake_supabase_port" ]]; then
@@ -254,7 +257,7 @@ else
 fi
 
 echo "hold to talk"
-swift "$(dirname "$0")/hold-to-talk-check.swift" "$app_pid" ${fake_capture:+"$fake_capture" "$fake_scenario" "$idle_seconds" "$fake_archive" "$fake_claude_requests" "$fake_claude_scenario" "$fake_voice_requests"} \
+swift "$(dirname "$0")/hold-to-talk-check.swift" "$app_pid" ${fake_capture:+"$fake_capture" "$fake_scenario" "$idle_seconds" "$fake_archive" "$fake_claude_requests" "$fake_claude_scenario" "$fake_voice_requests" "$fake_voice_scenario"} \
     || failures=$((failures + 1))
 check_focus_kept "focus still behind after using the panel" "$front_before" "$(frontmost)"
 

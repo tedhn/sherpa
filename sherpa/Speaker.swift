@@ -81,7 +81,6 @@ final class Speaker {
     private let urlSession: URLSession
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
-    private var saying: Task<Void, Never>?
 
     init(endpoint: Voice.Endpoint, urlSession: URLSession) {
         self.endpoint = endpoint
@@ -90,13 +89,7 @@ final class Speaker {
         engine.connect(player, to: engine.mainMixerNode, format: Voice.format)
     }
 
-    func say(_ text: String, utterance: Int) {
-        saying?.cancel()
-        player.stop()
-        saying = Task { await speak(text, utterance: utterance) }
-    }
-
-    private func speak(_ text: String, utterance: Int) async {
+    func speak(_ text: String, utterance: Int) async {
         let started = ContinuousClock.now
         let ms = { Int((started.duration(to: .now) / .milliseconds(1)).rounded()) }
         logger.notice("voice asking utterance=\(utterance) chars=\(text.count)")
@@ -141,14 +134,22 @@ final class Speaker {
             if !Task.isCancelled {
                 let failure = (error as? Voice.Failure) ?? .transport(error.localizedDescription)
                 logger.error("voice failed utterance=\(utterance) ms=\(ms()) \(failure.logFields, privacy: .public)")
+                player.stop()
                 engine.stop()
                 return
             }
         }
         if Task.isCancelled {
-            logger.notice("voice replaced utterance=\(utterance)")
+            let played = player.lastRenderTime.flatMap(player.playerTime(forNodeTime:)).map { Double($0.sampleTime) / Double(Voice.sampleRate) } ?? 0
+            player.stop()
+            engine.stop()
+            logger.notice("""
+                voice stopped utterance=\(utterance) ms=\(ms()) played=\(String(format: "%.3f", played), privacy: .public) \
+                audio=\(String(format: "%.3f", Double(bytes) / Double(Voice.bytesPerSecond)), privacy: .public)
+                """)
             return
         }
+        player.stop()
         engine.stop()
         if let first {
             logger.notice("voice spoke utterance=\(utterance) first=\(first) ms=\(ms()) audio=\(String(format: "%.3f", Double(bytes) / Double(Voice.bytesPerSecond)), privacy: .public)")

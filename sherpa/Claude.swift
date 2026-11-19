@@ -265,10 +265,14 @@ final class Conversation {
             logger.notice("claude answered utterance=\(utterance) first=\(first) ms=\(elapsed()) chars=\(text.count) updates=\(updates)")
             return text
         } catch {
-            logger.log(
-                level: error == .noAPIKey ? .default : .error,
-                "claude failed utterance=\(utterance) ms=\(elapsed()) \(error.logFields, privacy: .public)"
-            )
+            if Task.isCancelled {
+                logger.notice("claude stopped utterance=\(utterance) ms=\(elapsed())")
+            } else {
+                logger.log(
+                    level: error == .noAPIKey ? .default : .error,
+                    "claude failed utterance=\(utterance) ms=\(elapsed()) \(error.logFields, privacy: .public)"
+                )
+            }
             throw error
         }
     }

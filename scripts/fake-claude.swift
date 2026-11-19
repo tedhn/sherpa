@@ -2,7 +2,7 @@ import Foundation
 import Network
 
 enum Scenario: String {
-    case ok, unauthorized = "401", rateLimited = "429", refusal, overloaded
+    case ok, slow, unauthorized = "401", rateLimited = "429", refusal, overloaded
 }
 
 var positional: [String] = []
@@ -49,7 +49,7 @@ func errorBody(_ type: String, _ message: String) -> Data {
 
 enum Response {
     case whole(status: String, body: Data)
-    case stream(head: [Data], chunks: [Data], tail: [Data])
+    case stream(head: [Data], chunks: [Data], tail: [Data], interval: Double = chunkInterval)
 }
 
 func event(_ type: String, _ fields: [String: Any] = [:]) -> Data {
@@ -99,11 +99,11 @@ final class Exchange {
                 case .whole(let status, let body):
                     let head = "HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
                     send([(Data(head.utf8) + body, answerDelay)])
-                case .stream(let head, let chunks, let tail):
+                case .stream(let head, let chunks, let tail, let interval):
                     let first = Data("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n".utf8) + head.reduce(Data(), +)
                     let last = tail.reduce(Data(), +)
-                    send([(first, answerDelay)] + chunks.enumerated().map { ($1, answerDelay + Double($0 + 1) * chunkInterval) }
-                        + [(last, answerDelay + Double(chunks.count + 1) * chunkInterval)])
+                    send([(first, answerDelay)] + chunks.enumerated().map { ($1, answerDelay + Double($0 + 1) * interval) }
+                        + [(last, answerDelay + Double(chunks.count + 1) * interval)])
                 }
             } else if isComplete || error != nil {
                 connection.cancel()
@@ -159,10 +159,13 @@ final class Exchange {
             event("ping"),
         ]
         let head = [start] + thinking + [block]
+        let answer = chunks(of: "Answer to: \(lastText(in: body))\n\n" + paragraphs.joined(separator: "\n\n"))
+        let ended = [event("content_block_stop", ["index": 1])] + messageEnd("end_turn")
         switch scenario() {
         case .ok:
-            let text = "Answer to: \(lastText(in: body))\n\n" + paragraphs.joined(separator: "\n\n")
-            return .stream(head: head, chunks: chunks(of: text), tail: [event("content_block_stop", ["index": 1])] + messageEnd("end_turn"))
+            return .stream(head: head, chunks: answer, tail: ended)
+        case .slow:
+            return .stream(head: head, chunks: answer, tail: ended, interval: 0.5)
         case .unauthorized:
             return .whole(status: "401 Unauthorized", body: errorBody("authentication_error", "invalid x-api-key"))
         case .rateLimited:

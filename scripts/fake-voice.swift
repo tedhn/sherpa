@@ -1,13 +1,32 @@
 import Foundation
 import Network
 
-guard CommandLine.arguments.count == 3 else {
-    FileHandle.standardError.write(Data("usage: fake-voice <port-file> <request-dir>\n".utf8))
+enum Scenario: String {
+    case ok, long
+}
+
+var positional: [String] = []
+var scenarioFile: URL?
+var remaining = CommandLine.arguments.dropFirst()[...]
+while let argument = remaining.popFirst() {
+    if argument == "--scenario-file", let path = remaining.popFirst() {
+        scenarioFile = URL(fileURLWithPath: path)
+    } else {
+        positional.append(argument)
+    }
+}
+guard positional.count == 2 else {
+    FileHandle.standardError.write(Data("usage: fake-voice <port-file> <request-dir> [--scenario-file path]\n".utf8))
     exit(2)
 }
-let portFile = URL(fileURLWithPath: CommandLine.arguments[1])
-let requests = URL(fileURLWithPath: CommandLine.arguments[2])
+let portFile = URL(fileURLWithPath: positional[0])
+let requests = URL(fileURLWithPath: positional[1])
 try FileManager.default.createDirectory(at: requests, withIntermediateDirectories: true)
+
+func scenario() -> Scenario {
+    scenarioFile.flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+        .flatMap { Scenario(rawValue: $0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? .ok
+}
 
 setvbuf(stdout, nil, _IOLBF, 0)
 let queue = DispatchQueue(label: "fake-voice")
@@ -70,7 +89,11 @@ final class Exchange {
         let saving = ["authorization": headers["authorization"] ?? "", "body": fields] as [String: Any]
         try! JSONSerialization.data(withJSONObject: saving, options: [.sortedKeys]).write(to: requests.appending(path: "\(saved).json"))
         print("request \(saved) \(body.count) bytes")
-        return whole("200 OK", Data(count: 24_000), type: "audio/pcm;rate=24000;channels=1")
+        let silence = switch scenario() {
+        case .ok: Data(count: 24_000)
+        case .long: Data(count: 384_000)
+        }
+        return whole("200 OK", silence, type: "audio/pcm;rate=24000;channels=1")
     }
 }
 

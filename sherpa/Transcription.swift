@@ -106,6 +106,7 @@ final class Transcriber {
     private var partials: [Int: [Supabase.Partial]] = [:]
     private var sockets: [Int: Socket] = [:]
     private var screenshots: [Int: Task<[Screenshot]?, Never>] = [:]
+    private var responding: Task<Void, Never>?
     private var alarm: (at: ContinuousClock.Instant, task: Task<Void, Never>)?
     private let archive: Archive?
     private let conversation: Conversation?
@@ -131,6 +132,7 @@ final class Transcriber {
     }
 
     func press(_ speech: SpeechStream, recorded: @escaping @Sendable () -> Data) -> Transcription {
+        responding?.cancel()
         let (press, effects) = dictation.press(at: .now)
         queued[press.hold] = speech
         self.recorded[press.hold] = recorded
@@ -232,14 +234,18 @@ final class Transcriber {
                 ), number: utterance)
             }
             let taken = screenshots.removeValue(forKey: utterance)
-            if case .heard(let text) = final, let record, let conversation {
+            let newer = records.keys.filter { $0 > utterance }.min()
+            if case .heard = final, let newer {
+                logger.notice("transcription superseded utterance=\(utterance) by=\(newer)")
+            }
+            if case .heard(let text) = final, let record, let conversation, newer == nil {
                 record.reply = .asking
-                Task {
+                responding = Task {
                     let question = Claude.Question(text: text, screenshots: await handoff(taken, utterance: utterance))
                     do throws(Claude.Failure) {
                         let answer = try await conversation.answer(question, utterance: utterance) { record.reply = .answering($0) }
                         record.reply = .answered(answer)
-                        speaker?.say(answer, utterance: utterance)
+                        await speaker?.speak(answer, utterance: utterance)
                     } catch {
                         record.reply = .failed(error)
                     }
