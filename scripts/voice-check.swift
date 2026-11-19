@@ -51,6 +51,18 @@ struct Canvas {
         path.stroke()
     }
 
+    static func loop(around box: CGRect) -> [CGPoint] {
+        (0...60).map { i in
+            let a = -0.5 + Double(i) / 60 * 2.15 * .pi
+            let wobble = 1 + 0.04 * sin(Double(i) * 1.7)
+            return CGPoint(x: box.midX + (box.width / 2 + 14) * wobble * cos(a), y: box.midY + (box.height / 2 + 10) * wobble * sin(a))
+        }
+    }
+
+    static func underline(_ x0: CGFloat, _ x1: CGFloat, y: CGFloat) -> [CGPoint] {
+        (0...20).map { i in CGPoint(x: x0 + (x1 - x0) * CGFloat(i) / 20, y: y + 2 * sin(CGFloat(i) * 0.9)) }
+    }
+
     func squiggle(from start: CGFloat, to end: CGFloat, y: CGFloat, _ color: NSColor) {
         color.setStroke()
         let path = NSBezierPath()
@@ -119,7 +131,19 @@ struct Canvas {
 struct Scene {
     let name: String
     var cursor = true
+    var ink = Ink()
     let draw: (Canvas) -> Void
+
+    /// The built-in display the scenes stand for, so ink lands at the 3 px the app draws there.
+    static let display = CGRect(x: 0, y: 0, width: 1710, height: 1112)
+
+    /// Strokes in canvas pixels, drawn by the app's own compositor.
+    func inked(_ strokes: [[CGPoint]]) -> Scene {
+        func global(_ pixel: CGPoint) -> CGPoint {
+            CGPoint(x: pixel.x * Scene.display.width / Canvas.width, y: Scene.display.maxY - pixel.y * Scene.display.height / Canvas.height)
+        }
+        return Scene(name: name + "+ink", cursor: cursor, ink: Ink(strokes.map { Stroke(global($0[0]), $0.dropFirst().map(global)) }), draw: draw)
+    }
 
     var away: Scene {
         var copy = self
@@ -137,7 +161,7 @@ struct Scene {
         draw(Canvas())
         marking(Canvas())
         NSGraphicsContext.restoreGraphicsState()
-        return representation.cgImage!
+        return ink.composited(onto: representation.cgImage!, appKitFrame: Scene.display)
     }
 
     func screenshot(display: CGDirectDisplayID) -> Screenshot {
@@ -576,6 +600,22 @@ extension Case {
         Case(name: "otherMessage", turns: [Turn(
             question: "Where's Priya's message about the slides?", scenes: [.wifiSettings, Scene.chat.away], aim: .at(screen: 2, thirdBubble)
         )]),
+        Case(name: "inkCell", turns: [Turn(
+            question: "What's this number?", scenes: [Scene.spreadsheet.inked([Canvas.loop(around: CGRect(x: 640, y: 228, width: 110, height: 32))])],
+            aim: .at(screen: 1, CGRect(x: 540, y: 224, width: 220, height: 40)), mustMention: [["3,100", "3100", "three thousand one hundred", "thirty-one hundred", "thirty one hundred"]]
+        )]),
+        Case(name: "inkChat", turns: [Turn(
+            question: "What did she say?", scenes: [Scene.chat.inked([Canvas.loop(around: CGRect(x: 24, y: 372, width: 240, height: 50))])],
+            aim: .at(screen: 1, CGRect(x: 10, y: 362, width: 320, height: 70)), mustMention: [["call"]], mustNotMention: ["slides"]
+        )]),
+        Case(name: "inkUnderline", turns: [Turn(
+            question: "What's this for?", scenes: [Scene.wifiSettings.inked([Canvas.underline(246, 362, y: 504)])],
+            aim: .at(screen: 1, CGRect(x: 204, y: 470, width: 242, height: 40)), mustMention: [["screen time"]]
+        )]),
+        Case(name: "inkIrrelevant", turns: [Turn(
+            question: "How many ounces are in a cup?", scenes: [Scene.spreadsheet.inked([Canvas.loop(around: CGRect(x: 640, y: 228, width: 110, height: 32))])],
+            aim: .nothing, mustNotMention: ["circle", "red", "drew", "marked", "spreadsheet", "3,100"]
+        )]),
     ]
 }
 
@@ -860,6 +900,14 @@ enum VoiceCheck {
             && (bare?.redComponent ?? 0) > 0.9 && (bare?.greenComponent ?? 0) > 0.9
         print("  \(drawn ? "ok  " : "FAIL") marked png has a red crosshair at 700,600 and a green box at 990,184")
         if !drawn { mismatches += 1 }
+        let inked = NSBitmapImageRep(cgImage: Scene.spreadsheet.inked([[CGPoint(x: 100, y: 700), CGPoint(x: 300, y: 700)]]).image())
+        let ink = { (x: Int, y: Int) in inked.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) }
+        let line = [ink(200, 699), ink(200, 700)], edges = [ink(200, 698), ink(200, 701)], clear = [ink(200, 696), ink(200, 703)]
+        let isRed = { (colour: NSColor?) in (colour?.redComponent ?? 0) > 0.95 && (colour?.greenComponent ?? 1) < 0.25 }
+        let threePixels = line.allSatisfy(isRed) && edges.allSatisfy { !isRed($0) && ($0?.greenComponent ?? 1) < 0.85 }
+            && clear.allSatisfy { ($0?.greenComponent ?? 0) > 0.85 }
+        print("  \(threePixels ? "ok  " : "FAIL") an inked scene has a 3 px red line from 100,700 to 300,700: rows 699 and 700 red, 698 and 701 half, 696 and 703 clear")
+        if !threePixels { mismatches += 1 }
         for probe in probes {
             let findings = Rule.findings(in: Answered(said: Claude.Said(probe.tagged ? probe.text + " [POINT:none]" : probe.text), turn: probe.turn))
             let got = findings.map(\.rule)
