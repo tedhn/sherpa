@@ -100,7 +100,7 @@ swiftc -parse-as-library -o "$DERIVED/screenshot-check" \
 
 echo "claude"
 swiftc -parse-as-library -o "$DERIVED/claude-check" \
-    sherpa/Screenshot.swift sherpa/Claude.swift scripts/claude-check.swift >/dev/null \
+    sherpa/Screenshot.swift sherpa/Claude.swift sherpa/Companion.swift scripts/claude-check.swift >/dev/null \
     && "$DERIVED/claude-check" || failures=$((failures + 1))
 
 echo "voice"
@@ -140,7 +140,7 @@ swiftc -o "$DERIVED/fake-assemblyai" scripts/fake-assemblyai.swift >/dev/null \
     && swiftc -o "$DERIVED/fake-claude" scripts/fake-claude.swift >/dev/null \
     && swiftc -o "$DERIVED/fake-voice" scripts/fake-voice.swift >/dev/null \
     && swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/transcription-check" \
-        sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Supabase.swift sherpa/Screenshot.swift sherpa/Claude.swift sherpa/Speaker.swift sherpa/Transcription.swift \
+        sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Supabase.swift sherpa/Screenshot.swift sherpa/Claude.swift sherpa/Speaker.swift sherpa/Transcription.swift sherpa/Companion.swift \
         scripts/transcription-check.swift >/dev/null \
     && "$DERIVED/transcription-check" "$DERIVED/fake-assemblyai" || failures=$((failures + 1))
 

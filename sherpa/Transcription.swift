@@ -21,7 +21,7 @@ final class Transcription {
     /// Only this record's own answer task writes it, so a cut-off answer that
     /// winds down late can't clear a newer record's flag.
     fileprivate(set) var speaking = false
-    fileprivate(set) var pointing: CGPoint?
+    fileprivate(set) var pointing: Callout?
 
     var delivered: AssemblyAI.Final {
         get async {
@@ -251,9 +251,9 @@ final class Transcriber {
                     let question = Claude.Question(text: text, screenshots: shots)
                     do throws(Claude.Failure) {
                         let said = try await conversation.answer(question, utterance: utterance) { record.reply = .answering($0) }
-                        record.pointing = said.target?.appKitPoint(on: shots)
+                        record.pointing = said.target?.callout(on: shots)
                         if let target = said.target, case .point = target {
-                            let at = record.pointing.map { String(format: "%.1f,%.1f", $0.x, $0.y) } ?? "noScreen"
+                            let at = record.pointing.map { String(format: "%.1f,%.1f", $0.point.x, $0.point.y) } ?? "noScreen"
                             logger.notice("transcription pointing utterance=\(utterance) target=\(target.logField, privacy: .public) at=\(at, privacy: .public)")
                         }
                         record.speaking = speaker != nil

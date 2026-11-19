@@ -41,6 +41,49 @@ nonisolated struct Flight: Equatable, Sendable {
     }
 }
 
+nonisolated struct Callout: Equatable, Sendable {
+    let point: CGPoint
+    let label: String
+}
+
+nonisolated struct Bubble: Equatable, Sendable {
+    enum Side: String, Sendable { case right, left }
+
+    let label: String
+    let side: Side
+    let frame: CGRect
+    let appeared: Date
+
+    static var font: NSFont { .systemFont(ofSize: 11, weight: .medium) }
+    static let padding = CGSize(width: 8, height: 4)
+    static let maxWidth: CGFloat = 240
+    private static let gap: CGFloat = 10
+    private static let drop: CGFloat = 18
+
+    init(label: String, beside glyph: CGPoint, on screens: [CGRect], appeared: Date) {
+        let text = (label as NSString).size(withAttributes: [.font: Self.font])
+        let size = CGSize(width: min(ceil(text.width) + 2 * Self.padding.width, Self.maxWidth),
+                          height: ceil(text.height) + 2 * Self.padding.height)
+        let screen = screens.first { NSMouseInRect(glyph, $0, false) }
+        side = glyph.x + Self.gap + size.width <= (screen?.maxX ?? .infinity) - Companion.margin ? .right : .left
+        var y = glyph.y - Self.drop - size.height / 2
+        if let screen { y = min(max(y, screen.minY + Companion.margin), screen.maxY - Companion.margin - size.height) }
+        frame = CGRect(origin: CGPoint(x: side == .right ? glyph.x + Self.gap : glyph.x - Self.gap - size.width, y: y), size: size)
+        self.label = label
+        self.appeared = appeared
+    }
+
+    static func reveal(_ index: Int) -> Duration {
+        .milliseconds((0..<index).reduce(0) { $0 + 30 + (17 * $1) % 31 })
+    }
+
+    func revealed(after elapsed: Duration) -> Int {
+        (0..<label.count).prefix { Self.reveal($0) <= elapsed }.count
+    }
+
+    var typing: Duration { Self.reveal(max(label.count - 1, 0)) }
+}
+
 nonisolated extension Angle {
     init(clockwiseFromUpTo direction: CGVector) {
         self = .radians(atan2(direction.dx, direction.dy))
@@ -57,26 +100,47 @@ final class Companion {
 
     /// From the pointer's hotspot to the glyph's centre: right and below, in AppKit y-up terms.
     static let offset = CGVector(dx: 35, dy: -25)
-    static let margin: CGFloat = 12
+    nonisolated static let margin: CGFloat = 12
     /// The apex is drawn pointing up. Turn it to face back along the offset, at the hotspot:
     /// local offset is (35, 25) down-right, so the hotspot lies at atan2(-35, 25), about -54 degrees.
     static let restingHeading = Angle(clockwiseFromUpTo: CGVector(dx: -offset.dx, dy: -offset.dy))
     private static let follow = Animation.spring(response: 0.2, dampingFraction: 0.6)
+    private static let pop = Animation.spring(response: 0.4, dampingFraction: 0.6)
+    private static let fade = Animation.easeOut(duration: 0.3)
+    private static let deadZone: CGFloat = 24
 
     /// True once the pointer has sat still for `restAfter`, five minutes outside tests; the glyph
     /// fades out until the next activity.
     private(set) var resting = false
 
-    private enum Motion {
-        case following
-        case flying(Flight, started: ContinuousClock.Instant, timer: Timer)
-        case pointing
+    private struct Leg {
+        let flight: Flight
+        let started: ContinuousClock.Instant
+        let timer: Timer
     }
 
-    @ObservationIgnored private var motion = Motion.following {
-        didSet { if case .flying(_, _, let timer) = oldValue { timer.invalidate() } }
+    private enum Motion {
+        case following
+        case outbound(Leg, Callout)
+        case pausing(Bubble, releasable: ContinuousClock.Instant, deadline: Task<Void, Never>)
+        case returning(Leg, anchor: CGPoint)
     }
-    @ObservationIgnored private var target: CGPoint?
+
+    private var motion = Motion.following {
+        didSet {
+            switch oldValue {
+            case .outbound(let leg, _), .returning(let leg, _): leg.timer.invalidate()
+            case .pausing(_, _, let deadline): deadline.cancel()
+            case .following: break
+            }
+        }
+    }
+    @ObservationIgnored private var callout: Callout?
+    let hold: Duration
+
+    var bubble: Bubble? {
+        if case .pausing(let bubble, _, _) = motion { bubble } else { nil }
+    }
 
     // A mouse tap needs the Accessibility grant (an ungranted app gets a non-nil tap that reads
     // tapIsEnabled false), so the companion polls until the grant.
@@ -95,7 +159,8 @@ final class Companion {
     @ObservationIgnored private var restWatch: Task<Void, Never>?
     let restAfter: Duration
 
-    init() {
+    init(hold: Duration = .seconds(3)) {
+        self.hold = hold
         var restAfter = Duration.seconds(300)
         #if DEBUG
         if let seconds = UserDefaults.standard.string(forKey: "CompanionRestSeconds").flatMap(Double.init) {
@@ -148,6 +213,14 @@ final class Companion {
     }
 
     func followPointer() {
+        if case .returning(_, let anchor) = motion {
+            let pointer = NSEvent.mouseLocation
+            let moved = hypot(pointer.x - anchor.x, pointer.y - anchor.y)
+            guard moved > Self.deadZone else { return }
+            withAnimation(.easeOut(duration: 0.2)) { heading = Self.resting(nearest: heading) }
+            logger.notice("companion cancelled at=\(Self.field(self.position), privacy: .public) moved=\(Int(moved.rounded()))")
+            return follow()
+        }
         guard case .following = motion else { return }
         let next = Self.position(following: NSEvent.mouseLocation, on: NSScreen.screens.map(\.frame))
         if next == position { return }
@@ -155,47 +228,72 @@ final class Companion {
         wake()
     }
 
-    func point(at target: CGPoint?) {
-        if target == self.target { return }
-        self.target = target
-        if let target {
-            fly(to: Self.position(following: target, on: NSScreen.screens.map(\.frame)))
-        } else if case .pointing = motion {
-            follow()
-        }
+    func point(at callout: Callout?) {
+        if callout == self.callout { return }
+        self.callout = callout
+        guard let callout else { return releaseIfDue() }
+        let flight = Flight(from: position, to: Self.position(following: callout.point, on: NSScreen.screens.map(\.frame)))
+        wake()
+        guard let leg = takeOff(flight) else { return land(flight, at: callout) }
+        withAnimation(Self.fade) { motion = .outbound(leg, callout) }
+        logger.notice("""
+            companion flying from=\(Self.field(flight.from), privacy: .public) to=\(Self.field(flight.to), privacy: .public) \
+            ms=\(Self.milliseconds(flight.duration))
+            """)
     }
 
-    private func fly(to destination: CGPoint) {
-        let flight = Flight(from: position, to: destination)
-        wake()
-        if hypot(destination.x - position.x, destination.y - position.y) < 1 {
-            land(flight)
-            return
-        }
+    private func releaseIfDue() {
+        guard case .pausing(let bubble, let releasable, _) = motion, callout == nil, ContinuousClock.now >= releasable else { return }
+        let pointer = NSEvent.mouseLocation
+        let flight = Flight(from: position, to: Self.position(following: pointer, on: NSScreen.screens.map(\.frame)))
+        logger.notice("""
+            companion returning from=\(Self.field(flight.from), privacy: .public) to=\(Self.field(flight.to), privacy: .public) \
+            ms=\(Self.milliseconds(flight.duration)) paused=\(Int((Date.now.timeIntervalSince(bubble.appeared) * 1000).rounded()))
+            """)
+        guard let leg = takeOff(flight) else { return withAnimation(Self.fade) { land(flight, at: nil) } }
+        withAnimation(Self.fade) { motion = .returning(leg, anchor: pointer) }
+    }
+
+    private func takeOff(_ flight: Flight) -> Leg? {
+        if hypot(flight.to.x - flight.from.x, flight.to.y - flight.from.y) < 1 { return nil }
         let timer = Timer(timeInterval: 1.0 / 120, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
         RunLoop.main.add(timer, forMode: .common)
-        motion = .flying(flight, started: .now, timer: timer)
-        logger.notice("""
-            companion flying from=\(Self.field(flight.from), privacy: .public) to=\(Self.field(flight.to), privacy: .public) \
-            ms=\(Int((flight.duration / .milliseconds(1)).rounded()))
-            """)
+        return Leg(flight: flight, started: .now, timer: timer)
     }
 
     private func tick() {
-        guard case .flying(let flight, let started, _) = motion else { return }
-        let elapsed = started.duration(to: .now)
-        position = flight.position(after: elapsed)
-        heading = flight.heading(after: elapsed)
-        if elapsed >= flight.duration { land(flight) }
+        let (leg, callout): (Leg, Callout?)
+        switch motion {
+        case .outbound(let outbound, let to): (leg, callout) = (outbound, to)
+        case .returning(let returning, _): (leg, callout) = (returning, nil)
+        case .following, .pausing: return
+        }
+        let elapsed = leg.started.duration(to: .now)
+        position = leg.flight.position(after: elapsed)
+        heading = leg.flight.heading(after: elapsed)
+        if elapsed >= leg.flight.duration { land(leg.flight, at: callout) }
     }
 
-    private func land(_ flight: Flight) {
+    private func land(_ flight: Flight, at callout: Callout?) {
         position = flight.to
         withAnimation(.easeOut(duration: 0.2)) { heading = Self.resting(nearest: heading) }
         logger.notice("companion landed at=\(Self.field(flight.to), privacy: .public)")
-        if target == nil { follow() } else { motion = .pointing }
+        guard let callout else { return follow() }
+        let bubble = Bubble(label: callout.label, beside: flight.to, on: NSScreen.screens.map(\.frame), appeared: .now)
+        let releasable = ContinuousClock.now + bubble.typing + hold
+        let deadline = Task { [weak self] in
+            while ContinuousClock.now < releasable {
+                guard (try? await Task.sleep(until: releasable, clock: .continuous)) != nil else { return }
+            }
+            self?.releaseIfDue()
+        }
+        withAnimation(Self.pop) { motion = .pausing(bubble, releasable: releasable, deadline: deadline) }
+        logger.notice("""
+            companion pausing chars=\(bubble.label.count) typed=\(Self.milliseconds(bubble.typing)) \
+            side=\(bubble.side.rawValue, privacy: .public) bubble=\(Self.field(bubble.frame), privacy: .public)
+            """)
     }
 
     private static func resting(nearest heading: Angle) -> Angle {
@@ -211,6 +309,14 @@ final class Companion {
 
     private static func field(_ point: CGPoint) -> String {
         String(format: "%.1f,%.1f", point.x, point.y)
+    }
+
+    private static func field(_ rect: CGRect) -> String {
+        String(format: "%.1f,%.1f,%.1f,%.1f", rect.minX, rect.minY, rect.width, rect.height)
+    }
+
+    private static func milliseconds(_ duration: Duration) -> Int {
+        Int((duration / .milliseconds(1)).rounded())
     }
 
     /// Voice activity counts as activity, so a hold wakes a resting companion and the rest time

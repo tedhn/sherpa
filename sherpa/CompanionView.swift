@@ -18,9 +18,21 @@ struct CompanionView: View {
         .animation(.easeInOut(duration: 0.15), value: kind)
         .opacity(companion.resting && voice == .idle ? 0 : 1)
         .position(Companion.local(companion.position, in: screenFrame))
+        .overlay {
+            if let bubble = companion.bubble {
+                let centre = Companion.local(CGPoint(x: bubble.frame.midX, y: bubble.frame.midY), in: screenFrame)
+                let edge = centre.x + (bubble.side == .right ? -1 : 1) * bubble.frame.width / 2
+                // SwiftUI applies the transition to the whole branch, which .position stretches over
+                // the overlay, so the pop's anchor is the glyph-side edge in overlay units.
+                TypingBubble(bubble: bubble)
+                    .position(centre)
+                    .transition(BubblePop(anchor: UnitPoint(x: edge / screenFrame.width, y: centre.y / screenFrame.height)))
+                    .id(bubble.appeared)
+            }
+        }
         .onChange(of: voice) { companion.wake() }
-        .onChange(of: voice == .responding ? state.transcription?.pointing : nil) { _, target in
-            companion.point(at: target)
+        .onChange(of: voice == .responding ? state.transcription?.pointing : nil) { _, callout in
+            companion.point(at: callout)
         }
         // The notched built-in display gives a full-screen window a top safe-area inset.
         // Without this, local y = 0 would sit below the notch, not at the screen's top edge.
