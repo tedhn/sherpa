@@ -918,8 +918,9 @@ enum CompanionCheck {
         expect(colour.count == 4 && zip(colour, [255, 48, 43, 255]).allSatisfy { abs($0 - $1) <= 2 },
                "its middle pixel is the ink red 255,48,43", "\(colour)")
         let dot = drawn(Ink([Stroke(CGPoint(x: -100, y: 350))])).blobs
-        expect(dot.count == 1 && near(dot.first?.centre, CGPoint(x: 100, y: 50), within: 0.5),
-               "a one-point stroke at -100,350 is a dot centred on 100,50", "\(dot.map { "\($0.box)" })")
+        let disk = dot.first?.box ?? .zero
+        expect(dot.count == 1 && near(dot.first?.centre, CGPoint(x: 100, y: 50), within: 0.5) && abs(disk.width - 8) <= 1 && abs(disk.height - 8) <= 1,
+               "a one-point stroke at -100,350 is an 8 pt disk centred on 100,50", "\(dot.map { "\($0.box) centre \(describe($0.centre))" })")
         let away = drawn(Ink([Stroke(CGPoint(x: 500, y: 350), [CGPoint(x: 600, y: 350)])]))
         let opaque = stride(from: 3, to: away.pixels.rgba.count, by: 4).filter { away.pixels.rgba[$0] > 0 }.count
         expect(away.pixels.width == 400 && opaque == 0, "a stroke on another screen draws nothing here", "\(opaque) pixels with alpha")
@@ -1352,19 +1353,12 @@ enum CompanionCheck {
         return p[index + 3] >= 200 && p[index] >= 180 && p[index + 1] <= 90 && p[index + 2] <= 90
     }
 
-    /// JPEG keeps one colour per 2 x 2 block, so a 3 px dot on a block corner keeps its luma but loses
-    /// half its red: on any grey it reads about 163,82,101. A red tint is what survives everywhere.
-    static func isInkInJPEG(_ pixels: Pixels, _ index: Int) -> Bool {
-        let (r, g, b) = (Int(pixels.rgba[index]), Int(pixels.rgba[index + 1]), Int(pixels.rgba[index + 2]))
-        return r >= 140 && r - max(g, b) >= 50
-    }
-
-    /// Whether any pixel in the 3 x 3 around `pixel` passes `test`.
-    static func inked(_ pixels: Pixels, at pixel: CGPoint, by test: (Pixels, Int) -> Bool = isInk) -> Bool {
+    /// Whether any pixel in the 3 x 3 around `pixel` is ink red.
+    static func inked(_ pixels: Pixels, at pixel: CGPoint) -> Bool {
         let (x, y) = (Int(pixel.x), Int(pixel.y))
         return (y - 1...y + 1).contains { row in
             (x - 1...x + 1).contains { column in
-                (0..<pixels.width).contains(column) && (0..<pixels.height).contains(row) && test(pixels, (row * pixels.width + column) * 4)
+                (0..<pixels.width).contains(column) && (0..<pixels.height).contains(row) && isInk(pixels, (row * pixels.width + column) * 4)
             }
         }
     }
@@ -1530,10 +1524,10 @@ enum CompanionCheck {
                 CGPoint(x: (quartz.x - b.minX) * Double(image.width) / b.width, y: (quartz.y - b.minY) * Double(image.height) / b.height)
             }
             for (name, point) in [("the dot", dot), ("the first stroke", at(-72, -40)), ("the second stroke before the release", at(-90, 40))] {
-                expect(inked(pixels, at: pixel(point), by: isInkInJPEG), "Claude's screenshot has \(name) in red",
+                expect(inked(pixels, at: pixel(point)), "Claude's screenshot has \(name) in red",
                        "at pixel \(describe(pixel(point))) of \(image.width)x\(image.height)")
             }
-            expect([at(-24, 40), finalPoint, at(100, -40)].allSatisfy { !inked(pixels, at: pixel($0), by: isInkInJPEG) },
+            expect([at(-24, 40), finalPoint, at(100, -40)].allSatisfy { !inked(pixels, at: pixel($0)) },
                    "and no red past the release or 100 pt beside the strokes")
         } else if companionLog(pid: pid, categories: ["transcription"]).split(separator: "\n")
             .last(where: { $0.contains("transcription delivered ") })?.hasSuffix("text=") ?? false {

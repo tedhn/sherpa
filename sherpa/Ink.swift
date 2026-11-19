@@ -62,24 +62,30 @@ nonisolated struct Ink: Equatable, Sendable {
         }
     }
 
-    /// A one-point stroke is a zero-length segment, which a round cap draws as a dot.
+    /// A one-point stroke is a circle as wide as the line, so stroking it paints a disk twice the
+    /// line's width. A dot one line wide loses half its red to JPEG's 2 x 2 colour blocks.
     func path(in plane: Plane) -> CGPath {
         let path = CGMutablePath()
         for stroke in strokes {
             let points = stroke.points.map(plane.point)
-            path.addLines(between: points.count == 1 ? [points[0], points[0]] : points)
+            if points.count == 1 {
+                let radius = plane.lineWidth / 2
+                path.addEllipse(in: CGRect(x: points[0].x - radius, y: points[0].y - radius, width: 2 * radius, height: 2 * radius))
+            } else {
+                path.addLines(between: points)
+            }
         }
         return path
     }
 
-    /// The strokes that can put a pixel inside `frame`. Their bounds grow by a whole width, which
-    /// covers the 3-unit floor down to 0.375 px per point.
+    /// The strokes that can put a pixel inside `frame`. Their bounds grow by twice the width, which
+    /// covers a dot's disk at the 3-unit floor down to 0.375 px per point.
     func touching(_ frame: CGRect) -> Ink {
         Ink(strokes.filter { stroke in
             let xs = stroke.points.map(\.x)
             let ys = stroke.points.map(\.y)
             let bounds = CGRect(x: xs.min()!, y: ys.min()!, width: xs.max()! - xs.min()!, height: ys.max()! - ys.min()!)
-            return bounds.insetBy(dx: -Ink.width, dy: -Ink.width).intersects(frame)
+            return bounds.insetBy(dx: -2 * Ink.width, dy: -2 * Ink.width).intersects(frame)
         })
     }
 
