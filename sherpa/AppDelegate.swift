@@ -7,9 +7,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Held as a stored property: a local variable would deallocate when this
     // method returns, taking the status item (and its icon) down with it.
     private var menuBar: MenuBarController?
+    private var hotkey: Hotkey?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         menuBar = MenuBarController(state: state)
+        let hotkey = Hotkey(state: state)
+        self.hotkey = hotkey
+        Task { await hotkey.start() }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
