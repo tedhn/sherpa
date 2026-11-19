@@ -250,6 +250,14 @@ enum ClaudeCheck {
         for example in Claude.system.matches(of: #/\[POINT:(?:none|[0-9][^\]]*)\]/#).map({ String($0.output) }) {
             expect(Claude.Said(example).target != nil, "the prompt example \(example) parses")
         }
+        let pointing = Claude.system.matches(of: #/\[POINT:[0-9][^\]]*\]/#).map { Claude.Said(String($0.output)).target }
+        expect(
+            pointing == [
+                .point(.init(x1: 196, y1: 2, x2: 226, y2: 22), label: "File menu", screen: 1),
+                .point(.init(x1: 1212, y1: 72, x2: 1260, y2: 120), label: "profile picture", screen: 2),
+            ],
+            "the prompt's two pointing examples are boxes, got \(pointing)"
+        )
     }
 
     static func checkAnswer() {
