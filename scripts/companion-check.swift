@@ -245,8 +245,8 @@ enum CompanionCheck {
                 await checkPanel(pid: pid)
             } else if arguments.count == 4, arguments[1] == "--flight", let pid = Int32(arguments[2]) {
                 await checkFlight(pid: pid, voiceScenario: arguments[3])
-            } else if arguments.count == 4, arguments[1] == "--ink", let pid = Int32(arguments[2]) {
-                await checkInk(pid: pid, requests: arguments[3])
+            } else if arguments.count == 6, arguments[1] == "--ink", let pid = Int32(arguments[2]), let stale = Double(arguments[5]) {
+                await checkInk(pid: pid, requests: arguments[3], hearing: arguments[4], staleSeconds: stale)
             } else {
                 checkPlacement()
                 checkArc()
@@ -1399,7 +1399,7 @@ enum CompanionCheck {
         return CGImageSourceCreateImageAtIndex(source, 0, nil)
     }
 
-    static func checkInk(pid: Int32, requests: String) async {
+    static func checkInk(pid: Int32, requests: String, hearing: String, staleSeconds: Double) async {
         let saved = CGEvent(source: nil)?.location ?? .zero
         let main = CGMainDisplayID()
         let b = CGDisplayBounds(main)
@@ -1421,6 +1421,8 @@ enum CompanionCheck {
         panel.contentView = victim
         panel.orderFrontRegardless()
         defer { panel.close() }
+        let previousHearing = try? String(contentsOfFile: hearing, encoding: .utf8)
+        func hear(_ mode: String) { try? "\(mode)\n".write(toFile: hearing, atomically: true, encoding: .utf8) }
 
         let primaryHeight = b.height
         let centre = CGPoint(x: b.midX, y: b.midY)
@@ -1443,7 +1445,7 @@ enum CompanionCheck {
             return point
         }
         func inkLines() -> [String] {
-            companionLog(pid: pid, categories: ["ink", "screenshot", "state"]).split(separator: "\n").map(String.init)
+            companionLog(pid: pid, categories: ["ink", "screenshot", "state", "transcription"]).split(separator: "\n").map(String.init)
         }
         func overlayShot() -> (pixels: Pixels, scale: Double)? { capture(overlay) }
         func onOverlay(_ shot: (pixels: Pixels, scale: Double)?, _ quartz: CGPoint) -> Bool {
@@ -1455,6 +1457,8 @@ enum CompanionCheck {
         let dot = at(-150, -80)
         let firstStart = at(-120, -40)
         let secondStart = at(-120, 40)
+        let drawn = [dot, at(-72, -40), at(-90, 40)]
+        hear("silent")
         move(to: at(-160, -100))
         try? await Task.sleep(for: .milliseconds(300))
         let requestsBefore = requestCount(requests)
@@ -1473,11 +1477,7 @@ enum CompanionCheck {
         try? await Task.sleep(until: chordDown + .milliseconds(400), clock: .continuous)
         let listening = await waitForVoice("listening", pid: pid, seconds: 5)
         expect(listening?.contains("voice=listening") ?? false, "the chord became a hold", listening ?? "no state line")
-        let claimed = inkLines().last { $0.contains("ink claimed ") }
-        let utterance = loggedField("utterance", in: listening).map(String.init) ?? "?"
-        expect(claimed?.hasSuffix("ink claimed utterance=\(utterance) strokes=2") ?? false,
-               "the hold claimed the dot and the stroke drawn in the shortcut window for utterance \(utterance)",
-               claimed ?? "no ink claimed line")
+        let drawing = loggedField("utterance", in: listening).map(String.init) ?? "?"
 
         try? await Task.sleep(until: chordDown + .milliseconds(1500), clock: .continuous)
         post(.leftMouseDown, at: secondStart, flags: chorded)
@@ -1493,24 +1493,46 @@ enum CompanionCheck {
         let following = CGPoint(x: sealedAt.x - b.minX + 35, y: sealedAt.y - b.minY + 25)
         expect(near(glyph, following, within: 2), "while drawing, the glyph followed the drags, so they reached it as moves",
                "\(describe(glyph)) vs \(describe(following))")
-        expect(onOverlay(held, dot) && onOverlay(held, at(-72, -40)) && onOverlay(held, at(-90, 40)),
-               "mid-hold the overlay shows the dot, the first stroke and the second stroke so far")
+        expect(drawn.allSatisfy { onOverlay(held, $0) }, "mid-hold the overlay shows the dot, the first stroke and the second stroke so far")
 
         try? await Task.sleep(until: chordDown + .milliseconds(3000), clock: .continuous)
+        let chordUp = ContinuousClock.now
         await chord(down: false)
         let finalPoint = await drag(from: sealedAt, steps: 5, flags: [])
         post(.leftMouseUp, at: finalPoint, flags: [])
         try? await Task.sleep(for: .milliseconds(150))
         expect(activeTaps(pid).isEmpty, "150 ms after the last up the pen's tap is gone", "\(activeTaps(pid).count) active taps")
-        let released = overlayShot()
-        let voice = lastVoice(pid: pid)
-        expect(voice?.contains("voice=processing") ?? false, "that overlay was read while the voice was processing", voice ?? "no state line")
-        expect(onOverlay(released, dot) && onOverlay(released, at(-72, -40)) && onOverlay(released, at(-90, 40)),
-               "while processing the ink is still on the overlay: the dot, the first stroke, the second up to the release")
-        expect(!onOverlay(released, at(-24, 40)) && !onOverlay(released, finalPoint),
-               "drags after the chord went up drew nothing")
         expect(victim.downs == 0 && victim.ups == 0 && victim.drags == 0, "the window under the pen got no down, up or drag",
                "down \(victim.downs) up \(victim.ups) drag \(victim.drags)")
+
+        let quiet = await waitForVoice("idle", pid: pid, seconds: 10)
+        let delivered = inkLines().last { $0.contains("transcription delivered ") && $0.contains(" utterance=\(drawing) ") }
+        expect((quiet?.contains("voice=idle") ?? false) && (delivered?.hasSuffix("text=") ?? false),
+               "the hold that only drew heard no words and went idle", "\(quiet ?? "no state line"); \(delivered ?? "no delivered line")")
+        let sentFirst = inkLines().last { $0.contains("ink sent utterance=\(drawing) ") }
+        let through = loggedField("through", in: sentFirst).map(String.init) ?? "?"
+        expect(sentFirst != nil, "its release sent the ink with utterance \(drawing)", "no ink sent line")
+        try? await Task.sleep(until: chordUp + .milliseconds(2900), clock: .continuous)
+        postModifier(59, down: true, flags: .maskControl)
+        try? await Task.sleep(until: chordUp + .milliseconds(3000), clock: .continuous)
+        let kept = overlayShot()
+        expect(drawn.allSatisfy { onOverlay(kept, $0) }, "3 s after that idle hold the ink is still on the overlay")
+        expect(!onOverlay(kept, at(-24, 40)) && !onOverlay(kept, finalPoint), "drags after the chord went up drew nothing")
+
+        hear("heard")
+        postModifier(58, down: true, flags: chorded)
+        let askDown = ContinuousClock.now
+        try? await Task.sleep(until: askDown + .milliseconds(2500), clock: .continuous)
+        await chord(down: false)
+        try? await Task.sleep(for: .milliseconds(150))
+        let asking = overlayShot()
+        let voice = lastVoice(pid: pid)
+        expect(voice?.contains("voice=processing") ?? false, "that overlay was read while the voice was processing", voice ?? "no state line")
+        expect(drawn.allSatisfy { onOverlay(asking, $0) }, "while the question is processed the ink is still on the overlay")
+        let sentSecond = inkLines().last { $0.contains("ink sent ") }
+        let asked = loggedField("utterance", in: sentSecond).map(String.init) ?? "?"
+        expect(asked != drawing && loggedField("through", in: sentSecond).map(String.init) == through,
+               "the asking hold is a new utterance sent with the same strokes, through=\(through)", sentSecond ?? "no ink sent line")
 
         let deadline = Date().addingTimeInterval(15)
         while requestCount(requests) == requestsBefore, Date() < deadline {
@@ -1520,17 +1542,14 @@ enum CompanionCheck {
             func pixel(_ quartz: CGPoint) -> CGPoint {
                 CGPoint(x: (quartz.x - b.minX) * Double(image.width) / b.width, y: (quartz.y - b.minY) * Double(image.height) / b.height)
             }
-            for (name, point) in [("the dot", dot), ("the first stroke", at(-72, -40)), ("the second stroke before the release", at(-90, 40))] {
+            for (name, point) in zip(["the dot", "the first stroke", "the second stroke before the release"], drawn) {
                 expect(inked(pixels, at: pixel(point)), "Claude's screenshot has \(name) in red",
                        "at pixel \(describe(pixel(point))) of \(image.width)x\(image.height)")
             }
             expect([at(-24, 40), finalPoint, at(100, -40)].allSatisfy { !inked(pixels, at: pixel($0)) },
                    "and no red past the release or 100 pt beside the strokes")
-        } else if companionLog(pid: pid, categories: ["transcription"]).split(separator: "\n")
-            .last(where: { $0.contains("transcription delivered ") })?.hasSuffix("text=") ?? false {
-            print("  skip Claude's screenshot: the hold was heard as silence, so Claude was never asked. With the lid closed the built-in microphone reads zeros.")
         } else {
-            expect(false, "Claude got a request with a screenshot within 15 s of the release", "\(requestCount(requests)) requests, \(requestsBefore) before")
+            expect(false, "Claude got a request with a screenshot within 15 s of the asking release", "\(requestCount(requests)) requests, \(requestsBefore) before")
         }
         let lines = inkLines()
         let strokes = lines.filter { $0.contains("ink stroke ") }.suffix(3).map { line in
@@ -1546,40 +1565,46 @@ enum CompanionCheck {
         expect(labelled?.contains(". The user drew the red marks on this screen to show you what they mean. When they say \"this\", they mean what they marked. This image is ") ?? false,
                "its label tells Claude the user drew the red marks", labelled ?? "no screenshot labelled line")
 
+        let clearedBefore = inkLines().filter { $0.contains("ink cleared ") }.count
         let done = await waitForVoice("idle", pid: pid, seconds: 20)
-        expect(done?.contains("voice=idle") ?? false, "the turn ended in idle", done ?? "no state line")
+        expect(done?.contains("voice=idle") ?? false, "the answer finished and the voice went idle", done ?? "no state line")
         try? await Task.sleep(for: .milliseconds(600))
-        let faded = overlayShot().map { inkCount($0.pixels) }
-        expect(faded == 0, "0.6 s after idle no ink is left on the overlay", "\(faded.map(String.init) ?? "no capture") red pixels")
+        let spent = overlayShot().map { inkCount($0.pixels) }
+        expect(spent == 0, "0.6 s after the answer the ink it was asked with is gone", "\(spent.map(String.init) ?? "no capture") red pixels")
+        expect(inkLines().filter { $0.contains("ink cleared ") }.count == clearedBefore, "the answer spent it, not the stale clear")
 
         let listeningBefore = inkLines().filter { $0.contains("state voice=listening") }.count
-        let droppedBefore = inkLines().filter { $0.contains("ink dropped ") }.count
-        let requestsBeforeShort = requestCount(requests)
-        let shortStart = at(-120, -100)
-        move(to: shortStart)
+        let requestsBeforeQuick = requestCount(requests)
+        let quickStart = at(-120, -100)
+        let quickMiddle = at(-90, -100)
+        move(to: quickStart)
         try? await Task.sleep(for: .milliseconds(300))
         await chord(down: true)
-        let shortDown = ContinuousClock.now
+        let quickDown = ContinuousClock.now
         try? await Task.sleep(for: .milliseconds(50))
-        post(.leftMouseDown, at: shortStart, flags: chorded)
+        post(.leftMouseDown, at: quickStart, flags: chorded)
         try? await Task.sleep(for: .milliseconds(10))
-        let shortEnd = await drag(from: shortStart, steps: 5, flags: chorded)
-        post(.leftMouseUp, at: shortEnd, flags: chorded)
-        try? await Task.sleep(until: shortDown + .milliseconds(200), clock: .continuous)
+        let quickEnd = await drag(from: quickStart, steps: 5, flags: chorded)
+        post(.leftMouseUp, at: quickEnd, flags: chorded)
+        try? await Task.sleep(until: quickDown + .milliseconds(200), clock: .continuous)
+        let quickUp = ContinuousClock.now
         await chord(down: false)
-        try? await Task.sleep(for: .milliseconds(600))
-        let short = overlayShot()
-        expect(short.map { inkCount($0.pixels) } == 0, "a chord released inside the shortcut window leaves no ink on the overlay after 0.6 s",
-               "\(short.map { String(inkCount($0.pixels)) } ?? "no capture") red pixels")
-        expect(activeTaps(pid).isEmpty, "and no active tap", "\(activeTaps(pid).count)")
-        try? await Task.sleep(for: .seconds(1.4))
-        let after = inkLines()
-        expect(after.filter { $0.contains("ink dropped ") }.count == droppedBefore + 1 && after.last { $0.contains("ink dropped ") }?.hasSuffix("strokes=1") == true,
-               "the app dropped that one stroke", after.last { $0.contains("ink dropped ") } ?? "no ink dropped line")
-        expect(after.filter { $0.contains("state voice=listening") }.count == listeningBefore && requestCount(requests) == requestsBeforeShort,
+        try? await Task.sleep(until: quickUp + .seconds(1), clock: .continuous)
+        let quick = overlayShot()
+        expect(onOverlay(quick, quickMiddle) && !drawn.contains { onOverlay(quick, $0) },
+               "a chord let go inside the shortcut window keeps its stroke, and the answered strokes stay gone")
+        expect(activeTaps(pid).isEmpty, "and holds no active tap", "\(activeTaps(pid).count)")
+        expect(inkLines().filter { $0.contains("state voice=listening") }.count == listeningBefore && requestCount(requests) == requestsBeforeQuick,
                "no hold began and Claude was not asked")
         expect(victim.downs == 0 && victim.ups == 0 && victim.drags == 0, "the window under the pen still got nothing",
                "down \(victim.downs) up \(victim.ups) drag \(victim.drags)")
+        try? await Task.sleep(until: quickUp + .seconds(staleSeconds - 0.8), clock: .continuous)
+        expect(onOverlay(overlayShot(), quickMiddle), "0.8 s before the stale time the stroke is still there")
+        try? await Task.sleep(until: quickUp + .seconds(staleSeconds + 1), clock: .continuous)
+        let stale = overlayShot().map { inkCount($0.pixels) }
+        let cleared = inkLines().last { $0.contains("ink cleared ") }
+        expect(stale == 0 && (cleared?.hasSuffix("ink cleared reason=stale strokes=1") ?? false),
+               "1 s after the stale time the unused stroke was cleared", "\(stale.map(String.init) ?? "no capture") red pixels; \(cleared ?? "no ink cleared line")")
 
         let control = at(100, 0)
         move(to: control)
@@ -1590,6 +1615,7 @@ enum CompanionCheck {
         try? await Task.sleep(for: .milliseconds(300))
         expect(victim.downs == 1 && victim.ups == 1, "a plain click on the same window reaches it", "down \(victim.downs) up \(victim.ups)")
 
+        hear(previousHearing?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "ok")
         move(to: saved)
         try? await Task.sleep(for: .milliseconds(300))
     }
