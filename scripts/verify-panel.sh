@@ -124,7 +124,7 @@ app_swift_flags=(
     -enable-upcoming-feature NonisolatedNonsendingByDefault
 )
 swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/hotkey-start-check" \
-    sherpa/Hotkey.swift scripts/hotkey-start-check.swift >/dev/null \
+    sherpa/Hotkey.swift sherpa/Pen.swift scripts/hotkey-start-check.swift >/dev/null \
     && "$DERIVED/hotkey-start-check" || failures=$((failures + 1))
 
 echo "overlay"
