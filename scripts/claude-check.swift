@@ -43,17 +43,16 @@ enum ClaudeCheck {
         let jpeg = Data([0xFF, 0xD8, 0xFF, 0xD9])
         let one = try? Claude.request(Claude.Question(images: [.init(label: "L", jpeg: jpeg)], text: "T"), to: endpoint)
         expect(
-            one.map(body) == #"{"max_tokens":16000,"messages":[{"content":[{"text":"L","type":"text"},{"source":{"data":"/9j/2Q==","media_type":"image/jpeg","type":"base64"},"type":"image"},{"text":"T","type":"text"}],"role":"user"}],"model":"claude-haiku-5-5","output_config":{"effort":"low"}}"#,
+            one.map(body) == #"{"max_tokens":16000,"messages":[{"content":[{"text":"L","type":"text"},{"source":{"data":"/9j/2Q==","media_type":"image/jpeg","type":"base64"},"type":"image"},{"text":"T","type":"text"}],"role":"user"}],"model":"claude-haiku-5-5","output_config":{"effort":"low"},"stream":true}"#,
             "one image renders its label, the image, then the words, got \(one.map(body) ?? "nil")"
         )
         let none = try? Claude.request(Claude.Question(images: [], text: "T"), to: endpoint)
         expect(
-            none.map(body) == #"{"max_tokens":16000,"messages":[{"content":[{"text":"T","type":"text"}],"role":"user"}],"model":"claude-haiku-5-5","output_config":{"effort":"low"}}"#,
+            none.map(body) == #"{"max_tokens":16000,"messages":[{"content":[{"text":"T","type":"text"}],"role":"user"}],"model":"claude-haiku-5-5","output_config":{"effort":"low"},"stream":true}"#,
             "no images leaves only the words, got \(none.map(body) ?? "nil")"
         )
         expect(one?.httpMethod == "POST", "the request is a POST")
         expect(one?.url?.absoluteString == "https://example.test/v1/messages", "the request goes to the endpoint, got \(one?.url?.absoluteString ?? "nil")")
-        expect(one?.timeoutInterval == 120, "a non-streaming reply gets 120 s, got \(one?.timeoutInterval ?? 0)")
         expect(
             one?.allHTTPHeaderFields == [
                 "x-api-key": "k-123", "anthropic-version": "2026-10-21",
@@ -88,55 +87,117 @@ enum ClaudeCheck {
         expect(Claude.Question(text: "hi", screenshots: []).images.isEmpty, "no screenshots means no images")
     }
 
-    static func answer(_ status: Int, _ text: String) -> Result<String, Claude.Failure> {
-        do { return .success(try Claude.answer(status: status, body: Data(text.utf8))) } catch { return .failure(error) }
+    static func failure(_ status: Int, _ text: String) -> Claude.Failure {
+        Claude.failure(status: status, body: Data(text.utf8))
     }
+
+    static func stream(_ lines: [String]) -> Result<String, Claude.Failure> {
+        var reading = Claude.Answer()
+        do {
+            for line in lines { try reading.read(line) }
+            return .success(try reading.finished())
+        } catch { return .failure(error) }
+    }
+
+    static func delta(_ text: String) -> String {
+        #"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"\#(text)"}            }"#
+    }
+
+    static let start = [
+        "event: message_start",
+        #"data: {"type":"message_start","message":{"model":"claude-haiku-5-5","id":"msg_1","type":"message","role":"assistant","content":[],"stop_reason":null}}"#,
+        "",
+        "event: content_block_start",
+        #"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}    }"#,
+        "",
+        "event: ping",
+        #"data: {"type": "ping"}"#,
+        "",
+    ]
+    static let end = [
+        "event: content_block_stop",
+        #"data: {"type":"content_block_stop","index":0       }"#,
+        "",
+        "event: message_delta",
+        #"data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null,"stop_details":null},"usage":{"output_tokens":5}}"#,
+        "",
+        "event: message_stop",
+        #"data: {"type":"message_stop"}"#,
+        "",
+    ]
 
     static func checkAnswer() {
         print("answer")
-        let thinking = #"{"type":"thinking","thinking":""}"#
         expect(
-            answer(200, #"{"content":[\#(thinking),{"type":"text","text":"  It is a desk.\n"}],"stop_reason":"end_turn"}"#) == .success("It is a desk."),
-            "a thinking block is skipped and the text is trimmed"
+            stream(start + [delta("  A menu bar app"), delta(" is a small"), delta(" tool.\\n")] + end) == .success("A menu bar app is a small tool."),
+            "text deltas concatenate and the result is trimmed"
+        )
+        var reading = Claude.Answer()
+        var seen: [String] = []
+        for line in start + ["event: content_block_delta", delta("A menu"), "", delta(" bar app."), "", "data: not json", "data: [DONE]"] + end {
+            try? reading.read(line)
+            if seen.last != reading.shown { seen.append(reading.shown) }
+        }
+        expect(seen == ["", "A menu", "A menu bar app."], "shown grows with each delta and nothing else changes it, got \(seen)")
+        let thinking = [
+            #"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            #"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}"#,
+            #"data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EqQB"}}"#,
+            #"data: {"type":"content_block_stop","index":0}"#,
+        ]
+        expect(stream(thinking + start + [delta("Hi.")] + end) == .success("Hi."), "a thinking block adds no text")
+        expect(
+            stream(start + [delta("Part of an answer"), #"data: {"type":"message_delta","delta":{"stop_reason":"refusal"}}"#, #"data: {"type":"message_stop"}"#]) == .failure(.declined),
+            "a refusal after some text is declined"
         )
         expect(
-            answer(200, #"{"content":[{"type":"text","text":"Hello, "},{"type":"text","text":"world."}],"stop_reason":"end_turn"}"#) == .success("Hello, world."),
-            "two text blocks join without a separator"
+            stream(start + [delta("Part"), "event: error", #"data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#]) == .failure(.busy(status: 200, detail: "overloaded_error: Overloaded")),
+            "an overloaded error event is busy"
         )
-        expect(answer(200, #"{"content":[],"stop_reason":"refusal"}"#) == .failure(.declined), "a refusal is declined")
         expect(
-            answer(200, #"{"content":[\#(thinking)],"stop_reason":"max_tokens"}"#) == .failure(.unanswered(status: 200, detail: "no text, stop_reason=max_tokens")),
+            stream(start + [#"data: {"type":"error","error":{"type":"api_error","message":"oops"}}"#]) == .failure(.busy(status: 200, detail: "api_error: oops")),
+            "an api error event is busy"
+        )
+        expect(
+            stream(start + [#"data: {"type":"error","error":{"type":"invalid_request_error","message":"bad"}}"#]) == .failure(.unanswered(status: 200, detail: "invalid_request_error: bad")),
+            "an invalid request error event is unanswered"
+        )
+        expect(
+            stream(start + [delta("Cut off")]) == .failure(.unanswered(status: 200, detail: "the stream ended without a stop_reason")),
+            "a stream with no message_delta is unanswered"
+        )
+        expect(
+            stream(thinking + [#"data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#]) == .failure(.unanswered(status: 200, detail: "no text, stop_reason=max_tokens")),
             "thinking alone is unanswered and names the stop reason"
         )
         let unauthorized = #"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#
         expect(
-            answer(401, unauthorized) == .failure(.keyRefused(status: 401, detail: "authentication_error: invalid x-api-key")),
+            failure(401, unauthorized) == .keyRefused(status: 401, detail: "authentication_error: invalid x-api-key"),
             "a 401 is keyRefused with the error type and message"
         )
         expect(
-            answer(403, unauthorized) == .failure(.keyRefused(status: 403, detail: "authentication_error: invalid x-api-key")),
+            failure(403, unauthorized) == .keyRefused(status: 403, detail: "authentication_error: invalid x-api-key"),
             "a 403 is keyRefused"
         )
         expect(
-            answer(429, #"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#) == .failure(.busy(status: 429, detail: "rate_limit_error: slow down")),
+            failure(429, #"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#) == .busy(status: 429, detail: "rate_limit_error: slow down"),
             "a 429 is busy"
         )
         expect(
-            answer(529, #"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#) == .failure(.busy(status: 529, detail: "overloaded_error: Overloaded")),
+            failure(529, #"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#) == .busy(status: 529, detail: "overloaded_error: Overloaded"),
             "a 529 is busy"
         )
         expect(
-            answer(502, "<html>bad gateway</html>") == .failure(.busy(status: 502, detail: "<html>bad gateway</html>")),
+            failure(502, "<html>bad gateway</html>") == .busy(status: 502, detail: "<html>bad gateway</html>"),
             "a 502 with a page for a body is busy, with the page as detail"
         )
         expect(
-            answer(400, #"{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}"#) == .failure(.unanswered(status: 400, detail: "invalid_request_error: bad")),
+            failure(400, #"{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}"#) == .unanswered(status: 400, detail: "invalid_request_error: bad"),
             "a 400 is unanswered"
         )
-        expect(answer(200, "not json") == .failure(.unanswered(status: 200, detail: "not json")), "a 200 that is not a message is unanswered")
         let long = String(repeating: "x", count: 300)
         expect(
-            answer(502, long) == .failure(.busy(status: 502, detail: String(repeating: "x", count: 200))),
+            failure(502, long) == .busy(status: 502, detail: String(repeating: "x", count: 200)),
             "a long body is cut to 200 bytes"
         )
     }
@@ -157,16 +218,26 @@ enum ClaudeCheck {
             exit(0)
         }
         let question = Claude.Question(
-            text: "What colour is the image? Answer in one word.",
+            text: "Describe the image in three short sentences.",
             screenshots: [shot(display: 1, cursor: .zero)]
         )
+        let started = ContinuousClock.now
+        let ms = { (instant: ContinuousClock.Instant) in Int((instant.duration(to: .now) / .milliseconds(1)).rounded()) }
+        var updates = 0
+        var first: Int?
         do {
             let reply = try await Conversation(endpoint: Claude.Endpoint(url: Claude.Endpoint.production, key: key), urlSession: .shared)
-                .answer(question, utterance: 1)
-            print("  ok   answered: \(reply)")
+                .answer(question, utterance: 1) { _ in
+                    updates += 1
+                    if first == nil { first = ms(started) }
+                }
+            print("  first text \(first ?? 0) ms, total \(ms(started)) ms, \(updates) updates")
+            print("  \(reply)")
+            expect(updates >= 2, "the answer arrived in at least 2 updates, got \(updates)")
         } catch {
             print("  FAIL \(error.logFields)")
             exit(1)
         }
+        exit(failures == 0 ? 0 : 1)
     }
 }

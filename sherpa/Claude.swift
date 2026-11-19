@@ -23,6 +23,7 @@ nonisolated enum Claude {
 
     enum Reply: Equatable, Sendable {
         case asking
+        case answering(String)
         case answered(String)
         case failed(Failure)
     }
@@ -60,9 +61,9 @@ nonisolated enum Claude {
             "max_tokens": maxTokens,
             "output_config": ["effort": effort],
             "messages": [["role": "user", "content": content]],
+            "stream": true,
         ]
-        // A non-streaming reply sends nothing until it is whole, so the default 60 s could cut off a long answer.
-        var request = URLRequest(url: endpoint.url, timeoutInterval: 120)
+        var request = URLRequest(url: endpoint.url)
         request.httpMethod = "POST"
         request.setValue(key, forHTTPHeaderField: "x-api-key")
         request.setValue(version, forHTTPHeaderField: "anthropic-version")
@@ -71,26 +72,49 @@ nonisolated enum Claude {
         return request
     }
 
-    static func answer(status: Int, body: Data) throws(Failure) -> String {
-        let excerpt = String(decoding: body.prefix(200), as: UTF8.self)
-        guard (200..<300).contains(status) else {
-            let detail = (try? JSONDecoder().decode(WireError.self, from: body)).map { "\($0.error.type): \($0.error.message)" } ?? excerpt
-            switch status {
-            case 401, 403: throw .keyRefused(status: status, detail: detail)
-            case 429, 500...599: throw .busy(status: status, detail: detail)
-            default: throw .unanswered(status: status, detail: detail)
+    static func failure(status: Int, body: Data) -> Failure {
+        let detail = (try? JSONDecoder().decode(WireError.self, from: body)).map { "\($0.error.type): \($0.error.message)" }
+            ?? String(decoding: body.prefix(200), as: UTF8.self)
+        switch status {
+        case 401, 403: return .keyRefused(status: status, detail: detail)
+        case 429, 500...599: return .busy(status: status, detail: detail)
+        default: return .unanswered(status: status, detail: detail)
+        }
+    }
+
+    struct Answer {
+        private var text = ""
+        private var stopReason: String?
+
+        var shown: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+        mutating func read(_ line: String) throws(Failure) {
+            guard line.hasPrefix("data:"),
+                  let event = try? JSONDecoder().decode(WireEvent.self, from: Data(line.dropFirst(5).utf8))
+            else { return }
+            switch event.type {
+            case "content_block_delta":
+                if event.delta?.type == "text_delta", let piece = event.delta?.text { text += piece }
+            case "message_delta":
+                stopReason = event.delta?.stop_reason
+            case "error":
+                guard let error = event.error else { return }
+                let detail = "\(error.type): \(error.message)"
+                switch error.type {
+                case "overloaded_error", "api_error", "rate_limit_error": throw .busy(status: 200, detail: detail)
+                default: throw .unanswered(status: 200, detail: detail)
+                }
+            default:
+                break
             }
         }
-        guard let message = try? JSONDecoder().decode(WireMessage.self, from: body) else {
-            throw .unanswered(status: status, detail: excerpt)
+
+        func finished() throws(Failure) -> String {
+            if stopReason == "refusal" { throw .declined }
+            guard let stopReason else { throw .unanswered(status: 200, detail: "the stream ended without a stop_reason") }
+            guard !shown.isEmpty else { throw .unanswered(status: 200, detail: "no text, stop_reason=\(stopReason)") }
+            return shown
         }
-        if message.stop_reason == "refusal" { throw .declined }
-        let text = message.content.filter { $0.type == "text" }.compactMap(\.text).joined()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else {
-            throw .unanswered(status: status, detail: "no text, stop_reason=\(message.stop_reason ?? "none")")
-        }
-        return text
     }
 
     private static let model = "claude-haiku-5-5"
@@ -107,14 +131,16 @@ nonisolated enum Claude {
         let error: Detail
     }
 
-    private struct WireMessage: Decodable {
-        struct Block: Decodable {
-            let type: String
+    private struct WireEvent: Decodable {
+        struct Delta: Decodable {
+            let type: String?
             let text: String?
+            let stop_reason: String?
         }
 
-        let content: [Block]
-        let stop_reason: String?
+        let type: String
+        let delta: Delta?
+        let error: WireError.Detail?
     }
 }
 
@@ -138,20 +164,40 @@ final class Conversation {
         self.urlSession = urlSession
     }
 
-    func answer(_ question: Claude.Question, utterance: Int) async throws(Claude.Failure) -> String {
+    func answer(_ question: Claude.Question, utterance: Int, writing: (String) -> Void) async throws(Claude.Failure) -> String {
         let started = ContinuousClock.now
         let elapsed = { Int((started.duration(to: .now) / .milliseconds(1)).rounded()) }
         do throws(Claude.Failure) {
             let request = try Claude.request(question, to: endpoint)
             logger.notice("claude asking utterance=\(utterance) images=\(question.images.count) bytes=\(request.httpBody?.count ?? 0)")
-            let (body, response): (Data, URLResponse)
+            var reading = Claude.Answer()
+            var written = ""
+            var updates = 0
+            var first = 0
             do {
-                (body, response) = try await urlSession.data(for: request)
+                let (bytes, response) = try await urlSession.bytes(for: request)
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                guard (200..<300).contains(status) else {
+                    var body = Data()
+                    for try await byte in bytes { body.append(byte) }
+                    throw Claude.failure(status: status, body: body)
+                }
+                for try await line in bytes.lines {
+                    try reading.read(line)
+                    let shown = reading.shown
+                    guard !shown.isEmpty, shown != written else { continue }
+                    written = shown
+                    if updates == 0 { first = elapsed() }
+                    updates += 1
+                    writing(shown)
+                }
+            } catch let failure as Claude.Failure {
+                throw failure
             } catch {
                 throw .transport(error.localizedDescription)
             }
-            let text = try Claude.answer(status: (response as? HTTPURLResponse)?.statusCode ?? 0, body: body)
-            logger.notice("claude answered utterance=\(utterance) ms=\(elapsed()) chars=\(text.count)")
+            let text = try reading.finished()
+            logger.notice("claude answered utterance=\(utterance) first=\(first) ms=\(elapsed()) chars=\(text.count) updates=\(updates)")
             return text
         } catch {
             logger.log(

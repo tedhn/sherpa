@@ -482,6 +482,22 @@ func checkAnswer(_ label: String, _ delivered: Delivered, requestsBefore: Int, p
     } else {
         fail("\(label): the reply read '\(reply().prefix(80))', expected it to begin '\(expected)'")
     }
+    let whole = ([expected] + [
+        "The screen shows a window with a heading, a level bar and a line of text under it. Everything in it is laid out in a single column, centred, with the control you hold to talk at the top and the words you spoke at the bottom. Nothing else on the display is in front of it, so there is nothing to read past the panel itself.",
+        "If you want more detail, ask about one part of it. I can describe the colours, read out the text exactly as written, or say where each control sits relative to the others. I can also compare it with what is on the other display, if there is one, and tell you which of the two the cursor is on right now.",
+    ]).joined(separator: "\n\n")
+    var lengths: [Int] = []
+    _ = wait(upTo: 8) {
+        let now = reply()
+        if lengths.last != now.count { lengths.append(now.count) }
+        return now == whole
+    }
+    let shorter = lengths.filter { $0 < whole.count }.count
+    if lengths.last == whole.count, shorter >= 2 {
+        print("  ok   \(label): the whole answer arrived after \(shorter) shorter states")
+    } else {
+        fail("\(label): the reply went through lengths \(lengths), expected \(whole.count) after at least 2 shorter")
+    }
     let numbers = requestNumbers()
     guard numbers.count == requestsBefore + 1, let newest = numbers.last,
           let body = FileManager.default.contents(atPath: URL(fileURLWithPath: requestsPath!).appending(path: "\(newest).json").path),

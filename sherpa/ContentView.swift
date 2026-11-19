@@ -116,7 +116,10 @@ private extension ContentView {
 
 private extension ContentView {
     var isAnswer: Bool {
-        if case .answered = state.transcription?.reply { true } else { false }
+        switch state.transcription?.reply {
+        case .answering, .answered: true
+        default: false
+        }
     }
 
     var replyMarkdown: AttributedString {
@@ -129,7 +132,7 @@ private extension ContentView {
         case nil:
             if case .hearing = state.transcription?.shown, !state.microphone.isListening { "Asking Claude…" } else { "" }
         case .asking: "Asking Claude…"
-        case .answered(let text): text
+        case .answering(let text), .answered(let text): text
         case .failed(.noAPIKey): "No Anthropic key is set"
         case .failed(.keyRefused): "Anthropic refused the key"
         case .failed(.busy): "Claude is busy, try again in a moment"
