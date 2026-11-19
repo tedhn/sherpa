@@ -212,7 +212,7 @@ final class Bench {
         return await waitFor("transcription opened ", count: before + 1, upTo: 5)
     }
 
-    func hold(_ pcm: Data, prefill: Double = 0, during: ((Int) -> Void)? = nil) async -> Held {
+    func hold(_ pcm: Data, prefill: Double = 0, during: ((Int, Transcription?) -> Void)? = nil) async -> Held {
         var chunks = [pcm.prefix(TapShape.firstChunk)]
         var offset = TapShape.firstChunk
         while offset < pcm.count - TapShape.converterTail {
@@ -229,7 +229,7 @@ final class Bench {
         for (index, chunk) in chunks.enumerated() {
             try? await Task.sleep(until: began + .milliseconds(100 * index), clock: .continuous)
             if record == nil, began.duration(to: .now) >= .seconds(prefill) { record = transcriber.press(speech, recorded: { pcm }) }
-            during?(index)
+            during?(index, record)
             if case .terminated = continuation.yield(Data(chunk)) { terminated = true }
             if let record { shown.append(record.shown) }
         }
@@ -350,7 +350,7 @@ struct Scenario {
     var arguments: [String] = []
     var key: String? = "fake"
     var idle: Duration?
-    var screenshots: (@Sendable () async throws -> [Screenshot])?
+    var screenshots: (@Sendable (Ink) async throws -> [Screenshot])?
     var claude = false
     var claudeMode = "ok"
     var claudeKey: String? = "fake"
@@ -397,6 +397,7 @@ enum TranscriptionCheck {
         Scenario(name: "screenshot-merge", screenshots: capturing(displaysPerCall: [1, 2]), claude: true, run: screenshotMerge),
         Scenario(name: "screenshot-slow", screenshots: capturing(delay: .seconds(3)), claude: true, run: screenshotSlow),
         Scenario(name: "screenshot-denied", screenshots: capturing(failing: .noAccess), claude: true, run: screenshotDenied),
+        Scenario(name: "screenshot-ink", screenshots: capturing(received: inkCaptured), claude: true, run: screenshotInk),
         Scenario(name: "ask-no-key", claude: true, claudeKey: nil, run: askNoKey),
         Scenario(name: "ask-overloaded", claude: true, claudeMode: "overloaded", run: askOverloaded),
     ]
@@ -453,17 +454,21 @@ enum TranscriptionCheck {
         }
     }
 
+    static let inkCaptured = OSAllocatedUnfairLock(initialState: [Ink]())
+
     nonisolated static func capturing(
-        displaysPerCall: [Int] = [1], delay: Duration = .zero, failing: Screenshot.Failure? = nil
-    ) -> @Sendable () async throws -> [Screenshot] {
+        displaysPerCall: [Int] = [1], delay: Duration = .zero, failing: Screenshot.Failure? = nil,
+        received: OSAllocatedUnfairLock<[Ink]>? = nil
+    ) -> @Sendable (Ink) async throws -> [Screenshot] {
         let context = CGContext(
             data: nil, width: 2, height: 2, bitsPerComponent: 8, bytesPerRow: 8,
             space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         )!
         let shot = Screenshot(encoding: context.makeImage()!, display: 1, appKitFrame: CGRect(x: 0, y: 0, width: 2, height: 2), cursor: .zero)!
         let calls = OSAllocatedUnfairLock(initialState: 0)
-        return { () async throws -> [Screenshot] in
+        return { (ink: Ink) async throws -> [Screenshot] in
             let call = calls.withLock { $0 += 1; return $0 }
+            received?.withLock { $0.append(ink) }
             try? await Task.sleep(for: delay)
             if let failing { throw failing }
             return Array(repeating: shot, count: displaysPerCall[min(call, displaysPerCall.count) - 1])
@@ -543,6 +548,26 @@ enum TranscriptionCheck {
             asking.map { $0.split(separator: " ").last.map(String.init) ?? "" } == ["history=0", "history=1", "history=0"],
             "follow-up: the asking lines end in history=0, 1, 0, got \(asking)"
         )
+    }
+
+    static func screenshotInk(_ bench: Bench) async {
+        let a = Stroke(CGPoint(x: 10, y: 20), [CGPoint(x: 30, y: 40)])
+        let x = Stroke(CGPoint(x: 50, y: 60))
+        let b = Stroke(CGPoint(x: 70, y: 80), [CGPoint(x: 90, y: 100)])
+        await bench.warm()
+        let first = await bench.hold(tone(0)) { index, record in if index == 2 { record?.ink = Ink([a]) } }
+        first.transcription.ink.append(Ink([x]))
+        try? await Task.sleep(for: .milliseconds(500))
+        let second = await bench.hold(tone(1)) { index, record in if index == 2 { record?.ink.append(Ink([b])) } }
+        _ = await bench.outcome(second)
+        expect(await bench.waitFor("transcription screenshots ", upTo: 3), "screenshot ink: the handoff logged")
+        expect(second.transcription === first.transcription, "screenshot ink: the second hold merged into the first's record")
+        expect(second.transcription.ink == Ink([a, x, b]), "screenshot ink: the record holds A, X and B, got \(second.transcription.ink)")
+        let received = inkCaptured.withLock { $0 }
+        expect(received.count == 2 && received.first == Ink([a]),
+               "screenshot ink: release 1's capture got A alone, though X was added right after the release, got \(received.first.map { "\($0)" } ?? "nothing")")
+        expect(received.count == 2 && received.last == Ink([a, x, b]),
+               "screenshot ink: the merged release's capture got A, X and B, got \(received.count) captures, last \(received.last.map { "\($0)" } ?? "nothing")")
     }
 
     static func screenshotMerge(_ bench: Bench) async {
@@ -759,7 +784,7 @@ enum TranscriptionCheck {
 
     static func dropMidHold(_ bench: Bench) async {
         await bench.warm()
-        let held = await bench.hold(tone(0)) { index in if index == 15 { bench.setMode("drop") } }
+        let held = await bench.hold(tone(0)) { index, _ in if index == 15 { bench.setMode("drop") } }
         bench.setMode("ok")
         let outcome = await bench.outcome(held)
         let failure = AssemblyAI.Final.failed(.serverError(code: 1011, reason: "Internal error"))

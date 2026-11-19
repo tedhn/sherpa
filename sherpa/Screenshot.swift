@@ -67,7 +67,7 @@ nonisolated struct Screenshot: Equatable, Sendable {
         CGRect(x: displayFrame.minX, y: primaryHeight - displayFrame.maxY, width: displayFrame.width, height: displayFrame.height)
     }
 
-    @concurrent static func everyDisplay() async throws(Failure) -> [Screenshot] {
+    @concurrent static func everyDisplay(inked ink: Ink) async throws(Failure) -> [Screenshot] {
         guard CGPreflightScreenCaptureAccess() else {
             _ = CGRequestScreenCaptureAccess()
             logger.notice("screenshots failed \(Failure.noAccess.logFields, privacy: .public)")
@@ -103,9 +103,14 @@ nonisolated struct Screenshot: Equatable, Sendable {
                 logger.error("screenshot failed display=\(display.displayID) reason=capture detail=\(error.localizedDescription, privacy: .public)")
                 continue
             }
+            let frame = appKitFrame(of: display.frame, primaryHeight: primaryHeight)
+            let drawn = ink.touching(frame)
+            if !drawn.isEmpty {
+                logger.notice("screenshot inked display=\(display.displayID) strokes=\(drawn.strokes.count)")
+            }
             guard let shot = Screenshot(
-                encoding: image, display: display.displayID,
-                appKitFrame: appKitFrame(of: display.frame, primaryHeight: primaryHeight), cursor: cursor
+                encoding: drawn.composited(onto: image, appKitFrame: frame), display: display.displayID,
+                appKitFrame: frame, cursor: cursor
             ) else {
                 logger.error("screenshot failed display=\(display.displayID) reason=encode")
                 continue

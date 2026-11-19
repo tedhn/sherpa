@@ -22,6 +22,9 @@ final class Transcription {
     /// winds down late can't clear a newer record's flag.
     fileprivate(set) var speaking = false
     fileprivate(set) var pointing: Callout?
+    /// What the person drew across this utterance's holds. AppState writes it; each release
+    /// hands a copy to that release's capture.
+    var ink = Ink()
 
     var delivered: AssemblyAI.Final {
         get async {
@@ -53,7 +56,7 @@ final class Transcriber {
         var endpoints: AssemblyAI.Endpoints
         var limits = Dictation.Limits()
         var archive: Supabase.Project? = nil
-        var screenshots: (@Sendable () async throws -> [Screenshot])? = nil
+        var screenshots: (@Sendable (Ink) async throws -> [Screenshot])? = nil
         var claude: Claude.Endpoint? = nil
         var voice: Voice.Endpoint? = nil
         var forgetAfter = Claude.History.idle
@@ -70,7 +73,7 @@ final class Transcriber {
                 archive: planted("SupabaseURL").flatMap(URL.init(string:)).flatMap { url in
                     planted("SupabasePublishableKey").map { Supabase.Project(url: url, key: $0) }
                 },
-                screenshots: Screenshot.everyDisplay,
+                screenshots: Screenshot.everyDisplay(inked:),
                 claude: Claude.Endpoint(url: Claude.Endpoint.production, key: planted("AnthropicAPIKey")),
                 voice: Voice.Endpoint(url: Voice.Endpoint.production, key: planted("AssemblyAIAPIKey"))
             )
@@ -150,7 +153,8 @@ final class Transcriber {
 
     func release() {
         if let capture = configuration.screenshots, let utterance = dictation.heldUtterance {
-            screenshots[utterance] = Task { try? await capture() }
+            let ink = records[utterance]?.ink ?? Ink()
+            screenshots[utterance] = Task { try? await capture(ink) }
         }
         handle(.release)
     }

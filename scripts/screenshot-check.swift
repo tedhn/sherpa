@@ -386,7 +386,7 @@ enum ScreenshotCheck {
         let mouseBefore = NSEvent.mouseLocation
         let shots: [Screenshot]
         do {
-            shots = try await Screenshot.everyDisplay()
+            shots = try await Screenshot.everyDisplay(inked: Ink())
         } catch {
             if error == .noAccess {
                 print("  FAIL the terminal has no Screen Recording grant")
@@ -564,7 +564,7 @@ enum ScreenshotCheck {
         try? await Task.sleep(for: .milliseconds(500))
         let shots: [Screenshot]
         do {
-            shots = try await Screenshot.everyDisplay()
+            shots = try await Screenshot.everyDisplay(inked: Ink())
         } catch {
             print("  FAIL \(error == .noAccess ? "the terminal has no Screen Recording grant" : error.logFields)")
             finish()
