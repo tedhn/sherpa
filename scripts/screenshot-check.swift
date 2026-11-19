@@ -81,6 +81,14 @@ enum ScreenshotCheck {
             await backdrop()
             return
         }
+        if CommandLine.arguments.contains("--markers") {
+            await markers()
+            return
+        }
+        if CommandLine.arguments.contains("--point") {
+            await point()
+            return
+        }
         if CommandLine.arguments.contains("--live") {
             await live()
             return
@@ -89,6 +97,7 @@ enum ScreenshotCheck {
         checkEncoding()
         checkCursor()
         checkLabels()
+        checkPoint()
         checkFailure()
         exit(failures == 0 ? 0 : 1)
     }
@@ -175,6 +184,36 @@ enum ScreenshotCheck {
         let off = shot(3, mainFrame, cursor: cursor, size: (1280, 720)).label(number: 2, of: 2)
         let wantOff = "Screen 2 of 2. The cursor is not on this screen. This image is 1280x720 pixels."
         expect(off == wantOff, "the other screen reads '\(wantOff)', got '\(off)'")
+    }
+
+    static func checkPoint() {
+        print("point")
+        func at(_ frame: CGRect, _ size: (Int, Int), _ x: Int, _ y: Int) -> CGPoint {
+            shot(1, frame, cursor: .zero, size: size).appKitCentre(ofPixelX: x, y: y)
+        }
+        func near(_ got: CGPoint, _ x: Double, _ y: Double) -> Bool {
+            abs(got.x - x) <= 0.001 && abs(got.y - y) <= 0.001
+        }
+        func check(_ name: String, _ got: CGPoint, _ x: Double, _ y: Double) {
+            expect(near(got, x, y), "\(name) is (\(x), \(y)), got (\(got.x), \(got.y))")
+        }
+        let main = (1280, 720)
+        check("main top-left pixel", at(mainFrame, main, 0, 0), 0.75, 1079.25)
+        check("main bottom-right pixel", at(mainFrame, main, 1279, 719), 1919.25, 0.75)
+        check("main centre pixel", at(mainFrame, main, 640, 360), 960.75, 539.25)
+        check("main far outside clamps to the bottom-left pixel", at(mainFrame, main, -5, 9999), 0.75, 0.75)
+        let builtIn = (1280, 832)
+        check("built-in top-left pixel", at(builtInFrame, builtIn, 0, 0), 97.66796875, -0.668269)
+        check("built-in bottom-right pixel", at(builtInFrame, builtIn, 1279, 831), 1806.33203125, -1111.331731)
+        check("built-in pixel 211,12", at(builtInFrame, builtIn, 211, 12), 379.55078125, -16.706731)
+        check("built-in one past the corner clamps to the last pixel", at(builtInFrame, builtIn, 1280, 832), 1806.33203125, -1111.331731)
+        check("retina without downsample", at(CGRect(x: 0, y: 0, width: 640, height: 400), (1280, 800), 2, 2), 1.25, 398.75)
+        for (name, frame, size) in [("main", mainFrame, main), ("built-in", builtInFrame, builtIn)] {
+            for (x, y) in [(0, 0), (size.0 - 1, 0), (0, size.1 - 1), (size.0 - 1, size.1 - 1)] {
+                let p = at(frame, size, x, y)
+                expect(frame.contains(p) && NSMouseInRect(p, frame, false), "\(name) corner pixel \(x),\(y) lands inside the frame, got \(p)")
+            }
+        }
     }
 
     static let pinned = [2, 2, 2, 2, 2, 2, 3, 2, 2, 3, 4, 3]
@@ -329,5 +368,149 @@ enum ScreenshotCheck {
             expect(false, "the screenshot of the main display \(String(describing: mainID)) decodes")
         }
         finish(own)
+    }
+
+    static let markerFractions = [(0.10, 0.15), (0.80, 0.30), (0.35, 0.85), (0.60, 0.55), (0.92, 0.90)]
+    static let markerTolerancePixels = 2.0
+
+    @MainActor
+    static func markers() async {
+        NSApplication.shared.setActivationPolicy(.accessory)
+        var windows: [NSWindow] = []
+        func borderless(_ color: NSColor, _ frame: CGRect) -> NSWindow {
+            let window = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
+            window.backgroundColor = color
+            window.isOpaque = true
+            window.hasShadow = false
+            window.ignoresMouseEvents = true
+            window.animationBehavior = .none
+            window.level = .screenSaver
+            windows.append(window)
+            return window
+        }
+        var centres: [CGPoint] = []
+        for screen in NSScreen.screens {
+            let frame = screen.frame
+            borderless(NSColor(srgbRed: 0.5, green: 0.5, blue: 0.5, alpha: 1), frame).orderFrontRegardless()
+            for (fx, fy) in markerFractions {
+                let marker = borderless(NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1), CGRect(
+                    x: (frame.minX + fx * frame.width).rounded() - 20, y: (frame.minY + fy * frame.height).rounded() - 20, width: 40, height: 40
+                ))
+                marker.orderFrontRegardless()
+                marker.display()
+                centres.append(CGPoint(x: marker.frame.midX, y: marker.frame.midY))
+            }
+        }
+        for centre in centres { print("marker \(centre.x) \(centre.y)") }
+        print("ready")
+        fflush(stdout)
+        try? await Task.sleep(for: .seconds(15))
+        exit(0)
+    }
+
+    static func redCentroids(_ image: CGImage) -> [CGPoint] {
+        let (width, height) = (image.width, image.height)
+        let context = context(width, height)
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        let bytes = context.data!.assumingMemoryBound(to: UInt8.self)
+        func isRed(_ x: Int, _ y: Int) -> Bool {
+            let offset = y * context.bytesPerRow + x * 4
+            return bytes[offset] > 180 && bytes[offset + 1] < 80 && bytes[offset + 2] < 80
+        }
+        var seen = Set<Int>()
+        var found: [CGPoint] = []
+        for y in 0..<height {
+            for x in 0..<width where isRed(x, y) && !seen.contains(y * width + x) {
+                var stack = [(x, y)]
+                var (count, sumX, sumY) = (0, 0, 0)
+                seen.insert(y * width + x)
+                while let (cx, cy) = stack.popLast() {
+                    count += 1
+                    sumX += cx
+                    sumY += cy
+                    for (nx, ny) in [(cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)]
+                    where nx >= 0 && ny >= 0 && nx < width && ny < height && isRed(nx, ny) && !seen.contains(ny * width + nx) {
+                        seen.insert(ny * width + nx)
+                        stack.append((nx, ny))
+                    }
+                }
+                if count >= 20 { found.append(CGPoint(x: Double(sumX) / Double(count), y: Double(sumY) / Double(count))) }
+            }
+        }
+        return found
+    }
+
+    @MainActor
+    static func point() async {
+        print("point live")
+        NSApplication.shared.setActivationPolicy(.accessory)
+        let child = Process()
+        child.executableURL = Bundle.main.executableURL!
+        child.arguments = ["--markers"]
+        let pipe = Pipe()
+        child.standardOutput = pipe
+        do {
+            try child.run()
+        } catch {
+            print("  FAIL could not launch the markers child, \(error)")
+            exit(1)
+        }
+        func finish() -> Never {
+            child.terminate()
+            exit(failures == 0 ? 0 : 1)
+        }
+        var truth: [CGPoint] = []
+        var ready = false
+        var buffer = ""
+        let deadline = ContinuousClock.now + .seconds(10)
+        while !ready, ContinuousClock.now < deadline {
+            let chunk = await Task.detached { pipe.fileHandleForReading.availableData }.value
+            if chunk.isEmpty { break }
+            buffer += String(decoding: chunk, as: UTF8.self)
+            while let newline = buffer.firstIndex(of: "\n") {
+                let line = String(buffer[..<newline])
+                buffer.removeSubrange(...newline)
+                let words = line.split(separator: " ")
+                if words.first == "marker", words.count == 3, let x = Double(words[1]), let y = Double(words[2]) {
+                    truth.append(CGPoint(x: x, y: y))
+                } else if line == "ready" {
+                    ready = true
+                }
+            }
+        }
+        guard ready else {
+            expect(false, "the markers child reports ready within 10 s")
+            finish()
+        }
+        try? await Task.sleep(for: .milliseconds(500))
+        let shots: [Screenshot]
+        do {
+            shots = try await Screenshot.everyDisplay()
+        } catch {
+            print("  FAIL \(error == .noAccess ? "the terminal has no Screen Recording grant" : error.logFields)")
+            finish()
+        }
+        print("  info displays=\(shots.count)")
+        if shots.count < 2 {
+            print("  skip the second display's path was covered offline only")
+        }
+        for shot in shots {
+            guard let image = decoded(shot.jpeg) else {
+                expect(false, "display \(shot.display) JPEG decodes")
+                continue
+            }
+            let found = redCentroids(image).map { shot.appKitCentre(ofPixelX: Int($0.x.rounded()), y: Int($0.y.rounded())) }
+            expect(found.count == markerFractions.count, "display \(shot.display) shows \(markerFractions.count) red markers, got \(found.count)")
+            let pixel = shot.appKitFrame.width / Double(shot.pixels.width)
+            for expected in truth where NSMouseInRect(expected, shot.appKitFrame, false) {
+                guard let nearest = found.min(by: { hypot($0.x - expected.x, $0.y - expected.y) < hypot($1.x - expected.x, $1.y - expected.y) }) else { continue }
+                let distance = hypot(nearest.x - expected.x, nearest.y - expected.y)
+                expect(
+                    distance <= markerTolerancePixels * pixel,
+                    "display \(shot.display) marker at (\(expected.x), \(expected.y)) is found at (\(String(format: "%.1f", nearest.x)), \(String(format: "%.1f", nearest.y))), \(String(format: "%.2f", distance)) pt or \(String(format: "%.2f", distance / pixel)) screenshot pixels away"
+                )
+            }
+        }
+        finish()
     }
 }

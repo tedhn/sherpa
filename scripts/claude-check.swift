@@ -41,6 +41,7 @@ enum ClaudeCheck {
         checkRequest()
         checkHistory()
         checkQuestion()
+        checkPoint()
         checkSaid()
         checkAnswer()
         checkFailureFields()
@@ -129,6 +130,26 @@ enum ClaudeCheck {
         expect(question.images.map(\.jpeg) == [here.jpeg, there.jpeg], "each image carries its own JPEG")
         expect(question.text == "what is this", "the words are kept, got \(question.text)")
         expect(Claude.Question(text: "hi", screenshots: []).images.isEmpty, "no screenshots means no images")
+    }
+
+    static func checkPoint() {
+        print("point")
+        func sized(_ frame: CGRect) -> Screenshot {
+            let context = CGContext(
+                data: nil, width: 4, height: 2, bitsPerComponent: 8, bytesPerRow: 16,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            )!
+            return Screenshot(encoding: context.makeImage()!, display: 1, appKitFrame: frame, cursor: .zero)!
+        }
+        let shots = [sized(CGRect(x: 0, y: 0, width: 8, height: 4)), sized(CGRect(x: 100, y: -40, width: 40, height: 20))]
+        func point(_ screen: Int) -> CGPoint? {
+            Claude.Target.point(x: 1, y: 0, label: "a", screen: screen).appKitPoint(on: shots)
+        }
+        let want: [(Int, CGPoint?)] = [(1, CGPoint(x: 3, y: 3)), (2, CGPoint(x: 115, y: -25)), (3, nil), (0, nil)]
+        for (screen, expected) in want {
+            expect(point(screen) == expected, "screen \(screen) converts to \(String(describing: expected)), got \(String(describing: point(screen)))")
+        }
+        expect(Claude.Target.none.appKitPoint(on: shots) == nil, "no target has no point")
     }
 
     static func failure(_ status: Int, _ text: String) -> Claude.Failure {

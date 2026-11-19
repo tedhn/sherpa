@@ -246,9 +246,14 @@ final class Transcriber {
             if case .heard(let text) = final, let record, let conversation, newer == nil {
                 record.reply = .asking
                 responding = Task {
-                    let question = Claude.Question(text: text, screenshots: await handoff(taken, utterance: utterance))
+                    let shots = await handoff(taken, utterance: utterance)
+                    let question = Claude.Question(text: text, screenshots: shots)
                     do throws(Claude.Failure) {
                         let said = try await conversation.answer(question, utterance: utterance) { record.reply = .answering($0) }
+                        if let target = said.target, case .point = target {
+                            let at = target.appKitPoint(on: shots).map { String(format: "%.1f,%.1f", $0.x, $0.y) } ?? "noScreen"
+                            logger.notice("transcription pointing utterance=\(utterance) target=\(target.logField, privacy: .public) at=\(at, privacy: .public)")
+                        }
                         record.speaking = speaker != nil
                         record.reply = .answered(said.spoken)
                         await speaker?.speak(said.spoken, utterance: utterance)
