@@ -320,6 +320,10 @@ proc 'to click menu bar item 1 of menu bar 2' >/dev/null
 wait_for_windows 0
 check "a second click closes the panel" "0" "$(proc 'to return count of windows')"
 
+echo "ink"
+[[ -x "$DERIVED/companion-check" && -n "$fake_claude_requests" ]] \
+    && { "$DERIVED/companion-check" --ink "$app_pid" "$fake_claude_requests" || failures=$((failures + 1)); }
+
 echo "outside click"
 if [[ $panel_w -eq 0 ]]; then
     echo "  skip outside click: the geometry to aim at was not measured"
