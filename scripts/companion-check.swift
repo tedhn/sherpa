@@ -66,6 +66,11 @@ func bubbleZone(_ frame: CGRect, side: String) -> CGRect {
                   width: frame.width + 8 + overshoot, height: frame.height + 8)
 }
 
+/// Where the ring around `bounds` can draw: 6 pt out plus half its 2.5 pt line, with room for anti-aliasing.
+func ringZone(_ bounds: CGRect) -> CGRect {
+    bounds.insetBy(dx: -12, dy: -12)
+}
+
 nonisolated struct Frame {
     let time: Double
     let blobs: [Blob]
@@ -75,8 +80,8 @@ nonisolated struct Frame {
         return blobs.first { zone.contains($0.box) }
     }
 
-    func glyph(besides zone: CGRect?) -> CGPoint? {
-        let parts = blobs.filter { blob in zone.map { !$0.contains(blob.box) } ?? true }
+    func glyph(besides zones: [CGRect]) -> CGPoint? {
+        let parts = blobs.filter { blob in !zones.contains { $0.contains(blob.box) } }
         let count = Double(parts.reduce(0) { $0 + $1.count })
         guard count > 0 else { return nil }
         return CGPoint(x: parts.reduce(0) { $0 + $1.centre.x * Double($1.count) } / count,
@@ -129,7 +134,7 @@ nonisolated final class FrameRecorder: NSObject, SCStreamOutput, @unchecked Send
         let (w, h, row) = (CVPixelBufferGetWidth(buffer), CVPixelBufferGetHeight(buffer), CVPixelBufferGetBytesPerRow(buffer))
         let found = blobs(base.assumingMemoryBound(to: UInt8.self), width: w, height: h, row: row, scale: Double(w) / width)
         lock.lock()
-        recorded.append(Frame(time: CACurrentMediaTime(), blobs: Array(found.prefix(8))))
+        recorded.append(Frame(time: CACurrentMediaTime(), blobs: Array(found.prefix(32))))
         lock.unlock()
     }
 }
@@ -249,11 +254,14 @@ enum CompanionCheck {
                 await checkInk(pid: pid, requests: arguments[3], hearing: arguments[4], staleSeconds: stale)
             } else {
                 checkPlacement()
+                checkLanding()
                 checkArc()
                 checkBubble()
                 await checkPointing()
+                await checkRing()
                 checkLooksRender()
                 checkBubbleRender()
+                checkRingRender()
                 checkInkRender()
             }
             exit(failures == 0 ? 0 : 1)
@@ -281,6 +289,27 @@ enum CompanionCheck {
         expect(lower == CGPoint(x: 438, y: 25), "local on the lower display", "\(lower)")
         let single = Companion.local(CGPoint(x: 635, y: 375), in: one[0])
         expect(single == CGPoint(x: 635, y: 737), "local on one display", "\(single)")
+    }
+
+    static func checkLanding() {
+        let one = [CGRect(x: 0, y: 0, width: 1710, height: 1112)]
+        let two = [CGRect(x: 0, y: 0, width: 1920, height: 1080), CGRect(x: 97, y: -1112, width: 1710, height: 1112)]
+        func callout(_ x: CGFloat, _ y: CGFloat, _ width: CGFloat, _ height: CGFloat) -> Callout {
+            Callout(point: CGPoint(x: x + width / 2, y: y + height / 2), label: "a", bounds: CGRect(x: x, y: y, width: width, height: height))
+        }
+        let rows: [(String, Callout, [CGRect], CGPoint)] = [
+            ("a callout without bounds lands where following its point would", Callout(point: CGPoint(x: 600, y: 400), label: "a", bounds: nil), one,
+             CGPoint(x: 635, y: 375)),
+            ("bounds land 35 right of and 25 below their bottom-right corner", callout(500, 380, 100, 40), one, CGPoint(x: 635, y: 355)),
+            ("bounds too thin for a ring still land beside their corner", callout(600, 400, 2, 30), one, CGPoint(x: 637, y: 375)),
+            ("bounds on a screen's right edge clamp inside it", callout(1650, 500, 60, 30), one, CGPoint(x: 1698, y: 475)),
+            ("bounds on the bottom edge of the upper display clamp inside it, not onto the display below", callout(800, 0, 100, 30), two,
+             CGPoint(x: 935, y: 12)),
+        ]
+        for (label, callout, screens, expected) in rows {
+            let actual = Companion.landing(for: callout, on: screens)
+            expect(actual == expected, label, "\(actual) vs \(expected)")
+        }
     }
 
     static func exact(_ point: CGPoint) -> String {
@@ -489,6 +518,52 @@ enum CompanionCheck {
                         "flying", "landed", "pausing", "returning", "landed", "following"]
         expect(logged == expected, "the log reads each flight out, its landing and pause, and each flight home landing before following",
                logged.joined(separator: ", "))
+    }
+
+    static func checkRing() async {
+        guard let frame = NSScreen.screens.first?.frame else {
+            expect(false, "a screen to ring on")
+            return
+        }
+        let companion = Companion(hold: .milliseconds(300))
+        func wait(upTo limit: Duration, for done: () -> Bool) async -> Bool {
+            let deadline = ContinuousClock.now + limit
+            while !done(), ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(2)) }
+            return done()
+        }
+        func corner(_ bounds: CGRect) -> CGPoint { CGPoint(x: bounds.maxX + 35, y: bounds.minY - 25) }
+        let bounds = CGRect(x: frame.midX - 40, y: frame.midY - 20, width: 80, height: 40)
+        companion.point(at: Callout(point: CGPoint(x: bounds.midX, y: bounds.midY), label: "panel", bounds: bounds))
+        expect(companion.ring == nil, "on the way out there is no ring yet")
+        let landed = await wait(upTo: .seconds(2)) { companion.bubble != nil }
+        expect(landed && companion.position == corner(bounds) && companion.ring == bounds,
+               "a callout with bounds lands beside their bottom-right corner and rings exactly those bounds while it pauses",
+               "\(exact(companion.position)) vs \(exact(corner(bounds))), ring \(String(describing: companion.ring))")
+
+        let pointed = Callout(point: CGPoint(x: frame.minX + 300, y: frame.midY), label: "Wi-Fi", bounds: nil)
+        companion.point(at: pointed)
+        expect(companion.ring == nil && companion.bubble == nil, "a new callout takes the ring down with the bubble")
+        let pointLanded = await wait(upTo: .seconds(2)) { companion.bubble != nil }
+        let following = Companion.position(following: pointed.point, on: NSScreen.screens.map(\.frame))
+        expect(pointLanded && companion.position == following && companion.ring == nil,
+               "a callout without bounds lands where following its point would, and pauses with no ring",
+               "\(exact(companion.position)) vs \(exact(following)), ring \(String(describing: companion.ring))")
+
+        let thin = CGRect(x: frame.maxX - 400, y: frame.midY, width: 3, height: 40)
+        companion.point(at: Callout(point: CGPoint(x: thin.midX, y: thin.midY), label: "line", bounds: thin))
+        let thinLanded = await wait(upTo: .seconds(2)) { companion.bubble?.label == "line" }
+        expect(thinLanded && companion.position == corner(thin) && companion.ring == nil,
+               "bounds under 4 pt across get no ring, though the glyph still lands beside their corner",
+               "\(exact(companion.position)) vs \(exact(corner(thin))), ring \(String(describing: companion.ring))")
+        companion.point(at: nil)
+        let gone = await wait(upTo: .seconds(1)) { companion.bubble == nil }
+        expect(gone && companion.ring == nil, "when the pause ends there is no ring")
+
+        try? await Task.sleep(for: .seconds(1))
+        let rings = companionLog(pid: ProcessInfo.processInfo.processIdentifier).split(separator: "\n")
+            .filter { $0.contains("companion pausing ") }.suffix(3).map { loggedField("ring", in: String($0)).map(String.init) ?? "missing" }
+        let logged = String(format: "%.1f,%.1f,%.1f,%.1f", bounds.minX, bounds.minY, bounds.width, bounds.height)
+        expect(rings == [logged, "none", "none"], "the three pauses log ring=\(logged), ring=none and ring=none", "\(rings)")
     }
 
     static func displayID(_ screen: NSScreen) -> CGDirectDisplayID {
@@ -961,9 +1036,61 @@ enum CompanionCheck {
         }
         .frame(width: overlay.width, height: overlay.height)
         let sampled = Frame(time: 0, blobs: rendered(scene, scale: 1)?.blobs ?? [])
-        let glyph = sampled.glyph(besides: zone)
+        let glyph = sampled.glyph(besides: [zone])
         expect(sampled.bubble(in: zone) != nil && near(glyph, Companion.local(spot, in: overlay), within: 1),
                "at the stream's scale the glyph and the bubble beside it read as separate blobs",
+               "\(sampled.blobs.map { "\($0.box) x\($0.count)" }), glyph \(describe(glyph))")
+    }
+
+    @MainActor
+    static func checkRingRender() {
+        let around = CGRect(x: 40, y: 30, width: 100, height: 50)
+        func drawn(_ fraction: Double) -> (pixels: Pixels, blobs: [Blob]) {
+            rendered(CompanionRing(around: around, drawn: fraction).frame(width: 200, height: 120), scale: 2)
+                ?? (Pixels(rgba: [], width: 0, height: 0), [])
+        }
+        func rgba(_ pixels: Pixels, _ x: Int, _ y: Int) -> [Int] {
+            let offset = (y * pixels.width + x) * 4
+            return pixels.rgba.count > offset + 3 ? pixels.rgba[offset...(offset + 3)].map(Int.init) : []
+        }
+        let full = drawn(1)
+        let loop = full.blobs.first?.box ?? .zero
+        expect(full.blobs.count == 1 && abs(loop.minX - 32.75) <= 0.5 && abs(loop.minY - 22.75) <= 0.5
+                   && abs(loop.width - 114.5) <= 1 && abs(loop.height - 64.5) <= 1,
+               "the ring around 40,30 100x50 is one loop whose 2.5 pt line is centred 6 pt outside it: 32.75,22.75 114.5x64.5",
+               "\(full.blobs.map { "\($0.box) x\($0.count)" })")
+        let edge = rgba(full.pixels, 180, 48)
+        expect(edge.count == 4 && zip(edge, [51, 122, 255, 255]).allSatisfy { abs($0 - $1) <= 2 },
+               "the middle of its top line is the companion blue 51,122,255", "\(edge)")
+        let inside = rgba(full.pixels, 180, 110)
+        expect(inside.last == 0, "inside the ring is clear", "\(inside)")
+        let whole = full.blobs.reduce(0) { $0 + $1.count }
+        let half = drawn(0.5).blobs.reduce(0) { $0 + $1.count }
+        expect(half * 10 >= whole * 4 && half * 10 <= whole * 6, "drawn to 0.5 it shows about half the loop", "\(half) of \(whole) pixels")
+        _ = drawn(1)
+        let start = drawn(DrawingRing.undrawn).blobs.reduce(0) { $0 + $1.count }
+        expect(start * 100 <= whole, "a new ring starts as a dot, even right after a whole ring was drawn", "\(start) of \(whole) pixels")
+
+        let overlay = CGRect(x: 0, y: 0, width: 400, height: 300)
+        let bounds = CGRect(x: 100, y: 180, width: 80, height: 40)
+        let spot = Companion.landing(for: Callout(point: CGPoint(x: bounds.midX, y: bounds.midY), label: "panel", bounds: bounds), on: [overlay])
+        let landed = Bubble(label: "panel", beside: spot, on: [overlay], appeared: .now)
+        let zone = bubbleZone(CGRect(origin: Companion.local(CGPoint(x: landed.frame.minX, y: landed.frame.maxY), in: overlay),
+                                     size: landed.frame.size), side: landed.side.rawValue)
+        let ring = CGRect(origin: Companion.local(CGPoint(x: bounds.minX, y: bounds.maxY), in: overlay), size: bounds.size)
+        let scene = ZStack {
+            CompanionRing(around: ring, drawn: 1)
+            CompanionGlyph(look: .arrow(heading: Companion.restingHeading), time: 0)
+                .position(Companion.local(spot, in: overlay))
+            CompanionBubble(bubble: landed, shown: landed.label.count)
+                .position(Companion.local(CGPoint(x: landed.frame.midX, y: landed.frame.midY), in: overlay))
+        }
+        .frame(width: overlay.width, height: overlay.height)
+        let sampled = Frame(time: 0, blobs: rendered(scene, scale: 1)?.blobs ?? [])
+        let glyph = sampled.glyph(besides: [zone, ringZone(ring)])
+        expect(sampled.blobs.contains { ringZone(ring).contains($0.box) } && sampled.bubble(in: zone) != nil
+                   && near(glyph, Companion.local(spot, in: overlay), within: 1),
+               "at the stream's scale the ring, the glyph beside its corner and the bubble read as separate blobs",
                "\(sampled.blobs.map { "\($0.box) x\($0.count)" }), glyph \(describe(glyph))")
     }
 
@@ -1096,13 +1223,19 @@ enum CompanionCheck {
             expect(false, "the overlay window can be streamed", "window \(overlay.number)")
             return
         }
-        func glyphs(after time: Double, besides zone: CGRect? = nil) -> [(time: Double, centre: CGPoint)] {
-            recorder.frames.filter { $0.time >= time }.compactMap { frame in frame.glyph(besides: zone).map { (frame.time, $0) } }
+        func glyphs(after time: Double, besides zones: [CGRect] = []) -> [(time: Double, centre: CGPoint)] {
+            recorder.frames.filter { $0.time >= time }.compactMap { frame in frame.glyph(besides: zones).map { (frame.time, $0) } }
         }
-        func settled(at point: CGPoint, besides zone: CGRect? = nil) -> Bool {
+        func settled(at point: CGPoint, besides zones: [CGRect] = []) -> Bool {
             let now = CACurrentMediaTime()
-            let recent = glyphs(after: now - 0.5, besides: zone)
-            return near(recorder.frames.last?.glyph(besides: zone), point, within: 2) && recent.allSatisfy { near($0.centre, point, within: 2) }
+            let recent = glyphs(after: now - 0.5, besides: zones)
+            return near(recorder.frames.last?.glyph(besides: zones), point, within: 2) && recent.allSatisfy { near($0.centre, point, within: 2) }
+        }
+        /// Every blob in the zone together: on a Retina display the stream scales the ring down and its thin sides can break apart.
+        func ringBlob(_ frame: Frame?, in zone: CGRect) -> (box: CGRect, count: Int)? {
+            let parts = frame?.blobs.filter { zone.contains($0.box) } ?? []
+            guard let first = parts.first else { return nil }
+            return (parts.dropFirst().reduce(first.box) { $0.union($1.box) }, parts.reduce(0) { $0 + $1.count })
         }
         func poll(upTo seconds: Double, every interval: Duration = .milliseconds(10), until done: () -> Bool) async -> Bool {
             let deadline = CACurrentMediaTime() + seconds
@@ -1138,6 +1271,10 @@ enum CompanionCheck {
             let zone: CGRect
             let side: String
             let typed: Double
+            let bounds: CGRect
+            let ring: CGRect
+            let ringZone: CGRect
+            var zones: [CGRect] { [zone, ringZone] }
         }
         func pointOut(from home: CGPoint, onTakeoff: () async -> Void) async -> Outing? {
             await chord(down: true)
@@ -1163,22 +1300,28 @@ enum CompanionCheck {
             let named = lines.last { $0.contains("transcription pointing") }
             let pausing = lines.last { $0.contains("companion pausing") }
             let frame = loggedNumbers("bubble", in: pausing)
+            let ringed = loggedNumbers("ring", in: pausing)
             guard let from = loggedPoint("from", in: flying), let to = loggedPoint("to", in: flying), let target = loggedPoint("at", in: named),
-                  frame.count == 4, let side = loggedField("side", in: pausing), let typed = loggedNumbers("typed", in: pausing).first
+                  frame.count == 4, let side = loggedField("side", in: pausing), let typed = loggedNumbers("typed", in: pausing).first,
+                  ringed.count == 4
             else {
-                expect(false, "the log names the flight, the point Claude named and the bubble",
+                expect(false, "the log names the flight, the point Claude named, the bubble and the ring",
                        "\(flying ?? "no companion flying line"); \(named ?? "no transcription pointing line"); \(pausing ?? "no companion pausing line")")
                 return nil
             }
             let bubble = CGRect(origin: local(CGPoint(x: frame[0], y: frame[1] + frame[3])), size: CGSize(width: frame[2], height: frame[3]))
             let zone = bubbleZone(bubble, side: String(side))
+            let bounds = CGRect(x: ringed[0], y: ringed[1], width: ringed[2], height: ringed[3])
+            let ring = CGRect(origin: local(CGPoint(x: bounds.minX, y: bounds.maxY)), size: bounds.size)
+            let zones = [zone, ringZone(ring)]
             let destination = local(to)
-            _ = await poll(upTo: 5) { settled(at: destination, besides: zone) }
-            let arrived = glyphs(after: departed, besides: zone).first { near($0.centre, destination, within: 2) }?.time
+            _ = await poll(upTo: 5) { settled(at: destination, besides: zones) }
+            let arrived = glyphs(after: departed, besides: zones).first { near($0.centre, destination, within: 2) }?.time
             expect(arrived != nil, "the glyph landed on the destination",
-                   "\(describe(recorder.frames.last?.glyph(besides: zone))) vs \(describe(destination))")
+                   "\(describe(recorder.frames.last?.glyph(besides: zones))) vs \(describe(destination))")
             return arrived.map { Outing(released: released, departed: departed, arrived: $0, from: from, to: to, target: target,
-                                        bubble: bubble, zone: zone, side: String(side), typed: typed) }
+                                        bubble: bubble, zone: zone, side: String(side), typed: typed,
+                                        bounds: bounds, ring: ring, ringZone: ringZone(ring)) }
         }
 
         let previous = try? String(contentsOfFile: voiceScenario, encoding: .utf8)
@@ -1211,17 +1354,19 @@ enum CompanionCheck {
             let nudged = CGPoint(x: pointer.x + 40, y: pointer.y)
             move(to: nudged)
             try? await Task.sleep(for: .seconds(1))
-            let held = recorder.frames.last?.glyph(besides: out.zone)
+            let held = recorder.frames.last?.glyph(besides: out.zones)
             let voice = lastVoice(pid: pid)
             expect(near(held, destination, within: 2), "while the voice responds the glyph stays on the spot, though the pointer moved",
                    "\(describe(held)) vs \(describe(destination))")
             expect(voice?.contains("voice=responding") ?? false, "the voice was still responding when that was read", voice ?? "no state line")
-            expect(near(out.to, CGPoint(x: out.target.x + 35, y: out.target.y - 25), within: 0.2),
-                   "the companion flew to 35 right of and 25 below the point Claude named",
-                   "to \(describe(out.to)) for \(describe(out.target))")
+            expect(near(out.to, CGPoint(x: out.bounds.maxX + 35, y: out.bounds.minY - 25), within: 0.2),
+                   "the companion flew to 35 right of and 25 below the bottom-right corner of the box Claude named",
+                   "to \(describe(out.to)) for \(out.bounds)")
+            expect(near(CGPoint(x: out.bounds.midX, y: out.bounds.midY), out.target, within: 1),
+                   "the ring's bounds are centred on the point Claude named", "\(out.bounds) for \(describe(out.target))")
 
             let flight = Flight(from: out.from, to: out.to)
-            let airborne = glyphs(after: out.released, besides: out.zone)
+            let airborne = glyphs(after: out.released, besides: out.zones)
                 .filter { $0.time < out.arrived && hypot($0.centre.x - home.x, $0.centre.y - home.y) > 12 }.map(\.centre)
             let farthest = airborne.map { offCurve($0, flight) }.max() ?? 0
             let highest = airborne.compactMap { centre -> CGFloat? in
@@ -1236,26 +1381,42 @@ enum CompanionCheck {
             expect(jumped > out.departed && jumped < out.arrived, "the pointer jumped 150 pt while the glyph flew out",
                    String(format: "jump %.2f s after takeoff, landing %.2f s after", jumped - out.departed, out.arrived - out.departed))
             expect(airborne.count >= 10, "at least 10 frames caught the glyph between home and the destination", "\(airborne.count)")
-            expect(farthest <= 3, "every frame on the way out lies on the flight's curve, pointer jump or not", String(format: "%.1f pt off it", farthest))
+            let worst = recorder.frames.filter { $0.time >= out.departed && $0.time < out.arrived }
+                .max { ($0.glyph(besides: out.zones).map { offCurve($0, flight) } ?? 0) < ($1.glyph(besides: out.zones).map { offCurve($0, flight) } ?? 0) }
+            expect(farthest <= 3, "every frame on the way out lies on the flight's curve, pointer jump or not",
+                   String(format: "%.1f pt off it; the worst frame came %.2f s after takeoff, landing %.2f s after, with blobs ", farthest,
+                          (worst?.time ?? 0) - out.departed, out.arrived - out.departed)
+                       + "\(worst?.blobs.map { "\($0.box) x\($0.count)" } ?? []) besides \(out.zones)")
             expect(highest > 5, "mid-flight the glyph rose above the straight line from start to destination",
                    String(format: "at most %.1f pt above it", highest))
 
             let landed = recorder.frames.last
             let blob = landed?.bubble(in: out.zone)
-            let spot = landed?.glyph(besides: out.zone)
+            let spot = landed?.glyph(besides: out.zones)
             expect(blob != nil && near(spot, destination, within: 2), "after landing a bubble shows inside its logged frame, beside the glyph on the spot",
                    "blobs \(landed?.blobs.map { "\($0.box)" } ?? []), zone \(out.zone), glyph \(describe(spot))")
             expect(blob.map { out.side == "right" ? $0.box.minX > destination.x : $0.box.maxX < destination.x } ?? false,
                    "the bubble sits on the \(out.side) side of the glyph, as logged", "\(String(describing: blob?.box)) vs glyph x \(destination.x)")
             let read = text(in: out.bubble.insetBy(dx: -2, dy: -2), of: overlay)
             expect(read.lowercased().contains("panel"), "Vision reads the label panel in the bubble", "read \"\(read)\"")
+            let outer = out.ring.insetBy(dx: -CompanionRing.gap - 1.25, dy: -CompanionRing.gap - 1.25)
+            let ringed = ringBlob(landed, in: out.ringZone)
+            expect(ringed.map { [($0.box.minX, outer.minX), ($0.box.minY, outer.minY), ($0.box.maxX, outer.maxX), ($0.box.maxY, outer.maxY)]
+                                    .allSatisfy { abs($0 - $1) <= 2 } } ?? false,
+                   "while it pauses a ring 6 pt outside the logged ring frame surrounds the thing",
+                   "\(landed?.blobs.filter { out.ringZone.contains($0.box) }.map { "\($0.box) x\($0.count)" } ?? []) vs \(outer)")
+            let drawing = recorder.frames.filter { $0.time >= out.arrived - 0.1 }.compactMap { ringBlob($0, in: out.ringZone)?.count }
+            print("  info the ring showed \(drawing.prefix(24).map(String.init).joined(separator: " ")) opaque pixels in its first frames, "
+                  + "in \(landed?.blobs.filter { out.ringZone.contains($0.box) }.count ?? 0) pieces once drawn")
+            expect((drawing.first ?? .max) < (ringed?.count ?? 0) * 4 / 5, "the ring drew itself on: its first frame had under 4/5 of its pixels",
+                   "\(drawing.first.map(String.init) ?? "no frame") of \(ringed?.count ?? 0)")
 
             let idle = await waitForVoice("idle", pid: pid, seconds: 20)
             expect(idle?.contains("voice=idle") ?? false, "the voice finished and the state went back to idle", idle ?? "no state line")
             let homeTo = follows(nudged)
             var leftSpot: Double?
             _ = await poll(upTo: 8) {
-                leftSpot = glyphs(after: out.arrived, besides: out.zone).first { !near($0.centre, destination, within: 2) }?.time
+                leftSpot = glyphs(after: out.arrived, besides: out.zones).first { !near($0.centre, destination, within: 2) }?.time
                 return leftSpot != nil
             }
             _ = await poll(upTo: 5) { settled(at: homeTo) }
@@ -1268,14 +1429,22 @@ enum CompanionCheck {
                        "it flew home from the spot to where following puts the pointer", "\(describe(from)) to \(describe(to))")
                 let back = Flight(from: from, to: to)
                 let reached = glyphs(after: leftSpot).first { near($0.centre, homeTo, within: 2) }?.time ?? .infinity
-                let homeward = glyphs(after: leftSpot, besides: out.zone).filter { $0.time < reached }.map(\.centre)
+                let homeward = glyphs(after: leftSpot, besides: out.zones).filter { $0.time < reached }.map(\.centre)
                 let off = homeward.map { offCurve($0, back) }.max() ?? 0
+                let worstHome = recorder.frames.filter { $0.time >= leftSpot && $0.time < reached }
+                    .max { ($0.glyph(besides: out.zones).map { offCurve($0, back) } ?? 0) < ($1.glyph(besides: out.zones).map { offCurve($0, back) } ?? 0) }
                 expect(homeward.count >= 5 && off <= 3, "every frame on the way home lies on the arc from the spot to the pointer",
-                       String(format: "%d frames, at most %.1f pt off it", homeward.count, off))
+                       String(format: "%d frames, at most %.1f pt off it; the worst came %.2f s after leaving, with blobs ", homeward.count, off,
+                              (worstHome?.time ?? 0) - leftSpot)
+                           + "\(worstHome?.blobs.map { "\($0.box) x\($0.count)" } ?? []) besides \(out.zones)")
                 let lastBubble = recorder.frames.last { $0.time >= out.arrived && $0.bubble(in: out.zone) != nil }?.time
                 expect(lastBubble.map { $0 <= leftSpot + 0.6 } ?? false && recorder.frames.last?.bubble(in: out.zone) == nil,
                        "the bubble is gone within 0.6 s of the glyph leaving the spot",
                        lastBubble.map { String(format: "last seen %.2f s after", $0 - leftSpot) } ?? "never seen")
+                let lastRing = recorder.frames.last { $0.time >= out.arrived && ringBlob($0, in: out.ringZone) != nil }?.time
+                expect(lastRing.map { $0 <= leftSpot + 0.6 } ?? false && ringBlob(recorder.frames.last, in: out.ringZone) == nil,
+                       "the ring is gone within 0.6 s of the glyph leaving the spot, and stays gone once it is home",
+                       lastRing.map { String(format: "last seen %.2f s after", $0 - leftSpot) } ?? "never seen")
             } else {
                 expect(false, "the glyph left the spot and the log names the flight home", returning ?? "no companion returning line")
             }
@@ -1283,7 +1452,7 @@ enum CompanionCheck {
             let later = CGPoint(x: nudged.x, y: nudged.y - 30)
             move(to: later)
             try? await Task.sleep(for: .milliseconds(800))
-            let again = recorder.frames.last?.glyph(besides: nil)
+            let again = recorder.frames.last?.glyph(besides: [])
             expect(near(again, follows(later), within: 2), "home again, the glyph follows the pointer",
                    "\(describe(again)) vs \(describe(follows(later)))")
             let logged = order(turnLines())
@@ -1299,7 +1468,7 @@ enum CompanionCheck {
             let destination = local(out.to)
             var leaving: Double?
             let left = await poll(upTo: 10) {
-                leaving = glyphs(after: out.arrived, besides: out.zone).first { !near($0.centre, destination, within: 2) }?.time
+                leaving = glyphs(after: out.arrived, besides: out.zones).first { !near($0.centre, destination, within: 2) }?.time
                 return leaving != nil
             }
             let shifted = CGPoint(x: pointer.x + 120, y: pointer.y)
@@ -1309,14 +1478,22 @@ enum CompanionCheck {
                 expect(false, "the glyph left the spot to fly home within 10 s of landing")
                 return
             }
+            let drawing = recorder.frames.filter { $0.time >= out.arrived - 0.1 && $0.time < leaving }.compactMap { ringBlob($0, in: out.ringZone)?.count }
+            expect((drawing.first ?? .max) < (drawing.max() ?? 0) * 4 / 5, "a second ring also draws itself on, without first flashing whole",
+                   "first frames \(drawing.prefix(8).map(String.init).joined(separator: " ")) of \(drawing.max() ?? 0)")
             try? await Task.sleep(for: .seconds(1.5))
             let target = follows(shifted)
-            let reached = glyphs(after: moved, besides: out.zone).first { near($0.centre, target, within: 3) }?.time
+            let reached = glyphs(after: moved, besides: out.zones).first { near($0.centre, target, within: 3) }?.time
             print(String(format: "  info the pointer moved %.0f ms after the glyph left the spot", (moved - leaving) * 1000))
+            if moved - leaving > 1, let early = recorder.frames.first(where: { $0.time == leaving }) {
+                print(String(format: "  info the frame that read as leaving came %.2f s after landing: glyph %@ vs %@, blobs ", leaving - out.arrived,
+                             describe(early.glyph(besides: out.zones)), describe(destination))
+                      + "\(early.blobs.map { "\($0.box) x\($0.count)" }) besides \(out.zones)")
+            }
             expect(reached.map { $0 - moved <= 0.5 } ?? false, "a 120 pt pointer move on the way home brings the glyph to the pointer within 0.5 s",
-                   reached.map { String(format: "after %.2f s", $0 - moved) } ?? describe(recorder.frames.last?.glyph(besides: out.zone)))
-            expect(near(recorder.frames.last?.glyph(besides: out.zone), target, within: 2), "and it stays there, following",
-                   "\(describe(recorder.frames.last?.glyph(besides: out.zone))) vs \(describe(target))")
+                   reached.map { String(format: "after %.2f s", $0 - moved) } ?? describe(recorder.frames.last?.glyph(besides: out.zones)))
+            expect(near(recorder.frames.last?.glyph(besides: out.zones), target, within: 2), "and it stays there, following",
+                   "\(describe(recorder.frames.last?.glyph(besides: out.zones))) vs \(describe(target))")
             let lines = turnLines()
             let paused = loggedNumbers("paused", in: lines.last { $0.contains("companion returning") }).first
             expect(paused.map { $0 >= out.typed + 3000 && $0 <= out.typed + 3600 } ?? false,

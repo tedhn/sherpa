@@ -20,6 +20,12 @@ struct CompanionView: View {
         .position(Companion.local(companion.position, in: screenFrame))
         .background { UserInk(state: state, screenFrame: screenFrame) }
         .overlay {
+            if let ring = companion.ring {
+                DrawingRing(around: CGRect(origin: Companion.local(CGPoint(x: ring.minX, y: ring.maxY), in: screenFrame), size: ring.size))
+                    .transition(DrawingRing.fade)
+            }
+        }
+        .overlay {
             if let bubble = companion.bubble {
                 let centre = Companion.local(CGPoint(x: bubble.frame.midX, y: bubble.frame.midY), in: screenFrame)
                 let edge = centre.x + (bubble.side == .right ? -1 : 1) * bubble.frame.width / 2
