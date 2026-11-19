@@ -99,6 +99,8 @@ enum ScreenshotCheck {
         checkLabels()
         checkPoint()
         checkFailure()
+        checkInk()
+        checkSheet()
         exit(failures == 0 ? 0 : 1)
     }
 
@@ -184,6 +186,12 @@ enum ScreenshotCheck {
         let off = shot(3, mainFrame, cursor: cursor, size: (1280, 720)).label(number: 2, of: 2)
         let wantOff = "Screen 2 of 2. The cursor is not on this screen. This image is 1280x720 pixels."
         expect(off == wantOff, "the other screen reads '\(wantOff)', got '\(off)'")
+        let inkedOn = Screenshot(encoding: solid(1280, 832), display: 1, appKitFrame: builtInFrame, cursor: cursor, inked: true)!.label(number: 1, of: 2)
+        let wantInkedOn = "Screen 1 of 2. The cursor is on this screen. The user drew the red marks on this screen to show you what they mean. When they say \"this\", they mean what they marked. This image is 1280x832 pixels."
+        expect(inkedOn == wantInkedOn, "an inked cursor screen reads '\(wantInkedOn)', got '\(inkedOn)'")
+        let inkedOff = Screenshot(encoding: solid(1280, 720), display: 3, appKitFrame: mainFrame, cursor: cursor, inked: true)!.label(number: 2, of: 2)
+        let wantInkedOff = "Screen 2 of 2. The cursor is not on this screen. The user drew the red marks on this screen to show you what they mean. When they say \"this\", they mean what they marked. This image is 1280x720 pixels."
+        expect(inkedOff == wantInkedOff, "an inked screen without the cursor reads '\(wantInkedOff)', got '\(inkedOff)'")
     }
 
     static func checkPoint() {
@@ -227,6 +235,129 @@ enum ScreenshotCheck {
             Screenshot.Failure.listing("WindowServer gone").logFields == "reason=listing detail=WindowServer gone",
             "a listing failure renders its detail last"
         )
+    }
+
+    static func white(_ width: Int, _ height: Int) -> CGImage {
+        let context = context(width, height)
+        context.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage()!
+    }
+
+    static func rgb(_ image: CGImage, _ x: Int, _ y: Int) -> [Int] {
+        let context = context(image.width, image.height)
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        let offset = y * context.bytesPerRow + x * 4
+        let bytes = context.data!.assumingMemoryBound(to: UInt8.self)
+        return [Int(bytes[offset]), Int(bytes[offset + 1]), Int(bytes[offset + 2])]
+    }
+
+    static func near(_ got: [Int], _ want: [Int], within tolerance: Int) -> Bool {
+        zip(got, want).allSatisfy { abs($0 - $1) <= tolerance }
+    }
+
+    static func checkInk() {
+        print("ink")
+        let red = [255, 48, 43]
+        let paper = [255, 255, 255]
+        let frame = CGRect(x: 100, y: 50, width: 800, height: 400)
+        let blank = white(400, 200)
+        let line = Ink([Stroke(CGPoint(x: 300, y: 250), [CGPoint(x: 500, y: 250)])]).composited(onto: blank, appKitFrame: frame)
+        expect(line.width == 400 && line.height == 200, "the inked image keeps its 400x200 size, got \(line.width)x\(line.height)")
+        for (x, y) in [(150, 99), (150, 100), (101, 100), (199, 99)] {
+            expect(near(rgb(line, x, y), red, within: 2), "a stroke from 300,250 to 500,250 colours pixel \(x),\(y) \(red), got \(rgb(line, x, y))")
+        }
+        for (x, y) in [(150, 97), (150, 102), (95, 100), (205, 100)] {
+            expect(rgb(line, x, y) == paper, "pixel \(x),\(y) stays white, got \(rgb(line, x, y))")
+        }
+        let edge = rgb(line, 150, 98)
+        expect(edge[0] >= 253 && (120...185).contains(edge[1]), "at 0.5 px per point the line is 3 px, not 2: row 98 is half red, got \(edge)")
+
+        let top = Ink([Stroke(CGPoint(x: 300, y: 440), [CGPoint(x: 500, y: 440)])]).composited(onto: blank, appKitFrame: frame)
+        expect(near(rgb(top, 150, 4), red, within: 2) && near(rgb(top, 150, 5), red, within: 2),
+               "a stroke at y 440 colours rows 4 and 5 from the top, got \(rgb(top, 150, 4)) and \(rgb(top, 150, 5))")
+        expect(rgb(top, 150, 194) == paper && rgb(top, 150, 195) == paper, "and not rows 194 and 195, so the y axis is flipped once")
+
+        let away = Ink([Stroke(CGPoint(x: 2000, y: 250), [CGPoint(x: 2100, y: 250)])])
+        expect(away.composited(onto: blank, appKitFrame: frame) === blank, "ink off the display returns the same image")
+        expect(away.touching(frame).isEmpty, "ink off the display touches nothing")
+        let mixed = Ink([Stroke(CGPoint(x: 2000, y: 250)), Stroke(CGPoint(x: 300, y: 250))])
+        expect(mixed.touching(frame) == Ink([Stroke(CGPoint(x: 300, y: 250))]), "touching keeps only the stroke on the display, got \(mixed.touching(frame))")
+        let grazing = Ink([Stroke(CGPoint(x: 905, y: 250))])
+        expect(grazing.touching(frame).strokes.count == 1, "a dot 5 pt past the right edge still touches, its 6 px disk reaches in")
+
+        let dot = Ink([Stroke(CGPoint(x: 50, y: 50))]).composited(onto: white(400, 200), appKitFrame: CGRect(x: 0, y: 0, width: 400, height: 200))
+        for (x, y) in [(47, 149), (50, 150), (52, 150), (50, 152)] {
+            expect(near(rgb(dot, x, y), red, within: 2), "a one-point stroke at 50,50 draws a disk over pixel \(x),\(y), got \(rgb(dot, x, y))")
+        }
+        expect(rgb(dot, 55, 150) == paper && rgb(dot, 50, 144) == paper && rgb(dot, 44, 150) == paper,
+               "the disk is 8 px across, pixels 55,150, 50,144 and 44,150 stay white")
+
+        let cornered = Ink([Stroke(CGPoint(x: 400, y: 200))]).composited(onto: white(400, 200), appKitFrame: CGRect(x: 0, y: 0, width: 800, height: 400))
+        let survived = Screenshot(encoding: cornered, display: 1, appKitFrame: CGRect(x: 0, y: 0, width: 800, height: 400), cursor: .zero)
+            .flatMap { decoded($0.jpeg) }.map { rgb($0, 200, 100) } ?? []
+        expect(survived.count == 3 && survived[0] >= 200 && survived[1] <= 90 && survived[2] <= 90,
+               "at 0.5 px per point a dot centred on a 2x2 block corner is still red at its centre after the JPEG, got \(survived)")
+
+        let full = CGRect(x: 0, y: 0, width: 400, height: 200)
+        let round = Ink([Stroke(CGPoint(x: 100, y: 100), [CGPoint(x: 300, y: 100)])]).composited(onto: white(400, 200), appKitFrame: full)
+        let back = Screenshot(encoding: round, display: 1, appKitFrame: full, cursor: .zero).flatMap { decoded($0.jpeg) }
+        let sample = back.map { rgb($0, 200, 99) } ?? []
+        expect(near(sample, red, within: 10), "a 4 px line survives the JPEG at pixel 200,99 as \(red) within 10, got \(sample)")
+
+        let builtIn = Screenshot(encoding: solid(1280, 832), display: 1, appKitFrame: builtInFrame, cursor: .zero)!
+        let plane = Ink.Plane(frame: builtInFrame, size: CGSize(width: 1280, height: 832))
+        for (x, y) in [(0, 0), (211, 12), (640, 416), (1279, 831)] {
+            let back = plane.point(builtIn.appKitCentre(ofPixelX: x, y: y))
+            expect(abs(back.x - (Double(x) + 0.5)) <= 1e-9 && abs(back.y - (Double(y) + 0.5)) <= 1e-9,
+                   "the plane inverts appKitCentre at pixel \(x),\(y), got \(back.x),\(back.y)")
+        }
+        let widths = [
+            ("1920x1080 shrunk to 1280x720", Ink.Plane(frame: mainFrame, size: CGSize(width: 1280, height: 720)).lineWidth, 3.0),
+            ("1710x1112 shrunk to 1280x832", plane.lineWidth, 3.0),
+            ("an overlay at 1 unit per point", Ink.Plane(frame: builtInFrame, size: builtInFrame.size).lineWidth, 4.0),
+            ("640x400 at 2x", Ink.Plane(frame: CGRect(x: 0, y: 0, width: 640, height: 400), size: CGSize(width: 1280, height: 800)).lineWidth, 8.0),
+        ]
+        for (name, got, want) in widths {
+            expect(got == want, "the line on \(name) is \(want) units wide, got \(got)")
+        }
+    }
+
+    static func checkSheet() {
+        print("sheet")
+        let (p, q, r) = (CGPoint(x: 1, y: 1), CGPoint(x: 2, y: 2), CGPoint(x: 3, y: 3))
+        func show(_ sheet: Sheet) -> String { "dropped \(sheet.dropped) drawn \(sheet.drawn) ink \(sheet.ink.strokes.map(\.points))" }
+        var nothing = Sheet()
+        nothing.extend(to: p)
+        expect(nothing == Sheet() && nothing.drawn == 0, "a new sheet has drawn nothing, and a move with no stroke adds none, got \(show(nothing))")
+
+        var sheet = Sheet()
+        sheet.begin(at: p)
+        sheet.extend(to: q)
+        sheet.begin(at: r)
+        expect(sheet.ink == Ink([Stroke(p, [q]), Stroke(r)]) && sheet.drawn == 2, "two strokes make mark 2, got \(show(sheet))")
+        let asked = sheet.drawn
+        sheet.begin(at: q)
+        expect(sheet.drawn == 3 && sheet.ink(after: asked) == Ink([Stroke(q)]), "a stroke drawn after mark 2 is the ink after it, got \(show(sheet))")
+        expect(sheet.ink(after: 0) == sheet.ink && sheet.ink(after: 9) == Ink(), "after mark 0 is everything and after mark 9 is nothing")
+
+        sheet.spend(through: asked)
+        expect(sheet.ink == Ink([Stroke(q)]) && sheet.dropped == 2 && sheet.drawn == 3, "spending through mark 2 drops the first two strokes, got \(show(sheet))")
+        sheet.spend(through: asked)
+        sheet.spend(through: 1)
+        expect(sheet.ink == Ink([Stroke(q)]) && sheet.dropped == 2, "spending the same mark again, or an older one, changes nothing, got \(show(sheet))")
+        expect(sheet.ink(after: 1) == Ink([Stroke(q)]) && sheet.ink(after: asked) == Ink([Stroke(q)]),
+               "after a mark already spent is everything still held")
+        sheet.extend(to: r)
+        expect(sheet.ink == Ink([Stroke(q, [r])]), "a move still extends the last stroke, got \(show(sheet))")
+
+        sheet.clear()
+        expect(sheet.ink.isEmpty && sheet.dropped == 3 && sheet.drawn == 3, "clear drops everything and keeps the count at 3, got \(show(sheet))")
+        sheet.begin(at: p)
+        expect(sheet.drawn == 4 && sheet.ink(after: 3) == Ink([Stroke(p)]) && sheet.ink(after: asked) == Ink([Stroke(p)]),
+               "the first stroke after the clear is mark 3, got \(show(sheet))")
+        sheet.spend(through: 4)
+        expect(sheet.ink.isEmpty && sheet.dropped == 4, "spending through mark 4 drops it, got \(show(sheet))")
     }
 
     static let backdropRect = CGRect(x: 180, y: 180, width: 400, height: 400)
@@ -307,7 +438,7 @@ enum ScreenshotCheck {
         let mouseBefore = NSEvent.mouseLocation
         let shots: [Screenshot]
         do {
-            shots = try await Screenshot.everyDisplay()
+            shots = try await Screenshot.everyDisplay(inked: Ink())
         } catch {
             if error == .noAccess {
                 print("  FAIL the terminal has no Screen Recording grant")
@@ -485,7 +616,7 @@ enum ScreenshotCheck {
         try? await Task.sleep(for: .milliseconds(500))
         let shots: [Screenshot]
         do {
-            shots = try await Screenshot.everyDisplay()
+            shots = try await Screenshot.everyDisplay(inked: Ink())
         } catch {
             print("  FAIL \(error == .noAccess ? "the terminal has no Screen Recording grant" : error.logFields)")
             finish()

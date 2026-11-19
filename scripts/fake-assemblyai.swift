@@ -3,7 +3,9 @@ import Network
 
 enum Scenario: String {
     case ok, silent, noEndpoint = "no-endpoint", close1008 = "close-1008", noBegin = "no-begin",
-         noTermination = "no-termination", token401 = "token-401", expiredOnce = "expired-once", drop
+         noTermination = "no-termination", token401 = "token-401", expiredOnce = "expired-once", drop,
+         /// Every frame counts as speech, even exact zeros, as a closed lid's microphone sends.
+         heard
 }
 
 var positional: [String] = []
@@ -167,7 +169,7 @@ final class StreamingSession {
                 close(.protocolCode(.policyViolation), "Unauthorized Connection: Invalid API key")
             case .noBegin:
                 break
-            case .ok, .silent, .noEndpoint, .noTermination, .token401, .expiredOnce, .drop:
+            case .ok, .silent, .noEndpoint, .noTermination, .token401, .expiredOnce, .drop, .heard:
                 queue.asyncAfter(deadline: .now() + beginDelay) { [self] in
                     print("session \(id) began")
                     begun = true
@@ -210,7 +212,7 @@ final class StreamingSession {
     private func hear(_ frame: Data) {
         try? capture.write(contentsOf: frame)
         received.append(frame.count)
-        silent.append(frame.allSatisfy { $0 == 0 })
+        silent.append(Scenario.current != .heard && frame.allSatisfy { $0 == 0 })
         bytes += frame.count
         guard frame.count % 2 == 0, (1600...32_000).contains(frame.count) else {
             let ms = frame.count * 1000 / bytesPerSecond

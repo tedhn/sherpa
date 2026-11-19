@@ -22,6 +22,8 @@ final class Transcription {
     /// winds down late can't clear a newer record's flag.
     fileprivate(set) var speaking = false
     fileprivate(set) var pointing: Callout?
+    /// The sheet's mark at this record's last release: the strokes its question was asked with.
+    var sentThrough: Int?
 
     var delivered: AssemblyAI.Final {
         get async {
@@ -53,7 +55,7 @@ final class Transcriber {
         var endpoints: AssemblyAI.Endpoints
         var limits = Dictation.Limits()
         var archive: Supabase.Project? = nil
-        var screenshots: (@Sendable () async throws -> [Screenshot])? = nil
+        var screenshots: (@Sendable (Ink) async throws -> [Screenshot])? = nil
         var claude: Claude.Endpoint? = nil
         var voice: Voice.Endpoint? = nil
         var forgetAfter = Claude.History.idle
@@ -70,7 +72,7 @@ final class Transcriber {
                 archive: planted("SupabaseURL").flatMap(URL.init(string:)).flatMap { url in
                     planted("SupabasePublishableKey").map { Supabase.Project(url: url, key: $0) }
                 },
-                screenshots: Screenshot.everyDisplay,
+                screenshots: Screenshot.everyDisplay(inked:),
                 claude: Claude.Endpoint(url: Claude.Endpoint.production, key: planted("AnthropicAPIKey")),
                 voice: Voice.Endpoint(url: Voice.Endpoint.production, key: planted("AssemblyAIAPIKey"))
             )
@@ -148,9 +150,9 @@ final class Transcriber {
         return record
     }
 
-    func release() {
+    func release(ink: Ink) {
         if let capture = configuration.screenshots, let utterance = dictation.heldUtterance {
-            screenshots[utterance] = Task { try? await capture() }
+            screenshots[utterance] = Task { try? await capture(ink) }
         }
         handle(.release)
     }

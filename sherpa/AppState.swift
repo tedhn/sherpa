@@ -3,6 +3,7 @@ import Observation
 import os
 
 private nonisolated let logger = Logger(subsystem: "my.rooftop.sherpa", category: "state")
+private nonisolated let inkLogger = Logger(subsystem: "my.rooftop.sherpa", category: "ink")
 
 /// What Sherpa is doing for the person. Computed on read from the microphone and
 /// the record on the panel, never stored.
@@ -35,10 +36,20 @@ enum MicrophonePhase {
 final class AppState {
     private(set) var microphone: MicrophonePhase = .ready
     private(set) var transcription: Transcription?
+    private(set) var sheet = Sheet()
     private let transcriber = Transcriber()
     @ObservationIgnored private var logged: VoiceState?
+    @ObservationIgnored private var stale: Task<Void, Never>?
+    private let staleAfter: Duration
 
     init() {
+        var staleAfter = Duration.seconds(60)
+        #if DEBUG
+        if let seconds = UserDefaults.standard.string(forKey: "InkStaleSeconds").flatMap(Double.init) {
+            staleAfter = .seconds(seconds)
+        }
+        #endif
+        self.staleAfter = staleAfter
         logVoiceChanges()
     }
 
@@ -53,6 +64,15 @@ final class AppState {
         case (.hearing, nil), (_, .asking), (_, .answering): return .processing
         case (.final, nil), (_, .answered), (_, .failed): return .idle
         }
+    }
+
+    /// The sheet, less the strokes an answered question was asked with once its answer is over.
+    /// Those stay on the sheet until the next hold or the stale clear drops them.
+    var shownInk: Ink {
+        guard voice == .idle, let record = transcription, case .answered = record.reply, let through = record.sentThrough else {
+            return sheet.ink
+        }
+        return sheet.ink(after: through)
     }
 
     func panelOpened() {
@@ -73,9 +93,36 @@ final class AppState {
             beginHold()
         case (false, .listening):
             microphone = .ready
-            transcriber.release()
+            if let record = transcription {
+                record.sentThrough = sheet.drawn
+                if !sheet.ink.isEmpty {
+                    inkLogger.notice("ink sent utterance=\(record.number) through=\(self.sheet.drawn)")
+                }
+            }
+            transcriber.release(ink: sheet.ink)
         case (true, .listening), (true, .askingForAccess), (false, _):
             break
+        }
+    }
+
+    func draw(_ mark: Pen.Mark) {
+        switch mark {
+        case .began(let point):
+            stale?.cancel()
+            sheet.begin(at: point)
+        case .moved(let point):
+            sheet.extend(to: point)
+        case .chordUp:
+            guard !sheet.ink.isEmpty else { return }
+            stale?.cancel()
+            stale = Task { [weak self, staleAfter] in
+                try? await Task.sleep(for: staleAfter)
+                guard !Task.isCancelled, let self else { return }
+                spendAnswered()
+                guard !sheet.ink.isEmpty else { return }
+                inkLogger.notice("ink cleared reason=stale strokes=\(self.sheet.ink.strokes.count)")
+                sheet.clear()
+            }
         }
     }
 
@@ -87,7 +134,10 @@ final class AppState {
             do throws(MicrophoneProblem) {
                 let (capture, speech, recorded) = try MicrophoneCapture.start()
                 microphone = .listening(capture)
-                transcription = transcriber.press(speech, recorded: recorded)
+                stale?.cancel()
+                let record = transcriber.press(speech, recorded: recorded)
+                if record !== transcription { spendAnswered() }
+                transcription = record
             } catch {
                 microphone = .failed(error)
             }
@@ -105,6 +155,16 @@ final class AppState {
         @unknown default:
             microphone = .failed(.accessDenied)
         }
+    }
+
+    /// A question that got its answer has used the strokes it was asked with. One that heard no
+    /// words or failed has not, so its strokes go with the next question.
+    private func spendAnswered() {
+        guard let record = transcription, case .answered = record.reply, let through = record.sentThrough else { return }
+        let before = sheet.dropped
+        sheet.spend(through: through)
+        guard sheet.dropped > before else { return }
+        inkLogger.notice("ink spent utterance=\(record.number) strokes=\(self.sheet.dropped - before)")
     }
 
     /// `onChange` fires once, at the first willSet, so the loop hops to the main

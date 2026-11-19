@@ -9,9 +9,11 @@ import Vision
 final class RecordingView: NSView {
     var downs = 0
     var ups = 0
+    var drags = 0
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func mouseDown(with event: NSEvent) { downs += 1 }
     override func mouseUp(with event: NSEvent) { ups += 1 }
+    override func mouseDragged(with event: NSEvent) { drags += 1 }
 }
 
 struct Overlay {
@@ -243,6 +245,8 @@ enum CompanionCheck {
                 await checkPanel(pid: pid)
             } else if arguments.count == 4, arguments[1] == "--flight", let pid = Int32(arguments[2]) {
                 await checkFlight(pid: pid, voiceScenario: arguments[3])
+            } else if arguments.count == 6, arguments[1] == "--ink", let pid = Int32(arguments[2]), let stale = Double(arguments[5]) {
+                await checkInk(pid: pid, requests: arguments[3], hearing: arguments[4], staleSeconds: stale)
             } else {
                 checkPlacement()
                 checkArc()
@@ -250,6 +254,7 @@ enum CompanionCheck {
                 await checkPointing()
                 checkLooksRender()
                 checkBubbleRender()
+                checkInkRender()
             }
             exit(failures == 0 ? 0 : 1)
         }
@@ -894,6 +899,34 @@ enum CompanionCheck {
     }
 
     @MainActor
+    static func checkInkRender() {
+        let screen = CGRect(x: -200, y: 300, width: 200, height: 100)
+        func drawn(_ ink: Ink) -> (pixels: Pixels, blobs: [Blob]) {
+            rendered(InkLayer(ink: ink, screenFrame: screen).frame(width: screen.width, height: screen.height), scale: 2)
+                ?? (Pixels(rgba: [], width: 0, height: 0), [])
+        }
+        func rgba(_ pixels: Pixels, _ x: Int, _ y: Int) -> [Int] {
+            let offset = (y * pixels.width + x) * 4
+            return pixels.rgba.count > offset + 3 ? pixels.rgba[offset...(offset + 3)].map(Int.init) : []
+        }
+        let line = drawn(Ink([Stroke(CGPoint(x: -180, y: 380), [CGPoint(x: -120, y: 380)])]))
+        let box = line.blobs.first?.box ?? .zero
+        expect(line.blobs.count == 1, "a stroke renders as one blob", "\(line.blobs.count) blobs")
+        expect(abs(box.minX - 18) <= 1 && abs(box.width - 64) <= 1 && box.minY == 18 && box.height == 4,
+               "a stroke from -180,380 to -120,380 fills 18,18 64x4 on the overlay at -200,300", "\(box)")
+        let colour = rgba(line.pixels, 100, 40)
+        expect(colour.count == 4 && zip(colour, [255, 48, 43, 255]).allSatisfy { abs($0 - $1) <= 2 },
+               "its middle pixel is the ink red 255,48,43", "\(colour)")
+        let dot = drawn(Ink([Stroke(CGPoint(x: -100, y: 350))])).blobs
+        let disk = dot.first?.box ?? .zero
+        expect(dot.count == 1 && near(dot.first?.centre, CGPoint(x: 100, y: 50), within: 0.5) && abs(disk.width - 8) <= 1 && abs(disk.height - 8) <= 1,
+               "a one-point stroke at -100,350 is an 8 pt disk centred on 100,50", "\(dot.map { "\($0.box) centre \(describe($0.centre))" })")
+        let away = drawn(Ink([Stroke(CGPoint(x: 500, y: 350), [CGPoint(x: 600, y: 350)])]))
+        let opaque = stride(from: 3, to: away.pixels.rgba.count, by: 4).filter { away.pixels.rgba[$0] > 0 }.count
+        expect(away.pixels.width == 400 && opaque == 0, "a stroke on another screen draws nothing here", "\(opaque) pixels with alpha")
+    }
+
+    @MainActor
     static func checkBubbleRender() {
         let screen = CGRect(x: 0, y: 0, width: 1920, height: 1080)
         let right = Bubble(label: "Wi-Fi switch", beside: CGPoint(x: 600, y: 400), on: [screen], appeared: .now)
@@ -1303,6 +1336,286 @@ enum CompanionCheck {
         } else {
             try? FileManager.default.removeItem(atPath: voiceScenario)
         }
+        move(to: saved)
+        try? await Task.sleep(for: .milliseconds(300))
+    }
+
+    static func activeTaps(_ pid: Int32) -> [CGEventTapInformation] {
+        var count: UInt32 = 0
+        CGGetEventTapList(0, nil, &count)
+        var taps = [CGEventTapInformation](repeating: CGEventTapInformation(), count: Int(count))
+        CGGetEventTapList(count, &taps, &count)
+        return taps.prefix(Int(count)).filter { $0.tappingProcess == pid && $0.options == .defaultTap }
+    }
+
+    static func isInk(_ pixels: Pixels, _ index: Int) -> Bool {
+        let p = pixels.rgba
+        return p[index + 3] >= 200 && p[index] >= 180 && p[index + 1] <= 90 && p[index + 2] <= 90
+    }
+
+    static func inked(_ pixels: Pixels, at pixel: CGPoint) -> Bool {
+        let (x, y) = (Int(pixel.x), Int(pixel.y))
+        return (y - 1...y + 1).contains { row in
+            (x - 1...x + 1).contains { column in
+                (0..<pixels.width).contains(column) && (0..<pixels.height).contains(row) && isInk(pixels, (row * pixels.width + column) * 4)
+            }
+        }
+    }
+
+    static func inkCount(_ pixels: Pixels) -> Int {
+        stride(from: 0, to: pixels.rgba.count, by: 4).filter { isInk(pixels, $0) }.count
+    }
+
+    static func glyphBesideInk(_ pixels: Pixels, scale: Double) -> CGPoint? {
+        var (sumX, sumY, count) = (0.0, 0.0, 0)
+        for y in 0..<pixels.height {
+            for x in 0..<pixels.width {
+                let index = (y * pixels.width + x) * 4
+                guard pixels.rgba[index + 3] >= 230, !isInk(pixels, index) else { continue }
+                sumX += Double(x) + 0.5
+                sumY += Double(y) + 0.5
+                count += 1
+            }
+        }
+        return count > 0 ? CGPoint(x: sumX / Double(count) / scale, y: sumY / Double(count) / scale) : nil
+    }
+
+    static func requestCount(_ directory: String) -> Int {
+        ((try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []).filter { $0.hasSuffix(".json") }.count
+    }
+
+    static func newestFirstImage(_ directory: String) -> CGImage? {
+        let numbers = ((try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? [])
+            .compactMap { $0.hasSuffix(".json") ? Int($0.dropLast(5)) : nil }
+        guard let newest = numbers.max(),
+              let body = try? Data(contentsOf: URL(fileURLWithPath: directory).appending(path: "\(newest).json")),
+              let messages = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["messages"] as? [[String: Any]],
+              let content = messages.last?["content"] as? [[String: Any]],
+              let image = content.first(where: { $0["type"] as? String == "image" }),
+              let base64 = (image["source"] as? [String: Any])?["data"] as? String,
+              let jpeg = Data(base64Encoded: base64),
+              let source = CGImageSourceCreateWithData(jpeg as CFData, nil)
+        else { return nil }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil)
+    }
+
+    static func checkInk(pid: Int32, requests: String, hearing: String, staleSeconds: Double) async {
+        let saved = CGEvent(source: nil)?.location ?? .zero
+        let main = CGMainDisplayID()
+        let b = CGDisplayBounds(main)
+        guard let screen = NSScreen.screens.first(where: { displayID($0) == main }),
+              let overlay = overlays(pid).first(where: { $0.bounds == b })
+        else {
+            expect(false, "the primary display has an overlay")
+            return
+        }
+        let idle = await waitForVoice("idle", pid: pid, seconds: 20)
+        expect(idle?.contains("voice=idle") ?? true, "the previous turn has ended in idle", idle ?? "no state line in 2 minutes")
+
+        let victim = RecordingView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        let panel = NSPanel(
+            contentRect: NSRect(x: screen.frame.midX - 200, y: screen.frame.midY - 150, width: 400, height: 300),
+            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.level = .floating
+        panel.isReleasedWhenClosed = false
+        panel.contentView = victim
+        panel.orderFrontRegardless()
+        defer { panel.close() }
+        let previousHearing = try? String(contentsOfFile: hearing, encoding: .utf8)
+        func hear(_ mode: String) { try? "\(mode)\n".write(toFile: hearing, atomically: true, encoding: .utf8) }
+
+        let primaryHeight = b.height
+        let centre = CGPoint(x: b.midX, y: b.midY)
+        func at(_ dx: CGFloat, _ dy: CGFloat) -> CGPoint { CGPoint(x: centre.x + dx, y: centre.y + dy) }
+        func local(_ quartz: CGPoint) -> CGPoint { CGPoint(x: quartz.x - b.minX, y: quartz.y - b.minY) }
+        func logged(_ quartz: CGPoint) -> String { String(format: "%.1f,%.1f", quartz.x, primaryHeight - quartz.y) }
+        let chorded: CGEventFlags = [.maskControl, .maskAlternate]
+        func post(_ type: CGEventType, at point: CGPoint, flags: CGEventFlags) {
+            guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else { return }
+            event.flags = flags
+            event.post(tap: .cghidEventTap)
+        }
+        func drag(from start: CGPoint, steps: Int, flags: CGEventFlags) async -> CGPoint {
+            var point = start
+            for _ in 0..<steps {
+                point.x += 12
+                post(.leftMouseDragged, at: point, flags: flags)
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            return point
+        }
+        func inkLines() -> [String] {
+            companionLog(pid: pid, categories: ["ink", "screenshot", "state", "transcription"]).split(separator: "\n").map(String.init)
+        }
+        func overlayShot() -> (pixels: Pixels, scale: Double)? { capture(overlay) }
+        func onOverlay(_ shot: (pixels: Pixels, scale: Double)?, _ quartz: CGPoint) -> Bool {
+            guard let shot else { return false }
+            let point = local(quartz)
+            return inked(shot.pixels, at: CGPoint(x: point.x * shot.scale, y: point.y * shot.scale))
+        }
+
+        let dot = at(-150, -80)
+        let firstStart = at(-120, -40)
+        let secondStart = at(-120, 40)
+        let drawn = [dot, at(-72, -40), at(-90, 40)]
+        hear("silent")
+        move(to: at(-160, -100))
+        try? await Task.sleep(for: .milliseconds(300))
+        let requestsBefore = requestCount(requests)
+
+        await chord(down: true)
+        let chordDown = ContinuousClock.now
+        try? await Task.sleep(for: .milliseconds(50))
+        post(.leftMouseDown, at: dot, flags: chorded)
+        try? await Task.sleep(for: .milliseconds(10))
+        post(.leftMouseUp, at: dot, flags: chorded)
+        try? await Task.sleep(for: .milliseconds(20))
+        post(.leftMouseDown, at: firstStart, flags: chorded)
+        try? await Task.sleep(for: .milliseconds(10))
+        let firstEnd = await drag(from: firstStart, steps: 8, flags: chorded)
+        post(.leftMouseUp, at: firstEnd, flags: chorded)
+        try? await Task.sleep(until: chordDown + .milliseconds(400), clock: .continuous)
+        let listening = await waitForVoice("listening", pid: pid, seconds: 5)
+        expect(listening?.contains("voice=listening") ?? false, "the chord became a hold", listening ?? "no state line")
+        let drawing = loggedField("utterance", in: listening).map(String.init) ?? "?"
+
+        try? await Task.sleep(until: chordDown + .milliseconds(1500), clock: .continuous)
+        post(.leftMouseDown, at: secondStart, flags: chorded)
+        try? await Task.sleep(for: .milliseconds(10))
+        let sealedAt = await drag(from: secondStart, steps: 5, flags: chorded)
+        try? await Task.sleep(for: .milliseconds(300))
+        let pen = activeTaps(pid)
+        expect(pen.count == 1 && pen.allSatisfy { $0.enabled && $0.eventsOfInterest == 70 },
+               "mid-chord the app has one enabled active tap on left down, up and drag (mask 70)",
+               "\(pen.map { "enabled \($0.enabled) mask \($0.eventsOfInterest)" })")
+        let held = overlayShot()
+        let glyph = held.flatMap { glyphBesideInk($0.pixels, scale: $0.scale) }
+        let following = CGPoint(x: sealedAt.x - b.minX + 35, y: sealedAt.y - b.minY + 25)
+        expect(near(glyph, following, within: 2), "while drawing, the glyph followed the drags, so they reached it as moves",
+               "\(describe(glyph)) vs \(describe(following))")
+        expect(drawn.allSatisfy { onOverlay(held, $0) }, "mid-hold the overlay shows the dot, the first stroke and the second stroke so far")
+
+        try? await Task.sleep(until: chordDown + .milliseconds(3000), clock: .continuous)
+        let chordUp = ContinuousClock.now
+        await chord(down: false)
+        let finalPoint = await drag(from: sealedAt, steps: 5, flags: [])
+        post(.leftMouseUp, at: finalPoint, flags: [])
+        try? await Task.sleep(for: .milliseconds(150))
+        expect(activeTaps(pid).isEmpty, "150 ms after the last up the pen's tap is gone", "\(activeTaps(pid).count) active taps")
+        expect(victim.downs == 0 && victim.ups == 0 && victim.drags == 0, "the window under the pen got no down, up or drag",
+               "down \(victim.downs) up \(victim.ups) drag \(victim.drags)")
+
+        let quiet = await waitForVoice("idle", pid: pid, seconds: 10)
+        let delivered = inkLines().last { $0.contains("transcription delivered ") && $0.contains(" utterance=\(drawing) ") }
+        expect((quiet?.contains("voice=idle") ?? false) && (delivered?.hasSuffix("text=") ?? false),
+               "the hold that only drew heard no words and went idle", "\(quiet ?? "no state line"); \(delivered ?? "no delivered line")")
+        let sentFirst = inkLines().last { $0.contains("ink sent utterance=\(drawing) ") }
+        let through = loggedField("through", in: sentFirst).map(String.init) ?? "?"
+        expect(sentFirst != nil, "its release sent the ink with utterance \(drawing)", "no ink sent line")
+        try? await Task.sleep(until: chordUp + .milliseconds(2900), clock: .continuous)
+        postModifier(59, down: true, flags: .maskControl)
+        try? await Task.sleep(until: chordUp + .milliseconds(3000), clock: .continuous)
+        let kept = overlayShot()
+        expect(drawn.allSatisfy { onOverlay(kept, $0) }, "3 s after that idle hold the ink is still on the overlay")
+        expect(!onOverlay(kept, at(-24, 40)) && !onOverlay(kept, finalPoint), "drags after the chord went up drew nothing")
+
+        hear("heard")
+        postModifier(58, down: true, flags: chorded)
+        let askDown = ContinuousClock.now
+        try? await Task.sleep(until: askDown + .milliseconds(2500), clock: .continuous)
+        await chord(down: false)
+        try? await Task.sleep(for: .milliseconds(150))
+        let asking = overlayShot()
+        let voice = lastVoice(pid: pid)
+        expect(voice?.contains("voice=processing") ?? false, "that overlay was read while the voice was processing", voice ?? "no state line")
+        expect(drawn.allSatisfy { onOverlay(asking, $0) }, "while the question is processed the ink is still on the overlay")
+        let sentSecond = inkLines().last { $0.contains("ink sent ") }
+        let asked = loggedField("utterance", in: sentSecond).map(String.init) ?? "?"
+        expect(asked != drawing && loggedField("through", in: sentSecond).map(String.init) == through,
+               "the asking hold is a new utterance sent with the same strokes, through=\(through)", sentSecond ?? "no ink sent line")
+
+        let deadline = Date().addingTimeInterval(15)
+        while requestCount(requests) == requestsBefore, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        if let image = requestCount(requests) > requestsBefore ? newestFirstImage(requests) : nil, let pixels = decode(image) {
+            func pixel(_ quartz: CGPoint) -> CGPoint {
+                CGPoint(x: (quartz.x - b.minX) * Double(image.width) / b.width, y: (quartz.y - b.minY) * Double(image.height) / b.height)
+            }
+            for (name, point) in zip(["the dot", "the first stroke", "the second stroke before the release"], drawn) {
+                expect(inked(pixels, at: pixel(point)), "Claude's screenshot has \(name) in red",
+                       "at pixel \(describe(pixel(point))) of \(image.width)x\(image.height)")
+            }
+            expect([at(-24, 40), finalPoint, at(100, -40)].allSatisfy { !inked(pixels, at: pixel($0)) },
+                   "and no red past the release or 100 pt beside the strokes")
+        } else {
+            expect(false, "Claude got a request with a screenshot within 15 s of the asking release", "\(requestCount(requests)) requests, \(requestsBefore) before")
+        }
+        let lines = inkLines()
+        let strokes = lines.filter { $0.contains("ink stroke ") }.suffix(3).map { line in
+            [loggedField("points", in: line), loggedField("from", in: line), loggedField("sealed", in: line)].map { $0.map(String.init) ?? "?" }
+        }
+        let expected = [["1", logged(dot), "no"], ["9", logged(firstStart), "no"], ["6", logged(secondStart), "yes"]]
+        expect(strokes == expected, "the log has the dot, the 9-point stroke and the sealed 6-point stroke, from where they were posted",
+               "\(strokes) vs \(expected)")
+        let inkedLine = lines.last { $0.contains("screenshot inked ") }
+        expect(inkedLine?.hasSuffix("display=\(main) strokes=3") ?? false, "the screenshot of the primary display was inked with 3 strokes",
+               inkedLine ?? "no screenshot inked line")
+        let labelled = lines.last { $0.contains("screenshot labelled display=\(main) ") }
+        expect(labelled?.contains(". The user drew the red marks on this screen to show you what they mean. When they say \"this\", they mean what they marked. This image is ") ?? false,
+               "its label tells Claude the user drew the red marks", labelled ?? "no screenshot labelled line")
+
+        let clearedBefore = inkLines().filter { $0.contains("ink cleared ") }.count
+        let done = await waitForVoice("idle", pid: pid, seconds: 20)
+        expect(done?.contains("voice=idle") ?? false, "the answer finished and the voice went idle", done ?? "no state line")
+        try? await Task.sleep(for: .milliseconds(600))
+        let spent = overlayShot().map { inkCount($0.pixels) }
+        expect(spent == 0, "0.6 s after the answer the ink it was asked with is gone", "\(spent.map(String.init) ?? "no capture") red pixels")
+        expect(inkLines().filter { $0.contains("ink cleared ") }.count == clearedBefore, "the answer spent it, not the stale clear")
+
+        let listeningBefore = inkLines().filter { $0.contains("state voice=listening") }.count
+        let requestsBeforeQuick = requestCount(requests)
+        let quickStart = at(-120, -100)
+        let quickMiddle = at(-90, -100)
+        move(to: quickStart)
+        try? await Task.sleep(for: .milliseconds(300))
+        await chord(down: true)
+        let quickDown = ContinuousClock.now
+        try? await Task.sleep(for: .milliseconds(50))
+        post(.leftMouseDown, at: quickStart, flags: chorded)
+        try? await Task.sleep(for: .milliseconds(10))
+        let quickEnd = await drag(from: quickStart, steps: 5, flags: chorded)
+        post(.leftMouseUp, at: quickEnd, flags: chorded)
+        try? await Task.sleep(until: quickDown + .milliseconds(200), clock: .continuous)
+        let quickUp = ContinuousClock.now
+        await chord(down: false)
+        try? await Task.sleep(until: quickUp + .seconds(1), clock: .continuous)
+        let quick = overlayShot()
+        expect(onOverlay(quick, quickMiddle) && !drawn.contains { onOverlay(quick, $0) },
+               "a chord let go inside the shortcut window keeps its stroke, and the answered strokes stay gone")
+        expect(activeTaps(pid).isEmpty, "and holds no active tap", "\(activeTaps(pid).count)")
+        expect(inkLines().filter { $0.contains("state voice=listening") }.count == listeningBefore && requestCount(requests) == requestsBeforeQuick,
+               "no hold began and Claude was not asked")
+        expect(victim.downs == 0 && victim.ups == 0 && victim.drags == 0, "the window under the pen still got nothing",
+               "down \(victim.downs) up \(victim.ups) drag \(victim.drags)")
+        try? await Task.sleep(until: quickUp + .seconds(staleSeconds - 0.8), clock: .continuous)
+        expect(onOverlay(overlayShot(), quickMiddle), "0.8 s before the stale time the stroke is still there")
+        try? await Task.sleep(until: quickUp + .seconds(staleSeconds + 1), clock: .continuous)
+        let stale = overlayShot().map { inkCount($0.pixels) }
+        let cleared = inkLines().last { $0.contains("ink cleared ") }
+        expect(stale == 0 && (cleared?.hasSuffix("ink cleared reason=stale strokes=1") ?? false),
+               "1 s after the stale time the unused stroke was cleared", "\(stale.map(String.init) ?? "no capture") red pixels; \(cleared ?? "no ink cleared line")")
+
+        let control = at(100, 0)
+        move(to: control)
+        try? await Task.sleep(for: .milliseconds(100))
+        post(.leftMouseDown, at: control, flags: [])
+        try? await Task.sleep(for: .milliseconds(20))
+        post(.leftMouseUp, at: control, flags: [])
+        try? await Task.sleep(for: .milliseconds(300))
+        expect(victim.downs == 1 && victim.ups == 1, "a plain click on the same window reaches it", "down \(victim.downs) up \(victim.ups)")
+
+        hear(previousHearing?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "ok")
         move(to: saved)
         try? await Task.sleep(for: .milliseconds(300))
     }

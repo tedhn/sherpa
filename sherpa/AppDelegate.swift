@@ -27,7 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
         Task { await companion.start() }
-        let hotkey = Hotkey(state: state)
+        let hotkey = Hotkey(state: state, pen: Pen(state: state))
         self.hotkey = hotkey
         Task { await hotkey.start() }
     }

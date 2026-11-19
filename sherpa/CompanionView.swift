@@ -18,6 +18,7 @@ struct CompanionView: View {
         .animation(.easeInOut(duration: 0.15), value: kind)
         .opacity(companion.resting && voice == .idle ? 0 : 1)
         .position(Companion.local(companion.position, in: screenFrame))
+        .background { UserInk(state: state, screenFrame: screenFrame) }
         .overlay {
             if let bubble = companion.bubble {
                 let centre = Companion.local(CGPoint(x: bubble.frame.midX, y: bubble.frame.midY), in: screenFrame)
@@ -44,6 +45,30 @@ struct CompanionView: View {
         case .idle, .responding: .arrow(heading: heading)
         case .listening: .waveform(level: state.microphone.level.fraction)
         case .processing: .spinner
+        }
+    }
+}
+
+struct UserInk: View {
+    let state: AppState
+    let screenFrame: CGRect
+
+    /// Two layers split at the current question's mark, so when its answer spends the strokes it
+    /// was asked with, only those fade and the strokes drawn since stay put.
+    var body: some View {
+        let shown = state.shownInk.strokes
+        let since = state.transcription?.sentThrough.map { state.sheet.ink(after: $0).strokes } ?? shown
+        let asked = Ink(Array(shown.dropLast(since.count)))
+        ZStack {
+            if !asked.isEmpty {
+                InkLayer(ink: asked, screenFrame: screenFrame)
+                    .id(state.transcription?.number)
+                    .transition(InkLayer.fade)
+            }
+            if !since.isEmpty {
+                InkLayer(ink: Ink(since), screenFrame: screenFrame)
+                    .transition(InkLayer.fade)
+            }
         }
     }
 }

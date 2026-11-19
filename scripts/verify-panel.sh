@@ -95,12 +95,12 @@ swiftc -parse-as-library -o "$DERIVED/supabase-check" \
 
 echo "screenshot"
 swiftc -parse-as-library -o "$DERIVED/screenshot-check" \
-    sherpa/Screenshot.swift scripts/screenshot-check.swift >/dev/null \
+    sherpa/Ink.swift sherpa/Screenshot.swift scripts/screenshot-check.swift >/dev/null \
     && "$DERIVED/screenshot-check" || failures=$((failures + 1))
 
 echo "claude"
 swiftc -parse-as-library -o "$DERIVED/claude-check" \
-    sherpa/Screenshot.swift sherpa/Claude.swift sherpa/Companion.swift scripts/claude-check.swift >/dev/null \
+    sherpa/Ink.swift sherpa/Screenshot.swift sherpa/Claude.swift sherpa/Companion.swift scripts/claude-check.swift >/dev/null \
     && "$DERIVED/claude-check" || failures=$((failures + 1))
 
 echo "voice"
@@ -124,7 +124,7 @@ app_swift_flags=(
     -enable-upcoming-feature NonisolatedNonsendingByDefault
 )
 swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/hotkey-start-check" \
-    sherpa/Hotkey.swift scripts/hotkey-start-check.swift >/dev/null \
+    sherpa/Hotkey.swift sherpa/Pen.swift scripts/hotkey-start-check.swift >/dev/null \
     && "$DERIVED/hotkey-start-check" || failures=$((failures + 1))
 
 echo "overlay"
@@ -132,7 +132,7 @@ swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/overlay-check" \
     sherpa/Overlay.swift scripts/overlay-check.swift >/dev/null \
     && "$DERIVED/overlay-check" || failures=$((failures + 1))
 swiftc -parse-as-library -O "${app_swift_flags[@]}" -o "$DERIVED/companion-check" \
-    sherpa/Companion.swift sherpa/CompanionGlyph.swift scripts/companion-check.swift >/dev/null \
+    sherpa/Ink.swift sherpa/Companion.swift sherpa/CompanionGlyph.swift scripts/companion-check.swift >/dev/null \
     && "$DERIVED/companion-check" || failures=$((failures + 1))
 
 echo "transcription"
@@ -140,11 +140,13 @@ swiftc -o "$DERIVED/fake-assemblyai" scripts/fake-assemblyai.swift >/dev/null \
     && swiftc -o "$DERIVED/fake-claude" scripts/fake-claude.swift >/dev/null \
     && swiftc -o "$DERIVED/fake-voice" scripts/fake-voice.swift >/dev/null \
     && swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/transcription-check" \
-        sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Supabase.swift sherpa/Screenshot.swift sherpa/Claude.swift sherpa/Speaker.swift sherpa/Transcription.swift sherpa/Companion.swift \
+        sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Supabase.swift sherpa/Ink.swift sherpa/Screenshot.swift sherpa/Claude.swift sherpa/Speaker.swift sherpa/Transcription.swift sherpa/Companion.swift \
         scripts/transcription-check.swift >/dev/null \
     && "$DERIVED/transcription-check" "$DERIVED/fake-assemblyai" || failures=$((failures + 1))
 
 idle_seconds=8
+# Long enough to outlast an answered turn on the fakes, so only unused ink meets the stale clear.
+ink_stale_seconds=8
 fake_answer_delay=1.0
 fake_ports="$DERIVED/fake-assemblyai.ports"
 fake_capture="$DERIVED/fake-assemblyai.pcm"
@@ -210,7 +212,7 @@ if [[ -s "$fake_ports" ]]; then
     read -r token_field socket_field < "$fake_ports"
     open -a "$APP" --args -AssemblyAITokenURL "${token_field#token=}" \
         -AssemblyAISocketURL "${socket_field#socket=}" -AssemblyAIAPIKey fake -AssemblyAIIdleSeconds "$idle_seconds" \
-        -CompanionRestSeconds 8 \
+        -CompanionRestSeconds 8 -InkStaleSeconds "$ink_stale_seconds" \
         "${supabase_flags[@]}" "${claude_flags[@]}" "${voice_flags[@]}" -MicrophoneScenarioFile "$microphone_scenario"
 else
     echo "  FAIL the fake AssemblyAI never wrote its ports"
@@ -295,6 +297,10 @@ echo "close"
 proc 'to click menu bar item 1 of menu bar 2' >/dev/null
 wait_for_windows 0
 check "a second click closes the panel" "0" "$(proc 'to return count of windows')"
+
+echo "ink"
+[[ -x "$DERIVED/companion-check" && -n "$fake_claude_requests" && -n "$fake_capture" ]] \
+    && { "$DERIVED/companion-check" --ink "$app_pid" "$fake_claude_requests" "$fake_scenario" "$ink_stale_seconds" || failures=$((failures + 1)); }
 
 echo "outside click"
 if [[ $panel_w -eq 0 ]]; then

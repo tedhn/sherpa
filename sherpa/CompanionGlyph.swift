@@ -136,3 +136,28 @@ struct BubblePop: Transition {
             .opacity(phase == .didDisappear ? 0 : 1)
     }
 }
+
+struct InkLayer: View {
+    let ink: Ink
+    let screenFrame: CGRect
+
+    static let fade = AnyTransition.asymmetric(
+        insertion: .identity,
+        removal: AnyTransition.opacity.animation(.easeOut(duration: 0.3))
+    )
+
+    var body: some View {
+        let plane = Ink.Plane(frame: screenFrame, size: screenFrame.size)
+        InkShape(ink: ink, plane: plane)
+            .stroke(Color(cgColor: Ink.red), style: StrokeStyle(lineWidth: plane.lineWidth, lineCap: .round, lineJoin: .round))
+    }
+}
+
+private struct InkShape: Shape {
+    let ink: Ink
+    let plane: Ink.Plane
+
+    func path(in rect: CGRect) -> Path {
+        Path(ink.path(in: plane))
+    }
+}

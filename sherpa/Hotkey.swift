@@ -3,8 +3,13 @@ import os
 
 private nonisolated let logger = Logger(subsystem: "my.rooftop.sherpa", category: "hotkey")
 
+extension CGEventFlags {
+    nonisolated var holdsChord: Bool { contains([.maskControl, .maskAlternate]) }
+}
+
 final class Hotkey {
     private let state: AppState
+    private let pen: Pen
     private enum Tap {
         case stopped
         case starting
@@ -22,8 +27,9 @@ final class Hotkey {
     private var tap = Tap.stopped
     private var chord = Chord.up
 
-    init(state: AppState) {
+    init(state: AppState, pen: Pen) {
         self.state = state
+        self.pen = pen
     }
 
     func start() async {
@@ -60,7 +66,8 @@ final class Hotkey {
     }
 
     fileprivate func flagsChanged(_ flags: CGEventFlags) {
-        if flags.contains([.maskControl, .maskAlternate]) {
+        pen.chord(down: flags.holdsChord)
+        if flags.holdsChord {
             guard case .up = chord else { return }
             chord = .waiting(Task { [weak self] in
                 try? await Task.sleep(for: Hotkey.shortcutWindow)
