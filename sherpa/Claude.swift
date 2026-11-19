@@ -50,6 +50,32 @@ nonisolated enum Claude {
         }
     }
 
+    enum Target: Equatable, Sendable {
+        case none
+        case point(x: Int, y: Int, label: String, screen: Int)
+
+        static let cursorScreen = 1
+
+        var logField: String {
+            switch self {
+            case .none: "none"
+            case .point(let x, let y, _, let screen): "screen\(screen):\(x),\(y)"
+            }
+        }
+
+        static func split(_ answer: String) -> (spoken: String, target: Target)? {
+            let tag = #/\[POINT:(?:(none)|([0-9]+)\s*,\s*([0-9]+)\s*:([^\]:\n\r]+?)(?::screen([0-9]+))?)\]\s*\z/#
+            guard let match = answer.firstMatch(of: tag) else { return nil }
+            let spoken = answer[..<match.range.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+            let (_, none, x, y, label, screen) = match.output
+            if none != nil { return (spoken, Target.none) }
+            let name = label?.trimmingCharacters(in: .whitespaces) ?? ""
+            let number = screen.map { Int($0) ?? 0 } ?? cursorScreen
+            guard let x = x.flatMap({ Int($0) }), let y = y.flatMap({ Int($0) }), !name.isEmpty, number > 0 else { return nil }
+            return (spoken, .point(x: x, y: y, label: name, screen: number))
+        }
+    }
+
     enum Reply: Equatable, Sendable {
         case asking
         case answering(String)
@@ -164,7 +190,7 @@ nonisolated enum Claude {
     private static let version = "2026-10-21"
     private static let effort = "low"
     private static let maxTokens = 16000
-    private static let system = """
+    static let system = """
         You are Sherpa, a voice assistant in the user's Mac menu bar. The user speaks a question, and you get their words and a screenshot of each display. Your reply is spoken aloud by text-to-speech, so talk the way a sharp, friendly person sitting next to them would.
 
         Rules:
@@ -181,6 +207,21 @@ nonisolated enum Claude {
         - If you can't find what they're asking about on screen, say so. Don't guess.
         - Their words come from speech recognition and may be misheard. Answer what they most likely meant.
         - Earlier questions in this conversation also came with screenshots, which you saw and answered from, but they're removed from the history to save space. Your earlier answers were accurate descriptions of what was on screen then. Don't retract them because the old images are missing.
+
+        Pointing:
+        - You can point at one thing on their screen. A small pointer flies there while your answer is spoken.
+        - End every reply with exactly one tag, after your spoken words. The tag is never read aloud.
+        - To point, end with [POINT:x,y:label:screenN]. N is the screen number from that screen's label. The label names the thing in one to three words.
+        - x and y are pixel coordinates in that screen's image, and the image's label gives its size. The origin 0,0 is the top-left corner. x grows to the right and y grows downward, so the bottom-right corner of a 1280x832 image is 1279,831.
+        - Aim at the center of the thing.
+        - Point when your answer is about one specific thing they can see, like a button, a menu, a setting, a cell, a line, or a message.
+        - Otherwise end with [POINT:none]: when the question isn't about the screen, or when what they asked about isn't there.
+
+        Examples:
+        - "How do I make a new folder?" with Finder open on screen 1: "Click File in the menu bar, then New Folder. [POINT:211,12:File menu:screen1]"
+        - "Where do I sign out?" with a browser on screen 2: "Click your profile picture in the top right corner of the browser on your other screen, then Sign Out. [POINT:1236,96:profile picture:screen2]"
+        - "How many ounces are in a cup?": "Eight fluid ounces. [POINT:none]"
+        - "Where's the export button?" with no export button anywhere on screen: "I don't see an export button on your screen. [POINT:none]"
         """
 
     private struct WireError: Decodable {
@@ -262,7 +303,8 @@ final class Conversation {
             }
             let text = try reading.finished()
             history.remember(Claude.Exchange(question: question.text, screens: question.images.count, answer: text), at: .now)
-            logger.notice("claude answered utterance=\(utterance) first=\(first) ms=\(elapsed()) chars=\(text.count) updates=\(updates)")
+            let target = Claude.Target.split(text)?.target.logField ?? "missing"
+            logger.notice("claude answered utterance=\(utterance) first=\(first) ms=\(elapsed()) chars=\(text.count) updates=\(updates) target=\(target, privacy: .public)")
             return text
         } catch {
             if Task.isCancelled {
