@@ -113,7 +113,7 @@ swiftc -parse-as-library -o "$DERIVED/dictation-check" \
     sherpa/AssemblyAI.swift sherpa/Dictation.swift scripts/dictation-check.swift >/dev/null \
     && "$DERIVED/dictation-check" || failures=$((failures + 1))
 
-echo "transcription"
+echo "hotkey start"
 app_swift_flags=(
     -swift-version 5 -default-isolation=MainActor -target arm64-apple-macos14.2 -D DEBUG
     -enable-upcoming-feature DisableOutwardActorInference
@@ -123,6 +123,11 @@ app_swift_flags=(
     -enable-upcoming-feature MemberImportVisibility
     -enable-upcoming-feature NonisolatedNonsendingByDefault
 )
+swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/hotkey-start-check" \
+    sherpa/Hotkey.swift scripts/hotkey-start-check.swift >/dev/null \
+    && "$DERIVED/hotkey-start-check" || failures=$((failures + 1))
+
+echo "transcription"
 swiftc -o "$DERIVED/fake-assemblyai" scripts/fake-assemblyai.swift >/dev/null \
     && swiftc -o "$DERIVED/fake-claude" scripts/fake-claude.swift >/dev/null \
     && swiftc -o "$DERIVED/fake-voice" scripts/fake-voice.swift >/dev/null \
