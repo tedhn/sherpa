@@ -16,6 +16,11 @@ final class Transcription {
 
     fileprivate(set) var shown: AssemblyAI.Transcript.Shown = .hearing("")
     fileprivate(set) var reply: Claude.Reply?
+    /// True from the whole answer until the voice finishes, fails or is cut
+    /// off, including the wait for its first audio. Never true without a voice.
+    /// Only this record's own answer task writes it, so a cut-off answer that
+    /// winds down late can't clear a newer record's flag.
+    fileprivate(set) var speaking = false
 
     var delivered: AssemblyAI.Final {
         get async {
@@ -244,8 +249,10 @@ final class Transcriber {
                     let question = Claude.Question(text: text, screenshots: await handoff(taken, utterance: utterance))
                     do throws(Claude.Failure) {
                         let answer = try await conversation.answer(question, utterance: utterance) { record.reply = .answering($0) }
+                        record.speaking = speaker != nil
                         record.reply = .answered(answer)
                         await speaker?.speak(answer, utterance: utterance)
+                        record.speaking = false
                     } catch {
                         record.reply = .failed(error)
                     }

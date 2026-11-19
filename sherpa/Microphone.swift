@@ -94,6 +94,15 @@ final class MicrophoneCapture {
     private let started: ContinuousClock.Instant
 
     static func start() throws(MicrophoneProblem) -> (capture: MicrophoneCapture, speech: SpeechStream, recorded: @Sendable () -> Data) {
+        #if DEBUG
+        // The harness cannot make a working Mac's microphone fail, so it writes
+        // engineFailed into this file between presses. Read on each press.
+        if let path = UserDefaults.standard.string(forKey: "MicrophoneScenarioFile"),
+           (try? String(contentsOfFile: path, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) == "engineFailed" {
+            logger.notice("hold failed reason=engineFailed scenario=file")
+            throw .engineFailed
+        }
+        #endif
         let started = ContinuousClock.now
         let engine = AVAudioEngine()
         let input = engine.inputNode

@@ -167,6 +167,8 @@ rm -rf "$fake_voice_port" "$fake_voice_requests"
 echo ok > "$fake_voice_scenario"
 "$DERIVED/fake-voice" "$fake_voice_port" "$fake_voice_requests" --scenario-file "$fake_voice_scenario" >/dev/null &
 fake_voice_pid=$!
+microphone_scenario="$DERIVED/microphone.scenario"
+echo ok > "$microphone_scenario"
 trap 'kill "$fake_pid" "$fake_supabase_pid" "$fake_claude_pid" "$fake_voice_pid" 2>/dev/null' EXIT
 deadline=$((SECONDS + 10))
 while [[ ! -s "$fake_ports" || ! -s "$fake_supabase_port" || ! -s "$fake_claude_port" || ! -s "$fake_voice_port" ]] && (( SECONDS < deadline )); do sleep 0.1; done
@@ -200,7 +202,7 @@ if [[ -s "$fake_ports" ]]; then
     read -r token_field socket_field < "$fake_ports"
     open -a "$APP" --args -AssemblyAITokenURL "${token_field#token=}" \
         -AssemblyAISocketURL "${socket_field#socket=}" -AssemblyAIAPIKey fake -AssemblyAIIdleSeconds "$idle_seconds" \
-        "${supabase_flags[@]}" "${claude_flags[@]}" "${voice_flags[@]}"
+        "${supabase_flags[@]}" "${claude_flags[@]}" "${voice_flags[@]}" -MicrophoneScenarioFile "$microphone_scenario"
 else
     echo "  FAIL the fake AssemblyAI never wrote its ports"
     failures=$((failures + 1))
@@ -262,7 +264,7 @@ else
 fi
 
 echo "hold to talk"
-swift "$(dirname "$0")/hold-to-talk-check.swift" "$app_pid" ${fake_capture:+"$fake_capture" "$fake_scenario" "$idle_seconds" "$fake_archive" "$fake_claude_requests" "$fake_claude_scenario" "$fake_voice_requests" "$fake_voice_scenario"} \
+swift "$(dirname "$0")/hold-to-talk-check.swift" "$app_pid" ${fake_capture:+"$fake_capture" "$fake_scenario" "$idle_seconds" "$fake_archive" "$fake_claude_requests" "$fake_claude_scenario" "$fake_voice_requests" "$fake_voice_scenario" "$microphone_scenario"} \
     || failures=$((failures + 1))
 check_focus_kept "focus still behind after using the panel" "$front_before" "$(frontmost)"
 

@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ContentView: View {
-    @ObservedObject var state: AppState
+    let state: AppState
     // DragGesture rather than a button style: isPressed on a ButtonStyle goes
     // false when the pointer leaves the control, which would cut a speaker off
     // for wobbling. A gesture tracks until the mouse-up, and resets on cancel.
@@ -17,7 +17,7 @@ struct ContentView: View {
                 .font(.system(size: 28, weight: .semibold))
                 .foregroundStyle(.white)
                 .frame(width: 72, height: 72)
-                .background(state.microphone.isListening ? Color.red : Color.accentColor, in: Circle())
+                .background(state.voice == .listening ? Color.red : Color.accentColor, in: Circle())
                 .scaleEffect(isPressed ? 0.94 : 1)
                 .contentShape(Circle())
                 .gesture(DragGesture(minimumDistance: 0).updating($isPressed) { _, pressed, _ in pressed = true })
@@ -26,7 +26,7 @@ struct ContentView: View {
                 .accessibilityAddTraits(.isButton)
                 .accessibilityLabel("Hold to talk")
 
-            TimelineView(.animation(paused: !state.microphone.isListening)) { _ in
+            TimelineView(.animation(paused: state.voice != .listening)) { _ in
                 LevelBar(fill: state.microphone.level)
             }
 
@@ -102,7 +102,7 @@ private extension ContentView {
     var transcriptLine: String {
         guard let transcription = state.transcription else { return "" }
         switch transcription.shown {
-        case .hearing(let words): return words.isEmpty && !state.microphone.isListening ? "…" : words
+        case .hearing(let words): return words.isEmpty && state.voice == .processing ? "…" : words
         case .final(.heard(let sentence)): return sentence
         case .final(.silence): return "Didn't catch that"
         case .final(.failed(.noAPIKey)): return "No AssemblyAI key is set"
@@ -130,7 +130,7 @@ private extension ContentView {
     var replyLine: String {
         switch state.transcription?.reply {
         case nil:
-            if case .hearing = state.transcription?.shown, !state.microphone.isListening { "Asking Claude…" } else { "" }
+            state.voice == .processing ? "Asking Claude…" : ""
         case .asking: "Asking Claude…"
         case .answering(let text), .answered(let text): text
         case .failed(.noAPIKey): "No Anthropic key is set"
