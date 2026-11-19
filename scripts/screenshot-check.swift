@@ -99,6 +99,7 @@ enum ScreenshotCheck {
         checkLabels()
         checkPoint()
         checkFailure()
+        checkInk()
         exit(failures == 0 ? 0 : 1)
     }
 
@@ -227,6 +228,84 @@ enum ScreenshotCheck {
             Screenshot.Failure.listing("WindowServer gone").logFields == "reason=listing detail=WindowServer gone",
             "a listing failure renders its detail last"
         )
+    }
+
+    static func white(_ width: Int, _ height: Int) -> CGImage {
+        let context = context(width, height)
+        context.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage()!
+    }
+
+    static func rgb(_ image: CGImage, _ x: Int, _ y: Int) -> [Int] {
+        let context = context(image.width, image.height)
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        let offset = y * context.bytesPerRow + x * 4
+        let bytes = context.data!.assumingMemoryBound(to: UInt8.self)
+        return [Int(bytes[offset]), Int(bytes[offset + 1]), Int(bytes[offset + 2])]
+    }
+
+    static func near(_ got: [Int], _ want: [Int], within tolerance: Int) -> Bool {
+        zip(got, want).allSatisfy { abs($0 - $1) <= tolerance }
+    }
+
+    static func checkInk() {
+        print("ink")
+        let red = [255, 48, 43]
+        let paper = [255, 255, 255]
+        let frame = CGRect(x: 100, y: 50, width: 800, height: 400)
+        let blank = white(400, 200)
+        let line = Ink([Stroke(CGPoint(x: 300, y: 250), [CGPoint(x: 500, y: 250)])]).composited(onto: blank, appKitFrame: frame)
+        expect(line.width == 400 && line.height == 200, "the inked image keeps its 400x200 size, got \(line.width)x\(line.height)")
+        for (x, y) in [(150, 99), (150, 100), (101, 100), (199, 99)] {
+            expect(near(rgb(line, x, y), red, within: 2), "a stroke from 300,250 to 500,250 colours pixel \(x),\(y) \(red), got \(rgb(line, x, y))")
+        }
+        for (x, y) in [(150, 97), (150, 102), (95, 100), (205, 100)] {
+            expect(rgb(line, x, y) == paper, "pixel \(x),\(y) stays white, got \(rgb(line, x, y))")
+        }
+        let edge = rgb(line, 150, 98)
+        expect(edge[0] >= 253 && (120...185).contains(edge[1]), "at 0.5 px per point the line is 3 px, not 2: row 98 is half red, got \(edge)")
+
+        let top = Ink([Stroke(CGPoint(x: 300, y: 440), [CGPoint(x: 500, y: 440)])]).composited(onto: blank, appKitFrame: frame)
+        expect(near(rgb(top, 150, 4), red, within: 2) && near(rgb(top, 150, 5), red, within: 2),
+               "a stroke at y 440 colours rows 4 and 5 from the top, got \(rgb(top, 150, 4)) and \(rgb(top, 150, 5))")
+        expect(rgb(top, 150, 194) == paper && rgb(top, 150, 195) == paper, "and not rows 194 and 195, so the y axis is flipped once")
+
+        let away = Ink([Stroke(CGPoint(x: 2000, y: 250), [CGPoint(x: 2100, y: 250)])])
+        expect(away.composited(onto: blank, appKitFrame: frame) === blank, "ink off the display returns the same image")
+        expect(away.touching(frame).isEmpty, "ink off the display touches nothing")
+        let mixed = Ink([Stroke(CGPoint(x: 2000, y: 250)), Stroke(CGPoint(x: 300, y: 250))])
+        expect(mixed.touching(frame) == Ink([Stroke(CGPoint(x: 300, y: 250))]), "touching keeps only the stroke on the display, got \(mixed.touching(frame))")
+        let grazing = Ink([Stroke(CGPoint(x: 902, y: 250))])
+        expect(grazing.touching(frame).strokes.count == 1, "a dot 2 pt past the right edge still touches, its 3 px cap reaches in")
+
+        let dot = Ink([Stroke(CGPoint(x: 50, y: 50))]).composited(onto: white(400, 200), appKitFrame: CGRect(x: 0, y: 0, width: 400, height: 200))
+        expect(near(rgb(dot, 49, 149), red, within: 2) && near(rgb(dot, 50, 150), red, within: 2),
+               "a one-point stroke at 50,50 draws a dot over pixels 49,149 and 50,150, got \(rgb(dot, 49, 149)) and \(rgb(dot, 50, 150))")
+        expect(rgb(dot, 54, 150) == paper && rgb(dot, 50, 145) == paper, "the dot is 4 px across, pixels 54,150 and 50,145 stay white")
+
+        let full = CGRect(x: 0, y: 0, width: 400, height: 200)
+        let round = Ink([Stroke(CGPoint(x: 100, y: 100), [CGPoint(x: 300, y: 100)])]).composited(onto: white(400, 200), appKitFrame: full)
+        let back = Screenshot(encoding: round, display: 1, appKitFrame: full, cursor: .zero).flatMap { decoded($0.jpeg) }
+        let sample = back.map { rgb($0, 200, 99) } ?? []
+        expect(near(sample, red, within: 10), "a 4 px line survives the JPEG at pixel 200,99 as \(red) within 10, got \(sample)")
+
+        let builtIn = Screenshot(encoding: solid(1280, 832), display: 1, appKitFrame: builtInFrame, cursor: .zero)!
+        let plane = Ink.Plane(frame: builtInFrame, size: CGSize(width: 1280, height: 832))
+        for (x, y) in [(0, 0), (211, 12), (640, 416), (1279, 831)] {
+            let back = plane.point(builtIn.appKitCentre(ofPixelX: x, y: y))
+            expect(abs(back.x - (Double(x) + 0.5)) <= 1e-9 && abs(back.y - (Double(y) + 0.5)) <= 1e-9,
+                   "the plane inverts appKitCentre at pixel \(x),\(y), got \(back.x),\(back.y)")
+        }
+        let widths = [
+            ("1920x1080 shrunk to 1280x720", Ink.Plane(frame: mainFrame, size: CGSize(width: 1280, height: 720)).lineWidth, 3.0),
+            ("1710x1112 shrunk to 1280x832", plane.lineWidth, 3.0),
+            ("an overlay at 1 unit per point", Ink.Plane(frame: builtInFrame, size: builtInFrame.size).lineWidth, 4.0),
+            ("640x400 at 2x", Ink.Plane(frame: CGRect(x: 0, y: 0, width: 640, height: 400), size: CGSize(width: 1280, height: 800)).lineWidth, 8.0),
+        ]
+        for (name, got, want) in widths {
+            expect(got == want, "the line on \(name) is \(want) units wide, got \(got)")
+        }
     }
 
     static let backdropRect = CGRect(x: 180, y: 180, width: 400, height: 400)

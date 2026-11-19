@@ -97,7 +97,7 @@ swiftc -parse-as-library -o "$DERIVED/supabase-check" \
 
 echo "screenshot"
 swiftc -parse-as-library -o "$DERIVED/screenshot-check" \
-    sherpa/Screenshot.swift scripts/screenshot-check.swift >/dev/null \
+    sherpa/Ink.swift sherpa/Screenshot.swift scripts/screenshot-check.swift >/dev/null \
     && "$DERIVED/screenshot-check" || failures=$((failures + 1))
 
 echo "claude"
