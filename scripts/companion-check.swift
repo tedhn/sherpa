@@ -1545,6 +1545,9 @@ enum CompanionCheck {
         let inkedLine = lines.last { $0.contains("screenshot inked ") }
         expect(inkedLine?.hasSuffix("display=\(main) strokes=3") ?? false, "the screenshot of the primary display was inked with 3 strokes",
                inkedLine ?? "no screenshot inked line")
+        let labelled = lines.last { $0.contains("screenshot labelled display=\(main) ") }
+        expect(labelled?.contains(". The user drew the red marks on this screen to show you what they mean. When they say \"this\", they mean what they marked. This image is ") ?? false,
+               "its label tells Claude the user drew the red marks", labelled ?? "no screenshot labelled line")
 
         let done = await waitForVoice("idle", pid: pid, seconds: 20)
         expect(done?.contains("voice=idle") ?? false, "the turn ended in idle", done ?? "no state line")
