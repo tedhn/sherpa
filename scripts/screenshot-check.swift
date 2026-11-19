@@ -100,6 +100,7 @@ enum ScreenshotCheck {
         checkPoint()
         checkFailure()
         checkInk()
+        checkSheet()
         exit(failures == 0 ? 0 : 1)
     }
 
@@ -320,6 +321,43 @@ enum ScreenshotCheck {
         for (name, got, want) in widths {
             expect(got == want, "the line on \(name) is \(want) units wide, got \(got)")
         }
+    }
+
+    static func checkSheet() {
+        print("sheet")
+        let (p, q, r) = (CGPoint(x: 1, y: 1), CGPoint(x: 2, y: 2), CGPoint(x: 3, y: 3))
+        func show(_ sheet: Sheet) -> String { "dropped \(sheet.dropped) drawn \(sheet.drawn) ink \(sheet.ink.strokes.map(\.points))" }
+        var nothing = Sheet()
+        nothing.extend(to: p)
+        expect(nothing == Sheet() && nothing.drawn == 0, "a new sheet has drawn nothing, and a move with no stroke adds none, got \(show(nothing))")
+
+        var sheet = Sheet()
+        sheet.begin(at: p)
+        sheet.extend(to: q)
+        sheet.begin(at: r)
+        expect(sheet.ink == Ink([Stroke(p, [q]), Stroke(r)]) && sheet.drawn == 2, "two strokes make mark 2, got \(show(sheet))")
+        let asked = sheet.drawn
+        sheet.begin(at: q)
+        expect(sheet.drawn == 3 && sheet.ink(after: asked) == Ink([Stroke(q)]), "a stroke drawn after mark 2 is the ink after it, got \(show(sheet))")
+        expect(sheet.ink(after: 0) == sheet.ink && sheet.ink(after: 9) == Ink(), "after mark 0 is everything and after mark 9 is nothing")
+
+        sheet.spend(through: asked)
+        expect(sheet.ink == Ink([Stroke(q)]) && sheet.dropped == 2 && sheet.drawn == 3, "spending through mark 2 drops the first two strokes, got \(show(sheet))")
+        sheet.spend(through: asked)
+        sheet.spend(through: 1)
+        expect(sheet.ink == Ink([Stroke(q)]) && sheet.dropped == 2, "spending the same mark again, or an older one, changes nothing, got \(show(sheet))")
+        expect(sheet.ink(after: 1) == Ink([Stroke(q)]) && sheet.ink(after: asked) == Ink([Stroke(q)]),
+               "after a mark already spent is everything still held")
+        sheet.extend(to: r)
+        expect(sheet.ink == Ink([Stroke(q, [r])]), "a move still extends the last stroke, got \(show(sheet))")
+
+        sheet.clear()
+        expect(sheet.ink.isEmpty && sheet.dropped == 3 && sheet.drawn == 3, "clear drops everything and keeps the count at 3, got \(show(sheet))")
+        sheet.begin(at: p)
+        expect(sheet.drawn == 4 && sheet.ink(after: 3) == Ink([Stroke(p)]) && sheet.ink(after: asked) == Ink([Stroke(p)]),
+               "the first stroke after the clear is mark 3, got \(show(sheet))")
+        sheet.spend(through: 4)
+        expect(sheet.ink.isEmpty && sheet.dropped == 4, "spending through mark 4 drops it, got \(show(sheet))")
     }
 
     static let backdropRect = CGRect(x: 180, y: 180, width: 400, height: 400)

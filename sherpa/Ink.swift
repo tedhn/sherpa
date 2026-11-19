@@ -35,10 +35,6 @@ nonisolated struct Ink: Equatable, Sendable {
         strokes[strokes.count - 1].extend(to: point)
     }
 
-    mutating func append(_ other: Ink) {
-        strokes += other.strokes
-    }
-
     struct Plane: Equatable, Sendable {
         let frame: CGRect
         let size: CGSize
@@ -101,5 +97,45 @@ nonisolated struct Ink: Equatable, Sendable {
         context.setLineJoin(.round)
         context.strokePath()
         return context.makeImage() ?? image
+    }
+}
+
+/// Every stroke not yet spent, with a count of those spent before them, so a release can mark how
+/// far it saw and an answer can later spend exactly that much.
+nonisolated struct Sheet: Equatable, Sendable {
+    private(set) var ink = Ink()
+    /// Strokes removed from the front so far.
+    private(set) var dropped = 0
+
+    /// A mark meaning everything drawn up to now.
+    var drawn: Int { dropped + ink.strokes.count }
+
+    mutating func begin(at point: CGPoint) {
+        ink.begin(at: point)
+    }
+
+    mutating func extend(to point: CGPoint) {
+        ink.extend(to: point)
+    }
+
+    /// Drops the strokes drawn before `mark`. A mark already spent changes nothing.
+    mutating func spend(through mark: Int) {
+        let count = held(before: mark)
+        ink = Ink(Array(ink.strokes.dropFirst(count)))
+        dropped += count
+    }
+
+    /// The strokes drawn at or after `mark`.
+    func ink(after mark: Int) -> Ink {
+        Ink(Array(ink.strokes.dropFirst(held(before: mark))))
+    }
+
+    mutating func clear() {
+        dropped = drawn
+        ink = Ink()
+    }
+
+    private func held(before mark: Int) -> Int {
+        min(max(mark - dropped, 0), ink.strokes.count)
     }
 }
