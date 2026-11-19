@@ -22,8 +22,6 @@ final class Transcription {
     /// winds down late can't clear a newer record's flag.
     fileprivate(set) var speaking = false
     fileprivate(set) var pointing: Callout?
-    /// What the person drew across this utterance's holds. AppState writes it; each release
-    /// hands a copy to that release's capture.
     var ink = Ink()
 
     var delivered: AssemblyAI.Final {

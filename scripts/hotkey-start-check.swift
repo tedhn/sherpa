@@ -47,12 +47,12 @@ enum HotkeyStartCheck {
         expect(!hand.wantsTap, "a fresh hand wants no tap")
         var got = hand.handle(.chord(down: true))
         expect(got == Outcome(verdict: .pass) && hand.wantsTap, "the chord going down passes and wants the tap", describe(got))
-        got = hand.handle(.down(p1, chord: true))
+        got = hand.handle(.down(p1, flagged: true))
         expect(got == Outcome(verdict: .swallow, mark: .began(p1)), "a chorded down is swallowed and begins a stroke at 100,100", describe(got))
         got = hand.handle(.dragged(p2))
         expect(got == Outcome(verdict: .asMove, mark: .moved(p2)), "a drag goes on as a move and extends to 112,100", describe(got))
         got = hand.handle(.chord(down: false))
-        expect(got == Outcome(verdict: .pass, mark: .released) && hand.wantsTap, "the chord going up mid-stroke releases and keeps the tap", describe(got))
+        expect(got == Outcome(verdict: .pass, mark: .chordUp) && hand.wantsTap, "the chord going up mid-stroke releases and keeps the tap", describe(got))
         got = hand.handle(.dragged(p3))
         expect(got == Outcome(verdict: .asMove), "a sealed stroke's drag still goes on as a move, with no mark", describe(got))
         got = hand.handle(.up(p3))
@@ -61,35 +61,35 @@ enum HotkeyStartCheck {
 
         hand = Pen.Hand()
         _ = hand.handle(.chord(down: true))
-        got = hand.handle(.down(p1, chord: true))
+        got = hand.handle(.down(p1, flagged: true))
         got = hand.handle(.up(p1))
         expect(got == Outcome(verdict: .swallow, finished: Finished(points: 1, from: p1, to: p1, sealed: false)) && hand.wantsTap,
                "a plain click under the chord is a one-point stroke and the chord keeps the tap", describe(got))
 
         hand = Pen.Hand()
         _ = hand.handle(.chord(down: true))
-        got = hand.handle(.down(p1, chord: false))
-        expect(got == Outcome(verdict: .pass, mark: .released) && !hand.chord && !hand.wantsTap,
+        got = hand.handle(.down(p1, flagged: false))
+        expect(got == Outcome(verdict: .pass, mark: .chordUp) && !hand.chord && !hand.wantsTap,
                "a down without the chord's flags passes and clears the stale chord", describe(got))
 
         hand = Pen.Hand()
         _ = hand.handle(.chord(down: true))
-        _ = hand.handle(.down(p1, chord: true))
+        _ = hand.handle(.down(p1, flagged: true))
         _ = hand.handle(.dragged(p2))
-        got = hand.handle(.down(p3, chord: true))
+        got = hand.handle(.down(p3, flagged: true))
         expect(got == Outcome(verdict: .swallow, mark: .began(p3), finished: Finished(points: 2, from: p1, to: p2, sealed: false)),
                "a down while drawing finishes the stroke whose up was lost, then begins at 124,100", describe(got))
 
         hand = Pen.Hand()
         _ = hand.handle(.chord(down: true))
-        _ = hand.handle(.down(p1, chord: true))
+        _ = hand.handle(.down(p1, flagged: true))
         _ = hand.handle(.chord(down: false))
-        got = hand.handle(.down(p2, chord: false))
+        got = hand.handle(.down(p2, flagged: false))
         expect(got == Outcome(verdict: .pass, finished: Finished(points: 1, from: p1, to: p1, sealed: true)) && !hand.wantsTap,
                "after the chord, the next plain down finishes the sealed stroke and passes", describe(got))
 
         hand = Pen.Hand()
-        got = hand.handle(.down(p1, chord: false))
+        got = hand.handle(.down(p1, flagged: false))
         expect(got == Outcome(verdict: .pass), "without the chord a down passes", describe(got))
         _ = hand.handle(.chord(down: true))
         got = hand.handle(.dragged(p2))
@@ -97,7 +97,7 @@ enum HotkeyStartCheck {
         got = hand.handle(.up(p2))
         expect(got == Outcome(verdict: .pass), "and its up", describe(got))
         got = hand.handle(.chord(down: false))
-        expect(got == Outcome(verdict: .pass, mark: .released), "the chord going up releases", describe(got))
+        expect(got == Outcome(verdict: .pass, mark: .chordUp), "the chord going up releases", describe(got))
         got = hand.handle(.chord(down: false))
         expect(got == Outcome(verdict: .pass) && !hand.wantsTap, "a second chord-up does nothing", describe(got))
     }
@@ -137,6 +137,6 @@ enum HotkeyStartCheck {
         taps = ownTaps()
         expect(taps.count == 1 && taps.allSatisfy(\.enabled), "still one enabled tap after the keypress", "\(taps.map(\.enabled))")
         expect(activeTaps().isEmpty, "300 ms after the chord the pen's tap is gone", "\(activeTaps().count)")
-        expect(state.marks == [.released], "a chord with no clicks tells AppState only .released", "\(state.marks)")
+        expect(state.marks == [.chordUp], "a chord with no clicks tells AppState only .chordUp", "\(state.marks)")
     }
 }

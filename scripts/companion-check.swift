@@ -1353,7 +1353,6 @@ enum CompanionCheck {
         return p[index + 3] >= 200 && p[index] >= 180 && p[index + 1] <= 90 && p[index + 2] <= 90
     }
 
-    /// Whether any pixel in the 3 x 3 around `pixel` is ink red.
     static func inked(_ pixels: Pixels, at pixel: CGPoint) -> Bool {
         let (x, y) = (Int(pixel.x), Int(pixel.y))
         return (y - 1...y + 1).contains { row in
@@ -1367,7 +1366,6 @@ enum CompanionCheck {
         stride(from: 0, to: pixels.rgba.count, by: 4).filter { isInk(pixels, $0) }.count
     }
 
-    /// The centroid of the opaque pixels that are not ink, in points.
     static func glyphBesideInk(_ pixels: Pixels, scale: Double) -> CGPoint? {
         var (sumX, sumY, count) = (0.0, 0.0, 0)
         for y in 0..<pixels.height {
@@ -1386,7 +1384,6 @@ enum CompanionCheck {
         ((try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []).filter { $0.hasSuffix(".json") }.count
     }
 
-    /// The first image of the newest request's last turn: the screen with the cursor.
     static func newestFirstImage(_ directory: String) -> CGImage? {
         let numbers = ((try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? [])
             .compactMap { $0.hasSuffix(".json") ? Int($0.dropLast(5)) : nil }
