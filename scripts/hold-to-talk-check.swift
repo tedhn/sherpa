@@ -12,6 +12,7 @@ let idleSeconds = arguments.dropFirst(3).first.flatMap(Double.init)
 let archivePath = arguments.dropFirst(4).first.flatMap { $0.isEmpty ? nil : $0 }
 let requestsPath = arguments.dropFirst(5).first.flatMap { $0.isEmpty ? nil : $0 }
 let claudeScenarioPath = arguments.dropFirst(6).first.flatMap { $0.isEmpty ? nil : $0 }
+let voiceRequestsPath = arguments.dropFirst(7).first.flatMap { $0.isEmpty ? nil : $0 }
 
 var failures = 0
 
@@ -164,7 +165,7 @@ final class LogTail: @unchecked Sendable {
         process.arguments = [
             "stream", "--level", "debug", "--style", "ndjson",
             "--predicate",
-            "subsystem == \"my.rooftop.sherpa\" AND (category == \"microphone\" OR category == \"transcription\" OR category == \"screenshot\" OR category == \"claude\")",
+            "subsystem == \"my.rooftop.sherpa\" AND (category == \"microphone\" OR category == \"transcription\" OR category == \"screenshot\" OR category == \"claude\" OR category == \"voice\")",
         ]
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
@@ -474,6 +475,36 @@ func checkArchive(_ label: String, _ delivered: Delivered, holds: Int, logged: I
     }
 }
 
+func voiceRequests() -> [(authorization: String, text: String)] {
+    guard let voiceRequestsPath else { return [] }
+    return ((try? FileManager.default.contentsOfDirectory(atPath: voiceRequestsPath)) ?? []).compactMap { name in
+        guard name.hasSuffix(".json"),
+              let data = FileManager.default.contents(atPath: URL(fileURLWithPath: voiceRequestsPath).appending(path: name).path),
+              let saved = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let text = (saved["body"] as? [String: Any])?["text"] as? String
+        else { return nil }
+        return (saved["authorization"] as? String ?? "", text)
+    }
+}
+
+func checkVoice(_ label: String, _ delivered: Delivered, spoken: String, logged: Int) {
+    guard voiceRequestsPath != nil else {
+        print("  skip \(label): no fake voice to ask, so what Sherpa speaks was not checked")
+        return
+    }
+    if wait(upTo: 5, until: { voiceRequests().contains { $0.text == spoken && $0.authorization == "fake" } }) {
+        print("  ok   \(label): the fake voice was asked to speak the whole reply, with Authorization: fake")
+    } else {
+        fail("\(label): the fake voice received \(voiceRequests().map { ($0.authorization, $0.text.prefix(40)) }), expected the whole reply with Authorization: fake")
+    }
+    let spokeLine = "voice spoke utterance=\(delivered.utterance) "
+    if wait(upTo: 5, until: { tail.lines(after: logged).contains { $0.hasPrefix(spokeLine) } }) {
+        print("  ok   \(label): the app logged '\(spokeLine.dropLast())'")
+    } else {
+        fail("\(label): the app never logged '\(spokeLine.dropLast())', the voice lines were \(tail.lines(after: logged).filter { $0.hasPrefix("voice ") })")
+    }
+}
+
 func checkAnswer(_ label: String, _ delivered: Delivered, requestsBefore: Int, panelBefore: String, logged: Int) {
     guard requestsPath != nil else { return }
     let expected = "Answer to: \(delivered.text)"
@@ -498,6 +529,7 @@ func checkAnswer(_ label: String, _ delivered: Delivered, requestsBefore: Int, p
     } else {
         fail("\(label): the reply went through lengths \(lengths), expected \(whole.count) after at least 2 shorter")
     }
+    checkVoice(label, delivered, spoken: whole, logged: logged)
     let numbers = requestNumbers()
     guard numbers.count == requestsBefore + 1, let newest = numbers.last,
           let body = FileManager.default.contents(atPath: URL(fileURLWithPath: requestsPath!).appending(path: "\(newest).json").path),
