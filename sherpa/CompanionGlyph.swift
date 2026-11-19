@@ -137,6 +137,42 @@ struct BubblePop: Transition {
     }
 }
 
+struct CompanionRing: View {
+    /// The thing's bounds in the overlay's SwiftUI space.
+    let around: CGRect
+    let drawn: Double
+
+    static let gap: CGFloat = 6
+    static let lineWidth: CGFloat = 2.5
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .trim(from: 0, to: drawn)
+            .stroke(CompanionGlyph.tint, lineWidth: Self.lineWidth)
+            .frame(width: around.width + 2 * Self.gap, height: around.height + 2 * Self.gap)
+            .position(x: around.midX, y: around.midY)
+    }
+}
+
+struct DrawingRing: View {
+    /// Not 0: SwiftUI can draw an empty trim as the last non-empty trim of the same shape (ImageRenderer
+    /// does), which would flash a whole ring before this one draws on.
+    static let undrawn = 0.001
+
+    let around: CGRect
+    @State private var drawn = DrawingRing.undrawn
+
+    static let fade = AnyTransition.asymmetric(
+        insertion: .identity,
+        removal: AnyTransition.opacity.animation(.easeOut(duration: 0.3))
+    )
+
+    var body: some View {
+        CompanionRing(around: around, drawn: drawn)
+            .onAppear { withAnimation(.easeOut(duration: 0.3)) { drawn = 1 } }
+    }
+}
+
 struct InkLayer: View {
     let ink: Ink
     let screenFrame: CGRect

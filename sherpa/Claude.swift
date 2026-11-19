@@ -52,14 +52,15 @@ nonisolated enum Claude {
 
     enum Target: Equatable, Sendable {
         case none
-        case point(x: Int, y: Int, label: String, screen: Int)
+        case point(Screenshot.Box, label: String, screen: Int)
 
         static let cursorScreen = 1
 
         var logField: String {
             switch self {
             case .none: "none"
-            case .point(let x, let y, _, let screen): "screen\(screen):\(x),\(y)"
+            case .point(let box, _, let screen) where box.isPoint: "screen\(screen):\(box.x1),\(box.y1)"
+            case .point(let box, _, let screen): "screen\(screen):\(box.x1),\(box.y1),\(box.x2),\(box.y2)"
             }
         }
     }
@@ -81,15 +82,19 @@ nonisolated enum Claude {
             target = Self.parse(removed)
         }
 
+        /// The prompt asks for a box, but a model can still write the older two-number form, one pixel.
         private static func parse(_ tag: String) -> Target? {
-            let strict = #/\[POINT:(?:(none)|([0-9]+)\s*,\s*([0-9]+)\s*:([^\]:\n\r]+?)(?::screen([0-9]+))?)\]/#
+            let strict = #/\[POINT:(?:(none)|([0-9]+)\s*,\s*([0-9]+)(?:\s*,\s*([0-9]+)\s*,\s*([0-9]+))?\s*:([^\]:\n\r]+?)(?::screen([0-9]+))?)\]/#
             guard let match = tag.wholeMatch(of: strict) else { return nil }
-            let (_, none, x, y, label, screen) = match.output
+            let (_, none, x1, y1, x2, y2, label, screen) = match.output
             if none != nil { return Target.none }
             let name = label?.trimmingCharacters(in: .whitespaces) ?? ""
             let number = screen.map { Int($0) ?? 0 } ?? Target.cursorScreen
-            guard let x = x.flatMap({ Int($0) }), let y = y.flatMap({ Int($0) }), !name.isEmpty, number > 0 else { return nil }
-            return .point(x: x, y: y, label: name, screen: number)
+            guard let x1 = x1.flatMap({ Int($0) }), let y1 = y1.flatMap({ Int($0) }),
+                  let x2 = x2.map({ Int($0) }) ?? x1, let y2 = y2.map({ Int($0) }) ?? y1,
+                  !name.isEmpty, number > 0
+            else { return nil }
+            return .point(Screenshot.Box(x1: x1, y1: y1, x2: x2, y2: y2), label: name, screen: number)
         }
     }
 
@@ -229,15 +234,15 @@ nonisolated enum Claude {
         Pointing:
         - You can point at one thing on their screen. A small pointer flies there while your answer is spoken.
         - End every reply with exactly one tag, after your spoken words. The tag is never read aloud.
-        - To point, end with [POINT:x,y:label:screenN]. N is the screen number from that screen's label. The label names the thing in one to three words.
-        - x and y are pixel coordinates in that screen's image, and the image's label gives its size. The origin 0,0 is the top-left corner. x grows to the right and y grows downward, so the bottom-right corner of a 1280x832 image is 1279,831.
-        - Aim at the center of the thing.
+        - To point, end with [POINT:x1,y1,x2,y2:label:screenN]. N is the screen number from that screen's label. The label names the thing in one to three words.
+        - x1,y1 is the top-left corner and x2,y2 the bottom-right corner of the thing. All four are pixel coordinates in that screen's image, and the image's label gives its size. The origin 0,0 is the top-left corner. x grows to the right and y grows downward, so the bottom-right corner of a 1280x832 image is 1279,831.
+        - Draw the box tight around the thing.
         - Point when your answer is about one specific thing they can see, like a button, a menu, a setting, a cell, a line, or a message.
         - Otherwise end with [POINT:none]: when the question isn't about the screen, or when what they asked about isn't there.
 
         Examples:
-        - "How do I make a new folder?" with Finder open on screen 1: "Click File in the menu bar, then New Folder. [POINT:211,12:File menu:screen1]"
-        - "Where do I sign out?" with a browser on screen 2: "Click your profile picture in the top right corner of the browser on your other screen, then Sign Out. [POINT:1236,96:profile picture:screen2]"
+        - "How do I make a new folder?" with Finder open on screen 1: "Click File in the menu bar, then New Folder. [POINT:196,2,226,22:File menu:screen1]"
+        - "Where do I sign out?" with a browser on screen 2: "Click your profile picture in the top right corner of the browser on your other screen, then Sign Out. [POINT:1212,72,1260,120:profile picture:screen2]"
         - "How many ounces are in a cup?": "Eight fluid ounces. [POINT:none]"
         - "Where's the export button?" with no export button anywhere on screen: "I don't see an export button on your screen. [POINT:none]"
         """
@@ -276,14 +281,13 @@ nonisolated extension Claude.Question {
 }
 
 nonisolated extension Claude.Target {
-    func appKitPoint(on shots: [Screenshot]) -> CGPoint? {
-        guard case .point(let x, let y, _, let screen) = self, shots.indices.contains(screen - 1) else { return nil }
-        return shots[screen - 1].appKitCentre(ofPixelX: x, y: y)
-    }
-
     func callout(on shots: [Screenshot]) -> Callout? {
-        guard case .point(_, _, let label, _) = self, let point = appKitPoint(on: shots) else { return nil }
-        return Callout(point: point, label: label)
+        guard case .point(let box, let label, let screen) = self, shots.indices.contains(screen - 1) else { return nil }
+        let shot = shots[screen - 1]
+        return Callout(
+            point: shot.appKitCentre(ofPixelX: box.centre.x, y: box.centre.y), label: label,
+            bounds: box.isPoint ? nil : shot.appKitRect(of: box)
+        )
     }
 }
 

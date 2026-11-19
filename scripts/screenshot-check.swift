@@ -98,6 +98,7 @@ enum ScreenshotCheck {
         checkCursor()
         checkLabels()
         checkPoint()
+        checkBox()
         checkFailure()
         checkInk()
         checkSheet()
@@ -222,6 +223,37 @@ enum ScreenshotCheck {
                 expect(frame.contains(p) && NSMouseInRect(p, frame, false), "\(name) corner pixel \(x),\(y) lands inside the frame, got \(p)")
             }
         }
+    }
+
+    static func checkBox() {
+        print("box")
+        func check(_ name: String, _ frame: CGRect, _ size: (Int, Int), _ box: Screenshot.Box, _ want: CGRect) {
+            let got = shot(1, frame, cursor: .zero, size: size).appKitRect(of: box)
+            let close = [(got.minX, want.minX), (got.minY, want.minY), (got.width, want.width), (got.height, want.height)].allSatisfy { abs($0 - $1) <= 0.000001 }
+            expect(close, "\(name) is \(want), got \(got)")
+        }
+        let main = (1280, 720)
+        check("main box 600,380 to 680,420", mainFrame, main, .init(x1: 600, y1: 380, x2: 680, y2: 420), CGRect(x: 900, y: 448.5, width: 121.5, height: 61.5))
+        check("main box with its corners swapped", mainFrame, main, .init(x1: 680, y1: 420, x2: 600, y2: 380), CGRect(x: 900, y: 448.5, width: 121.5, height: 61.5))
+        check("main whole image", mainFrame, main, .init(x1: 0, y1: 0, x2: 1279, y2: 719), mainFrame)
+        check("main top-left pixel", mainFrame, main, .init(x: 0, y: 0), CGRect(x: 0, y: 1078.5, width: 1.5, height: 1.5))
+        check("main box past every edge clamps to the whole image", mainFrame, main, .init(x1: -10, y1: -10, x2: 5000, y2: 5000), mainFrame)
+        check("main box right of the image clamps to the last column", mainFrame, main, .init(x1: 1300, y1: 10, x2: 1400, y2: 20), CGRect(x: 1918.5, y: 1048.5, width: 1.5, height: 16.5))
+        let builtIn = (1280, 832)
+        check("built-in File menu 196,2 to 226,22", builtInFrame, builtIn, .init(x1: 196, y1: 2, x2: 226, y2: 22),
+              CGRect(x: 358.84375, y: -30.740384615384617, width: 41.4140625, height: 28.067307692307693))
+        check("built-in profile picture 1212,72 to 1260,120", builtInFrame, builtIn, .init(x1: 1212, y1: 72, x2: 1260, y2: 120),
+              CGRect(x: 1716.15625, y: -161.72115384615384, width: 65.4609375, height: 65.49038461538461))
+        check("built-in whole image", builtInFrame, builtIn, .init(x1: 0, y1: 0, x2: 1279, y2: 831), builtInFrame)
+        check("built-in box past the bottom-right corner clamps", builtInFrame, builtIn, .init(x1: 1200, y1: 800, x2: 1400, y2: 900),
+              CGRect(x: 1700.125, y: -1112, width: 106.875, height: 42.76923076923077))
+        check("built-in pixel 211,12", builtInFrame, builtIn, .init(x: 211, y: 12), CGRect(x: 378.8828125, y: -17.375, width: 1.3359375, height: 1.3365384615384615))
+        let pixel = shot(1, builtInFrame, cursor: .zero, size: builtIn).appKitRect(of: .init(x: 211, y: 12))
+        expect(pixel.midX == 379.55078125 && abs(pixel.midY - -16.706731) <= 0.000001, "a one-pixel box is centred on appKitCentre of that pixel, got \(pixel.midX), \(pixel.midY)")
+        let box = Screenshot.Box(x1: 680, y1: 420, x2: 600, y2: 380)
+        expect(box == Screenshot.Box(x1: 600, y1: 380, x2: 680, y2: 420) && box.centre == (640, 400) && !box.isPoint,
+               "a box keeps its top-left first and is centred on 640,400, got \(box) centred on \(box.centre)")
+        expect(Screenshot.Box(x: 640, y: 400).isPoint && !Screenshot.Box(x1: 640, y1: 400, x2: 641, y2: 400).isPoint, "only a one-pixel box is a point")
     }
 
     static let pinned = [2, 2, 2, 2, 2, 2, 3, 2, 2, 3, 4, 3]

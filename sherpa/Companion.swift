@@ -44,6 +44,8 @@ nonisolated struct Flight: Equatable, Sendable {
 nonisolated struct Callout: Equatable, Sendable {
     let point: CGPoint
     let label: String
+    /// The thing's bounds in AppKit global space. Nil when Claude named a single pixel.
+    let bounds: CGRect?
 }
 
 nonisolated struct Bubble: Equatable, Sendable {
@@ -108,6 +110,7 @@ final class Companion {
     private static let pop = Animation.spring(response: 0.4, dampingFraction: 0.6)
     private static let fade = Animation.easeOut(duration: 0.3)
     private static let deadZone: CGFloat = 24
+    private static let smallestRinged: CGFloat = 4
 
     /// True once the pointer has sat still for `restAfter`, five minutes outside tests; the glyph
     /// fades out until the next activity.
@@ -122,7 +125,7 @@ final class Companion {
     private enum Motion {
         case following
         case outbound(Leg, Callout)
-        case pausing(Bubble, releasable: ContinuousClock.Instant, deadline: Task<Void, Never>)
+        case pausing(Bubble, ring: CGRect?, releasable: ContinuousClock.Instant, deadline: Task<Void, Never>)
         case returning(Leg, anchor: CGPoint)
     }
 
@@ -130,7 +133,7 @@ final class Companion {
         didSet {
             switch oldValue {
             case .outbound(let leg, _), .returning(let leg, _): leg.timer.invalidate()
-            case .pausing(_, _, let deadline): deadline.cancel()
+            case .pausing(_, _, _, let deadline): deadline.cancel()
             case .following: break
             }
         }
@@ -139,7 +142,12 @@ final class Companion {
     let hold: Duration
 
     var bubble: Bubble? {
-        if case .pausing(let bubble, _, _) = motion { bubble } else { nil }
+        if case .pausing(let bubble, _, _, _) = motion { bubble } else { nil }
+    }
+
+    /// The bounds of the thing the companion points at, in AppKit global space, while it pauses there.
+    var ring: CGRect? {
+        if case .pausing(_, let ring, _, _) = motion { ring } else { nil }
     }
 
     // A mouse tap needs the Accessibility grant (an ungranted app gets a non-nil tap that reads
@@ -198,8 +206,21 @@ final class Companion {
     /// displays. NSMouseInRect, not CGRect.contains: the pointer on a screen's top row reads
     /// y == frame.maxY. No screen holds the pointer only mid-reconfiguration; then no clamp.
     static func position(following pointer: CGPoint, on screens: [CGRect]) -> CGPoint {
-        let spot = CGPoint(x: pointer.x + offset.dx, y: pointer.y + offset.dy)
-        guard let screen = screens.first(where: { NSMouseInRect(pointer, $0, false) }) else { return spot }
+        position(pointingAt: pointer, on: screens.first { NSMouseInRect(pointer, $0, false) })
+    }
+
+    /// Where the glyph's centre lands for a callout: pointing at the bottom-right corner of the
+    /// thing's bounds, so it sits beside the thing and not on it, or at the point when there are no
+    /// bounds. Clamped inside the screen that holds the point, since a corner on a screen's right or
+    /// bottom edge lies outside that screen.
+    static func landing(for callout: Callout, on screens: [CGRect]) -> CGPoint {
+        let tip = callout.bounds.map { CGPoint(x: $0.maxX, y: $0.minY) } ?? callout.point
+        return position(pointingAt: tip, on: screens.first { NSMouseInRect(callout.point, $0, false) })
+    }
+
+    private static func position(pointingAt hotspot: CGPoint, on screen: CGRect?) -> CGPoint {
+        let spot = CGPoint(x: hotspot.x + offset.dx, y: hotspot.y + offset.dy)
+        guard let screen else { return spot }
         return CGPoint(
             x: min(max(spot.x, screen.minX + margin), screen.maxX - margin),
             y: min(max(spot.y, screen.minY + margin), screen.maxY - margin)
@@ -232,7 +253,7 @@ final class Companion {
         if callout == self.callout { return }
         self.callout = callout
         guard let callout else { return releaseIfDue() }
-        let flight = Flight(from: position, to: Self.position(following: callout.point, on: NSScreen.screens.map(\.frame)))
+        let flight = Flight(from: position, to: Self.landing(for: callout, on: NSScreen.screens.map(\.frame)))
         wake()
         guard let leg = takeOff(flight) else { return land(flight, at: callout) }
         withAnimation(Self.fade) { motion = .outbound(leg, callout) }
@@ -243,7 +264,7 @@ final class Companion {
     }
 
     private func releaseIfDue() {
-        guard case .pausing(let bubble, let releasable, _) = motion, callout == nil, ContinuousClock.now >= releasable else { return }
+        guard case .pausing(let bubble, _, let releasable, _) = motion, callout == nil, ContinuousClock.now >= releasable else { return }
         let pointer = NSEvent.mouseLocation
         let flight = Flight(from: position, to: Self.position(following: pointer, on: NSScreen.screens.map(\.frame)))
         logger.notice("""
@@ -282,6 +303,7 @@ final class Companion {
         logger.notice("companion landed at=\(Self.field(flight.to), privacy: .public)")
         guard let callout else { return follow() }
         let bubble = Bubble(label: callout.label, beside: flight.to, on: NSScreen.screens.map(\.frame), appeared: .now)
+        let ring = callout.bounds.flatMap { min($0.width, $0.height) < Self.smallestRinged ? nil : $0 }
         let releasable = ContinuousClock.now + bubble.typing + hold
         let deadline = Task { [weak self] in
             while ContinuousClock.now < releasable {
@@ -289,10 +311,11 @@ final class Companion {
             }
             self?.releaseIfDue()
         }
-        withAnimation(Self.pop) { motion = .pausing(bubble, releasable: releasable, deadline: deadline) }
+        withAnimation(Self.pop) { motion = .pausing(bubble, ring: ring, releasable: releasable, deadline: deadline) }
         logger.notice("""
             companion pausing chars=\(bubble.label.count) typed=\(Self.milliseconds(bubble.typing)) \
-            side=\(bubble.side.rawValue, privacy: .public) bubble=\(Self.field(bubble.frame), privacy: .public)
+            side=\(bubble.side.rawValue, privacy: .public) bubble=\(Self.field(bubble.frame), privacy: .public) \
+            ring=\(ring.map { Self.field($0) } ?? "none", privacy: .public)
             """)
     }
 

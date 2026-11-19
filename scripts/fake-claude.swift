@@ -159,7 +159,7 @@ final class Exchange {
             event("ping"),
         ]
         let head = [start] + thinking + [block]
-        let answer = chunks(of: "Answer to: \(lastText(in: body))\n\n" + paragraphs.joined(separator: "\n\n") + " [POINT:640,400:panel:screen1]")
+        let answer = chunks(of: "Answer to: \(lastText(in: body))\n\n" + paragraphs.joined(separator: "\n\n") + " [POINT:600,380,680,420:panel:screen1]")
         let ended = [event("content_block_stop", ["index": 1])] + messageEnd("end_turn")
         switch scenario() {
         case .ok:
