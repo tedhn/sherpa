@@ -164,6 +164,8 @@ swiftc -o "$DERIVED/fake-assemblyai" scripts/fake-assemblyai.swift >/dev/null \
     && "$DERIVED/transcription-check" "$DERIVED/fake-assemblyai" || failures=$((failures + 1))
 
 idle_seconds=8
+# Long enough to outlast an answered turn on the fakes, so only unused ink meets the stale clear.
+ink_stale_seconds=8
 fake_answer_delay=1.0
 fake_ports="$DERIVED/fake-assemblyai.ports"
 fake_capture="$DERIVED/fake-assemblyai.pcm"
@@ -232,7 +234,7 @@ if [[ -s "$fake_ports" ]]; then
     read -r token_field socket_field < "$fake_ports"
     open -a "$APP" --args -AssemblyAITokenURL "${token_field#token=}" \
         -AssemblyAISocketURL "${socket_field#socket=}" -AssemblyAIAPIKey fake -AssemblyAIIdleSeconds "$idle_seconds" \
-        -CompanionRestSeconds 8 \
+        -CompanionRestSeconds 8 -InkStaleSeconds "$ink_stale_seconds" \
         "${supabase_flags[@]}" "${claude_flags[@]}" "${voice_flags[@]}" -MicrophoneScenarioFile "$microphone_scenario" \
         -JournalDirectory "$journal_dir"
 else
@@ -321,8 +323,8 @@ wait_for_windows 0
 check "a second click closes the panel" "0" "$(proc 'to return count of windows')"
 
 echo "ink"
-[[ -x "$DERIVED/companion-check" && -n "$fake_claude_requests" ]] \
-    && { "$DERIVED/companion-check" --ink "$app_pid" "$fake_claude_requests" || failures=$((failures + 1)); }
+[[ -x "$DERIVED/companion-check" && -n "$fake_claude_requests" && -n "$fake_capture" ]] \
+    && { "$DERIVED/companion-check" --ink "$app_pid" "$fake_claude_requests" "$fake_scenario" "$ink_stale_seconds" || failures=$((failures + 1)); }
 
 echo "outside click"
 if [[ $panel_w -eq 0 ]]; then
