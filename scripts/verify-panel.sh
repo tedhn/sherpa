@@ -60,6 +60,8 @@ check() {
 }
 
 cd "$(dirname "$0")/.."
+mkdir -p "$DERIVED"
+touch "$DERIVED/run-start"
 # Only ever touch the build this script owns. Anything running from Xcode's own
 # DerivedData belongs to whoever launched it.
 pkill -f "$DERIVED" 2>/dev/null
@@ -211,18 +213,23 @@ else
     failures=$((failures + 1))
     fake_archive=""
 fi
+journal_dir="$DERIVED/journal"
+rm -rf "$journal_dir"
+swift "$(dirname "$0")/past-sessions-check.swift" fixture "$journal_dir" || failures=$((failures + 1))
 if [[ -s "$fake_ports" ]]; then
     read -r token_field socket_field < "$fake_ports"
     open -a "$APP" --args -AssemblyAITokenURL "${token_field#token=}" \
         -AssemblyAISocketURL "${socket_field#socket=}" -AssemblyAIAPIKey fake -AssemblyAIIdleSeconds "$idle_seconds" \
         -CompanionRestSeconds 8 \
-        "${supabase_flags[@]}" "${claude_flags[@]}" "${voice_flags[@]}" -MicrophoneScenarioFile "$microphone_scenario"
+        "${supabase_flags[@]}" "${claude_flags[@]}" "${voice_flags[@]}" -MicrophoneScenarioFile "$microphone_scenario" \
+        -JournalDirectory "$journal_dir"
 else
     echo "  FAIL the fake AssemblyAI never wrote its ports"
     failures=$((failures + 1))
     fake_capture=""
     fake_archive=""
-    open -a "$APP" --args -SupabaseURL '' -AnthropicURL '' -AssemblyAIVoiceURL ''
+    open -a "$APP" --args -SupabaseURL '' -AnthropicURL '' -AssemblyAIVoiceURL '' \
+        -JournalDirectory "$journal_dir"
 fi
 app_pid=""
 # A cold first launch from a fresh build location takes longer than any fixed
@@ -335,10 +342,8 @@ echo "menu bar over a fullscreen app"
 # generate it. What is checked is that the app claims and releases the pin.
 swift "$(dirname "$0")/menu-bar-tracking-check.swift" toggle "$app_pid" || failures=$((failures + 1))
 
-# Not checked here: right-click on the icon opens the Quit Sherpa menu. The
-# Accessibility API exposes no right-click on a status item, though the posted
-# CGEvents the clicking modes use could drive one. Confirm it by hand once after
-# changing the click routing.
+echo "past sessions"
+swift "$(dirname "$0")/past-sessions-check.swift" window "$app_pid" "$journal_dir" || failures=$((failures + 1))
 
 mkdir -p "$DERIVED/shots"
 proc 'to click menu bar item 1 of menu bar 2' >/dev/null
@@ -363,5 +368,9 @@ elif [[ -n "$fake_capture" ]]; then
     grep -o 'transcription [a-z]* session=[0-9]*[^"]*' <<<"$quit_log" | tail -3 | sed 's/^/    /'
 fi
 pkill -f "$DERIVED" 2>/dev/null
+echo "journal stores"
+support="$HOME/Library/Application Support/my.rooftop.sherpa"
+check "the real and Debug journals were not touched by this run" "" \
+    "$(find "$support/Journal" "$support/Journal-Debug" -newer "$DERIVED/run-start" 2>/dev/null)"
 if [[ $failures -eq 0 ]]; then echo "all checks passed"; else echo "$failures check(s) failed"; fi
 exit $failures
