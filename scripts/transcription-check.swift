@@ -212,7 +212,7 @@ final class Bench {
         return await waitFor("transcription opened ", count: before + 1, upTo: 5)
     }
 
-    func hold(_ pcm: Data, prefill: Double = 0, during: ((Int, Transcription?) -> Void)? = nil) async -> Held {
+    func hold(_ pcm: Data, prefill: Double = 0, ink: Ink = Ink(), during: ((Int) -> Void)? = nil) async -> Held {
         var chunks = [pcm.prefix(TapShape.firstChunk)]
         var offset = TapShape.firstChunk
         while offset < pcm.count - TapShape.converterTail {
@@ -229,13 +229,13 @@ final class Bench {
         for (index, chunk) in chunks.enumerated() {
             try? await Task.sleep(until: began + .milliseconds(100 * index), clock: .continuous)
             if record == nil, began.duration(to: .now) >= .seconds(prefill) { record = transcriber.press(speech, recorded: { pcm }) }
-            during?(index, record)
+            during?(index)
             if case .terminated = continuation.yield(Data(chunk)) { terminated = true }
             if let record { shown.append(record.shown) }
         }
         continuation.finish()
         let transcription = record ?? transcriber.press(speech, recorded: { pcm })
-        transcriber.release()
+        transcriber.release(ink: ink)
         let releasedAt = ContinuousClock.now
         marker.notice("check released bytes=\(pcm.count)")
         let outcome = Task {
@@ -552,22 +552,17 @@ enum TranscriptionCheck {
 
     static func screenshotInk(_ bench: Bench) async {
         let a = Stroke(CGPoint(x: 10, y: 20), [CGPoint(x: 30, y: 40)])
-        let x = Stroke(CGPoint(x: 50, y: 60))
-        let b = Stroke(CGPoint(x: 70, y: 80), [CGPoint(x: 90, y: 100)])
+        let b = Stroke(CGPoint(x: 70, y: 80))
         await bench.warm()
-        let first = await bench.hold(tone(0)) { index, record in if index == 2 { record?.ink = Ink([a]) } }
-        first.transcription.ink.append(Ink([x]))
+        let first = await bench.hold(tone(0), ink: Ink([a]))
         try? await Task.sleep(for: .milliseconds(500))
-        let second = await bench.hold(tone(1)) { index, record in if index == 2 { record?.ink.append(Ink([b])) } }
+        let second = await bench.hold(tone(1), ink: Ink([a, b]))
         _ = await bench.outcome(second)
         expect(await bench.waitFor("transcription screenshots ", upTo: 3), "screenshot ink: the handoff logged")
         expect(second.transcription === first.transcription, "screenshot ink: the second hold merged into the first's record")
-        expect(second.transcription.ink == Ink([a, x, b]), "screenshot ink: the record holds A, X and B, got \(second.transcription.ink)")
         let received = inkCaptured.withLock { $0 }
-        expect(received.count == 2 && received.first == Ink([a]),
-               "screenshot ink: release 1's capture got A alone, though X was added right after the release, got \(received.first.map { "\($0)" } ?? "nothing")")
-        expect(received.count == 2 && received.last == Ink([a, x, b]),
-               "screenshot ink: the merged release's capture got A, X and B, got \(received.count) captures, last \(received.last.map { "\($0)" } ?? "nothing")")
+        expect(received == [Ink([a]), Ink([a, b])],
+               "screenshot ink: release 1's capture got A and the merged release's capture got A and B, got \(received)")
     }
 
     static func screenshotMerge(_ bench: Bench) async {
@@ -784,7 +779,7 @@ enum TranscriptionCheck {
 
     static func dropMidHold(_ bench: Bench) async {
         await bench.warm()
-        let held = await bench.hold(tone(0)) { index, _ in if index == 15 { bench.setMode("drop") } }
+        let held = await bench.hold(tone(0)) { index in if index == 15 { bench.setMode("drop") } }
         bench.setMode("ok")
         let outcome = await bench.outcome(held)
         let failure = AssemblyAI.Final.failed(.serverError(code: 1011, reason: "Internal error"))

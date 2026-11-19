@@ -22,7 +22,8 @@ final class Transcription {
     /// winds down late can't clear a newer record's flag.
     fileprivate(set) var speaking = false
     fileprivate(set) var pointing: Callout?
-    var ink = Ink()
+    /// The sheet's mark at this record's last release: the strokes its question was asked with.
+    var sentThrough: Int?
 
     var delivered: AssemblyAI.Final {
         get async {
@@ -149,9 +150,8 @@ final class Transcriber {
         return record
     }
 
-    func release() {
+    func release(ink: Ink) {
         if let capture = configuration.screenshots, let utterance = dictation.heldUtterance {
-            let ink = records[utterance]?.ink ?? Ink()
             screenshots[utterance] = Task { try? await capture(ink) }
         }
         handle(.release)

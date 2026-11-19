@@ -53,15 +53,20 @@ struct UserInk: View {
     let state: AppState
     let screenFrame: CGRect
 
+    /// Two layers split at the current question's mark, so when its answer spends the strokes it
+    /// was asked with, only those fade and the strokes drawn since stay put.
     var body: some View {
+        let shown = state.shownInk.strokes
+        let since = state.transcription?.sentThrough.map { state.sheet.ink(after: $0).strokes } ?? shown
+        let asked = Ink(Array(shown.dropLast(since.count)))
         ZStack {
-            if state.voice != .idle, let record = state.transcription, !record.ink.isEmpty {
-                InkLayer(ink: record.ink, screenFrame: screenFrame)
-                    .id(record.number)
+            if !asked.isEmpty {
+                InkLayer(ink: asked, screenFrame: screenFrame)
+                    .id(state.transcription?.number)
                     .transition(InkLayer.fade)
             }
-            if !state.loose.isEmpty {
-                InkLayer(ink: state.loose, screenFrame: screenFrame)
+            if !since.isEmpty {
+                InkLayer(ink: Ink(since), screenFrame: screenFrame)
                     .transition(InkLayer.fade)
             }
         }
