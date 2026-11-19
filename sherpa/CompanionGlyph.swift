@@ -2,7 +2,7 @@ import SwiftUI
 
 struct CompanionGlyph: View {
     enum Look: Equatable {
-        case arrow
+        case arrow(heading: Angle)
         case waveform(level: Double)
         case spinner
 
@@ -16,9 +16,6 @@ struct CompanionGlyph: View {
         }
     }
 
-    /// The apex is drawn pointing up. Turn it to face back along the offset, at the hotspot:
-    /// local offset is (35, 25) down-right, so the hotspot lies at atan2(-35, 25), about -54 degrees.
-    static let heading = Angle.radians(atan2(-Companion.offset.dx, -Companion.offset.dy))
     static let tint = Color(red: 0.20, green: 0.48, blue: 1.0)
     private static let pale = Color(red: 0.42, green: 0.66, blue: 1.0)
     private static let barProfile: [Double] = [0.55, 0.85, 1.0, 0.85, 0.55]
@@ -29,7 +26,7 @@ struct CompanionGlyph: View {
 
     var body: some View {
         switch look {
-        case .arrow: arrow
+        case .arrow(let heading): arrow(heading: heading)
         case .waveform(let level): waveform(level: level)
         case .spinner: spinner
         }
@@ -39,12 +36,12 @@ struct CompanionGlyph: View {
         LinearGradient(colors: [Self.pale, Self.tint], startPoint: .top, endPoint: .bottom)
     }
 
-    private var arrow: some View {
+    private func arrow(heading: Angle) -> some View {
         Arrowhead(cornerRadius: 1.5)
             .fill(gradient)
             .overlay(Arrowhead(cornerRadius: 1.5).stroke(.white, lineWidth: 1.5))
             .frame(width: 11, height: 24)
-            .rotationEffect(Self.heading)
+            .rotationEffect(heading)
             .shadow(color: Self.tint.opacity(0.7), radius: 6)
     }
 

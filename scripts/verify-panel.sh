@@ -131,7 +131,7 @@ echo "overlay"
 swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/overlay-check" \
     sherpa/Overlay.swift scripts/overlay-check.swift >/dev/null \
     && "$DERIVED/overlay-check" || failures=$((failures + 1))
-swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/companion-check" \
+swiftc -parse-as-library -O "${app_swift_flags[@]}" -o "$DERIVED/companion-check" \
     sherpa/Companion.swift sherpa/CompanionGlyph.swift scripts/companion-check.swift >/dev/null \
     && "$DERIVED/companion-check" || failures=$((failures + 1))
 
@@ -287,6 +287,9 @@ check_focus_kept "focus still behind after using the panel" "$front_before" "$(f
 
 echo "companion looks"
 [[ -x "$DERIVED/companion-check" ]] && { "$DERIVED/companion-check" --looks "$app_pid" 8 || failures=$((failures + 1)); }
+echo "companion flight"
+[[ -x "$DERIVED/companion-check" && -n "$fake_voice_scenario" ]] \
+    && { "$DERIVED/companion-check" --flight "$app_pid" "$fake_voice_scenario" || failures=$((failures + 1)); }
 
 echo "close"
 proc 'to click menu bar item 1 of menu bar 2' >/dev/null
