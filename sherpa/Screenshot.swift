@@ -30,9 +30,11 @@ nonisolated struct Screenshot: Equatable, Sendable {
     let appKitFrame: CGRect
     let pixels: Pixels
     let holdsCursor: Bool
+    /// Whether the user's ink was drawn on this display.
+    let inked: Bool
     let jpeg: Data
 
-    init?(encoding image: CGImage, display: CGDirectDisplayID, appKitFrame: CGRect, cursor: CGPoint) {
+    init?(encoding image: CGImage, display: CGDirectDisplayID, appKitFrame: CGRect, cursor: CGPoint, inked: Bool = false) {
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
         CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary)
@@ -42,12 +44,14 @@ nonisolated struct Screenshot: Equatable, Sendable {
         self.appKitFrame = appKitFrame
         // The mouse on a display's top pixel row reads y == appKitFrame.maxY, which half-open CGRect.contains would drop.
         holdsCursor = NSMouseInRect(cursor, appKitFrame, false)
+        self.inked = inked
         jpeg = data as Data
     }
 
     func label(number: Int, of count: Int) -> String {
         let cursor = holdsCursor ? "The cursor is on this screen." : "The cursor is not on this screen."
-        return "Screen \(number) of \(count). \(cursor) This image is \(pixels.width)x\(pixels.height) pixels."
+        let marks = inked ? " The user drew the red marks on this screen to show you what they mean. When they say \"this\", they mean what they marked." : ""
+        return "Screen \(number) of \(count). \(cursor)\(marks) This image is \(pixels.width)x\(pixels.height) pixels."
     }
 
     func appKitCentre(ofPixelX x: Int, y: Int) -> CGPoint {
@@ -110,7 +114,7 @@ nonisolated struct Screenshot: Equatable, Sendable {
             }
             guard let shot = Screenshot(
                 encoding: drawn.composited(onto: image, appKitFrame: frame), display: display.displayID,
-                appKitFrame: frame, cursor: cursor
+                appKitFrame: frame, cursor: cursor, inked: !drawn.isEmpty
             ) else {
                 logger.error("screenshot failed display=\(display.displayID) reason=encode")
                 continue

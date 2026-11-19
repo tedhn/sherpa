@@ -185,6 +185,12 @@ enum ScreenshotCheck {
         let off = shot(3, mainFrame, cursor: cursor, size: (1280, 720)).label(number: 2, of: 2)
         let wantOff = "Screen 2 of 2. The cursor is not on this screen. This image is 1280x720 pixels."
         expect(off == wantOff, "the other screen reads '\(wantOff)', got '\(off)'")
+        let inkedOn = Screenshot(encoding: solid(1280, 832), display: 1, appKitFrame: builtInFrame, cursor: cursor, inked: true)!.label(number: 1, of: 2)
+        let wantInkedOn = "Screen 1 of 2. The cursor is on this screen. The user drew the red marks on this screen to show you what they mean. When they say \"this\", they mean what they marked. This image is 1280x832 pixels."
+        expect(inkedOn == wantInkedOn, "an inked cursor screen reads '\(wantInkedOn)', got '\(inkedOn)'")
+        let inkedOff = Screenshot(encoding: solid(1280, 720), display: 3, appKitFrame: mainFrame, cursor: cursor, inked: true)!.label(number: 2, of: 2)
+        let wantInkedOff = "Screen 2 of 2. The cursor is not on this screen. The user drew the red marks on this screen to show you what they mean. When they say \"this\", they mean what they marked. This image is 1280x720 pixels."
+        expect(inkedOff == wantInkedOff, "an inked screen without the cursor reads '\(wantInkedOff)', got '\(inkedOff)'")
     }
 
     static func checkPoint() {

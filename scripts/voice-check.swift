@@ -168,7 +168,8 @@ struct Scene {
         Screenshot(
             encoding: image(), display: display,
             appKitFrame: CGRect(x: 0, y: 0, width: Canvas.width, height: Canvas.height),
-            cursor: cursor ? CGPoint(x: Canvas.width / 2, y: Canvas.height / 2) : CGPoint(x: -500, y: -500)
+            cursor: cursor ? CGPoint(x: Canvas.width / 2, y: Canvas.height / 2) : CGPoint(x: -500, y: -500),
+            inked: !ink.isEmpty
         )!
     }
 
@@ -908,6 +909,11 @@ enum VoiceCheck {
             && clear.allSatisfy { ($0?.greenComponent ?? 0) > 0.85 }
         print("  \(threePixels ? "ok  " : "FAIL") an inked scene has a 3 px red line from 100,700 to 300,700: rows 699 and 700 red, 698 and 701 half, 696 and 703 clear")
         if !threePixels { mismatches += 1 }
+        let marks = "The user drew the red marks on this screen"
+        let labels = [Scene.spreadsheet.inked([[CGPoint(x: 100, y: 700)]]), Scene.spreadsheet].map { $0.screenshot(display: 1).label(number: 1, of: 1) }
+        let labelled = labels[0].contains(marks) && !labels[1].contains(marks)
+        print("  \(labelled ? "ok  " : "FAIL") an inked scene's label says the user drew the red marks, a plain scene's does not")
+        if !labelled { mismatches += 1 }
         for probe in probes {
             let findings = Rule.findings(in: Answered(said: Claude.Said(probe.tagged ? probe.text + " [POINT:none]" : probe.text), turn: probe.turn))
             let got = findings.map(\.rule)
