@@ -276,13 +276,21 @@ enum ScreenshotCheck {
         expect(away.touching(frame).isEmpty, "ink off the display touches nothing")
         let mixed = Ink([Stroke(CGPoint(x: 2000, y: 250)), Stroke(CGPoint(x: 300, y: 250))])
         expect(mixed.touching(frame) == Ink([Stroke(CGPoint(x: 300, y: 250))]), "touching keeps only the stroke on the display, got \(mixed.touching(frame))")
-        let grazing = Ink([Stroke(CGPoint(x: 902, y: 250))])
-        expect(grazing.touching(frame).strokes.count == 1, "a dot 2 pt past the right edge still touches, its 3 px cap reaches in")
+        let grazing = Ink([Stroke(CGPoint(x: 905, y: 250))])
+        expect(grazing.touching(frame).strokes.count == 1, "a dot 5 pt past the right edge still touches, its 6 px disk reaches in")
 
         let dot = Ink([Stroke(CGPoint(x: 50, y: 50))]).composited(onto: white(400, 200), appKitFrame: CGRect(x: 0, y: 0, width: 400, height: 200))
-        expect(near(rgb(dot, 49, 149), red, within: 2) && near(rgb(dot, 50, 150), red, within: 2),
-               "a one-point stroke at 50,50 draws a dot over pixels 49,149 and 50,150, got \(rgb(dot, 49, 149)) and \(rgb(dot, 50, 150))")
-        expect(rgb(dot, 54, 150) == paper && rgb(dot, 50, 145) == paper, "the dot is 4 px across, pixels 54,150 and 50,145 stay white")
+        for (x, y) in [(47, 149), (50, 150), (52, 150), (50, 152)] {
+            expect(near(rgb(dot, x, y), red, within: 2), "a one-point stroke at 50,50 draws a disk over pixel \(x),\(y), got \(rgb(dot, x, y))")
+        }
+        expect(rgb(dot, 55, 150) == paper && rgb(dot, 50, 144) == paper && rgb(dot, 44, 150) == paper,
+               "the disk is 8 px across, pixels 55,150, 50,144 and 44,150 stay white")
+
+        let cornered = Ink([Stroke(CGPoint(x: 400, y: 200))]).composited(onto: white(400, 200), appKitFrame: CGRect(x: 0, y: 0, width: 800, height: 400))
+        let survived = Screenshot(encoding: cornered, display: 1, appKitFrame: CGRect(x: 0, y: 0, width: 800, height: 400), cursor: .zero)
+            .flatMap { decoded($0.jpeg) }.map { rgb($0, 200, 100) } ?? []
+        expect(survived.count == 3 && survived[0] >= 200 && survived[1] <= 90 && survived[2] <= 90,
+               "at 0.5 px per point a dot centred on a 2x2 block corner is still red at its centre after the JPEG, got \(survived)")
 
         let full = CGRect(x: 0, y: 0, width: 400, height: 200)
         let round = Ink([Stroke(CGPoint(x: 100, y: 100), [CGPoint(x: 300, y: 100)])]).composited(onto: white(400, 200), appKitFrame: full)
