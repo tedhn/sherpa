@@ -93,3 +93,46 @@ private struct Arrowhead: Shape {
         return path
     }
 }
+
+struct CompanionBubble: View {
+    let bubble: Bubble
+    let shown: Int
+
+    var body: some View {
+        Text(bubble.label.prefix(shown))
+            .font(Font(Bubble.font as CTFont))
+            .foregroundStyle(.white)
+            .lineLimit(1)
+            .padding(.horizontal, Bubble.padding.width)
+            .frame(height: bubble.frame.height)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(CompanionGlyph.tint)
+                    .shadow(color: CompanionGlyph.tint.opacity(0.5), radius: 6)
+            )
+            .frame(width: bubble.frame.width, height: bubble.frame.height, alignment: bubble.side == .right ? .leading : .trailing)
+    }
+}
+
+struct TypingBubble: View {
+    let bubble: Bubble
+
+    var body: some View {
+        // SwiftUI's explicit schedule never fires its final date, so the last reveal must not be last.
+        TimelineView(.explicit((0..<bubble.label.count).map { bubble.appeared + Bubble.reveal($0) / .seconds(1) } + [.distantFuture])) { context in
+            let elapsed = (max(context.date, .now).timeIntervalSince(bubble.appeared) * 1000).rounded()
+            CompanionBubble(bubble: bubble, shown: bubble.revealed(after: .milliseconds(elapsed)))
+        }
+    }
+}
+
+struct BubblePop: Transition {
+    let anchor: UnitPoint
+
+    func body(content: Content, phase: TransitionPhase) -> some View {
+        content
+            .scaleEffect(phase == .willAppear ? 0.5 : 1, anchor: anchor)
+            .shadow(color: CompanionGlyph.tint.opacity(phase == .willAppear ? 1 : 0), radius: phase == .willAppear ? 22 : 6)
+            .opacity(phase == .didDisappear ? 0 : 1)
+    }
+}

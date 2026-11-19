@@ -280,6 +280,11 @@ nonisolated extension Claude.Target {
         guard case .point(let x, let y, _, let screen) = self, shots.indices.contains(screen - 1) else { return nil }
         return shots[screen - 1].appKitCentre(ofPixelX: x, y: y)
     }
+
+    func callout(on shots: [Screenshot]) -> Callout? {
+        guard case .point(_, _, let label, _) = self, let point = appKitPoint(on: shots) else { return nil }
+        return Callout(point: point, label: label)
+    }
 }
 
 final class Conversation {
