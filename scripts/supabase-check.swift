@@ -113,7 +113,75 @@ enum SupabaseCheck {
             "a refusal renders its status then the body"
         )
 
+        checkExchanges()
+
         exit(failures == 0 ? 0 : 1)
+    }
+
+    static func checkExchanges() {
+        let shots = (1...2).map { URL(filePath: "/journal/shots/\(id.uuidString)-\($0).jpg") }
+        let pointing = Journal.Entry(
+            id: id, asked: started, question: "How do I make a folder?", shots: shots, answer: "Click File.",
+            pointed: Journal.Point(label: "File menu", screen: 2, x: 211, y: 12), recalled: 0
+        )
+        let paths = (1...2).map { Supabase.shotPath(id, screen: $0) }
+        expect(
+            paths == ["11111111-2222-3333-4444-555555555555-1.jpg", "11111111-2222-3333-4444-555555555555-2.jpg"],
+            "shot paths are the lowercased id, a dash, the screen number and .jpg, got \(paths)"
+        )
+
+        let row = String(decoding: Supabase.row(pointing, shots: paths), as: UTF8.self)
+        expect(
+            row == #"{"answer":"Click File.","asked_at":"2026-10-26T07:33:20.250Z","id":"11111111-2222-3333-4444-555555555555","pointed":{"label":"File menu","screen":2,"x":211,"y":12},"question":"How do I make a folder?","recalled":0,"screens":2,"shots":["11111111-2222-3333-4444-555555555555-1.jpg","11111111-2222-3333-4444-555555555555-2.jpg"]}"#,
+            "an exchange with a point and two shots renders every key, got \(row)"
+        )
+
+        let plain = Journal.Entry(id: id, asked: started, question: "Why?", shots: [shots[0]], answer: "Because.", pointed: nil, recalled: 2)
+        let plainRow = String(decoding: Supabase.row(plain, shots: []), as: UTF8.self)
+        expect(
+            plainRow == #"{"answer":"Because.","asked_at":"2026-10-26T07:33:20.250Z","id":"11111111-2222-3333-4444-555555555555","pointed":null,"question":"Why?","recalled":2,"screens":1,"shots":[]}"#,
+            "an exchange with no point and no stored shot renders null and an empty list, got \(plainRow)"
+        )
+
+        let jpeg = Data([0xFF, 0xD8, 0x01, 0xFF, 0xD9])
+        let upload = Supabase.upload(shot: jpeg, path: paths[0], to: project)
+        expect(upload.httpMethod == "POST", "the shot upload is a POST")
+        expect(
+            upload.url?.absoluteString == "https://abc.supabase.co/storage/v1/object/exchanges/11111111-2222-3333-4444-555555555555-1.jpg",
+            "the shot upload goes to the exchanges bucket under its path, got \(upload.url?.absoluteString ?? "nil")"
+        )
+        expect(
+            upload.allHTTPHeaderFields == ["apikey": "sb_publishable_x", "Authorization": "Bearer sb_publishable_x", "Content-Type": "image/jpeg"],
+            "the shot upload carries the key twice and says image/jpeg, got \(upload.allHTTPHeaderFields ?? [:])"
+        )
+        expect(upload.httpBody == jpeg, "the shot upload body is the JPEG")
+
+        let insert = Supabase.insert(pointing, shots: paths, to: project)
+        expect(insert.httpMethod == "POST", "the exchange insert is a POST")
+        expect(insert.url?.absoluteString == "https://abc.supabase.co/rest/v1/exchanges", "the exchange insert goes to the exchanges table, got \(insert.url?.absoluteString ?? "nil")")
+        expect(
+            insert.allHTTPHeaderFields == [
+                "apikey": "sb_publishable_x", "Authorization": "Bearer sb_publishable_x",
+                "Content-Type": "application/json", "Prefer": "return=minimal",
+            ],
+            "the exchange insert asks for no row back, got \(insert.allHTTPHeaderFields ?? [:])"
+        )
+        expect(body(insert) == row, "the exchange insert body is the row")
+
+        func stored(_ status: Int, _ text: String = "") -> Bool {
+            Supabase.stored(status: status, body: Data(text.utf8))
+        }
+        expect(stored(200), "200 counts as stored")
+        expect(stored(201), "201 counts as stored")
+        expect(stored(409, #"{"code":"23505"}"#), "a 409 counts as stored")
+        expect(
+            stored(400, #"{"statusCode":"409","error":"Duplicate","message":"The resource already exists"}"#),
+            "storage's 400 Duplicate counts as stored"
+        )
+        expect(!stored(400, #"{"statusCode":"400","error":"Bad Request"}"#), "any other 400 does not count as stored")
+        expect(!stored(401, #"{"message":"Invalid API key"}"#), "a 401 does not count as stored")
+        expect(!stored(500), "a 500 does not count as stored")
+        expect(!stored(0), "no response does not count as stored")
     }
 
     static func live() async {

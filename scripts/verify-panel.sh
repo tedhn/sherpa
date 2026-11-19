@@ -91,7 +91,7 @@ swiftc -parse-as-library -o "$DERIVED/assemblyai-check" \
 
 echo "supabase"
 swiftc -parse-as-library -o "$DERIVED/supabase-check" \
-    sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Supabase.swift \
+    sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Journal.swift sherpa/Supabase.swift \
     scripts/supabase-check.swift >/dev/null \
     && "$DERIVED/supabase-check" || failures=$((failures + 1))
 
