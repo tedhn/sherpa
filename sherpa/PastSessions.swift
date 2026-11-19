@@ -110,19 +110,22 @@ private struct SessionRow: View {
 private struct SessionTranscript: View {
     let session: Journal.Session
     let open: (URL) -> Void
+    @State private var position: Journal.Entry.ID?
 
     var body: some View {
-        ScrollViewReader { reader in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 24) {
-                    ForEach(session.exchanges) { ExchangeCard(entry: $0, open: open) }
-                }
-                .padding(20)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        ScrollView {
+            // The bottom anchor lines a card's own frame up with the edge and ignores
+            // padding outside it, so each card carries the gap below it.
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(session.exchanges) { ExchangeCard(entry: $0, open: open).padding(.bottom, 24) }
             }
-            .onChange(of: session.exchanges.last?.id) { _, last in
-                withAnimation { reader.scrollTo(last, anchor: .bottom) }
-            }
+            .scrollTargetLayout()
+            .padding([.horizontal, .top], 20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .scrollPosition(id: $position, anchor: .bottom)
+        .onChange(of: session.exchanges.last?.id, initial: true) { _, last in
+            position = last
         }
     }
 }

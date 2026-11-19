@@ -110,6 +110,11 @@ swiftc -parse-as-library -o "$DERIVED/journal-check" \
     sherpa/Journal.swift scripts/journal-check.swift >/dev/null \
     && "$DERIVED/journal-check" || failures=$((failures + 1))
 
+echo "past sessions transcript"
+swiftc -parse-as-library -o "$DERIVED/transcript-check" \
+    sherpa/Journal.swift sherpa/PastSessions.swift scripts/transcript-check.swift >/dev/null \
+    && "$DERIVED/transcript-check" || failures=$((failures + 1))
+
 echo "voice"
 swiftc -parse-as-library -target arm64-apple-macos14.2 -o "$DERIVED/speaker-check" \
     sherpa/Speaker.swift scripts/speaker-check.swift >/dev/null \
