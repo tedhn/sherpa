@@ -7,7 +7,8 @@ guard CommandLine.arguments.count == 3 else {
 }
 let portFile = URL(fileURLWithPath: CommandLine.arguments[1])
 let archive = URL(fileURLWithPath: CommandLine.arguments[2])
-try FileManager.default.createDirectory(at: archive, withIntermediateDirectories: true)
+let exchanges = archive.appending(path: "exchanges", directoryHint: .isDirectory)
+try FileManager.default.createDirectory(at: exchanges, withIntermediateDirectories: true)
 
 setvbuf(stdout, nil, _IOLBF, 0)
 let queue = DispatchQueue(label: "fake-supabase")
@@ -59,6 +60,32 @@ final class Exchange {
             try! body.write(to: archive.appending(path: name))
             print("upload \(name) \(body.count) bytes")
             return ("200 OK", Data(#"{"Key":"utterances/\#(name)"}"#.utf8))
+        }
+        let shots = "POST /storage/v1/object/exchanges/"
+        if request.hasPrefix(shots), request.hasSuffix(" HTTP/1.1") {
+            let name = String(request.dropFirst(shots.count).dropLast(" HTTP/1.1".count))
+            guard !name.isEmpty, !name.contains("/") else { return ("400 Bad Request", Data("bad name".utf8)) }
+            let file = exchanges.appending(path: name)
+            if FileManager.default.fileExists(atPath: file.path) {
+                print("duplicate upload exchanges/\(name)")
+                return ("400 Bad Request", Data(#"{"statusCode":"409","error":"Duplicate","message":"The resource already exists"}"#.utf8))
+            }
+            try! body.write(to: file)
+            print("upload exchanges/\(name) \(body.count) bytes")
+            return ("200 OK", Data(#"{"Key":"exchanges/\#(name)"}"#.utf8))
+        }
+        if request == "POST /rest/v1/exchanges HTTP/1.1" {
+            guard let id = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["id"] as? String,
+                  UUID(uuidString: id) != nil
+            else { return ("400 Bad Request", Data("no id".utf8)) }
+            let file = exchanges.appending(path: "\(id).json")
+            if FileManager.default.fileExists(atPath: file.path) {
+                print("duplicate insert exchanges/\(id)")
+                return ("409 Conflict", Data(#"{"code":"23505","details":"Key (id)=(\#(id)) already exists.","hint":null,"message":"duplicate key value violates unique constraint \"exchanges_pkey\""}"#.utf8))
+            }
+            try! body.write(to: file)
+            print("insert exchanges/\(id)")
+            return ("201 Created", Data())
         }
         if request == "POST /rest/v1/utterances HTTP/1.1" {
             guard let id = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["id"] as? String,
