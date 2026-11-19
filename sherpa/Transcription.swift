@@ -57,6 +57,7 @@ final class Transcriber {
         var claude: Claude.Endpoint? = nil
         var voice: Voice.Endpoint? = nil
         var forgetAfter = Claude.History.idle
+        var journal: URL? = nil
 
         static var current: Configuration {
             func planted(_ name: String) -> String? {
@@ -72,7 +73,8 @@ final class Transcriber {
                 },
                 screenshots: Screenshot.everyDisplay,
                 claude: Claude.Endpoint(url: Claude.Endpoint.production, key: planted("AnthropicAPIKey")),
-                voice: Voice.Endpoint(url: Voice.Endpoint.production, key: planted("AssemblyAIAPIKey"))
+                voice: Voice.Endpoint(url: Voice.Endpoint.production, key: planted("AssemblyAIAPIKey")),
+                journal: Journal.standardDirectory
             )
             #if DEBUG
             let defaults = UserDefaults.standard
@@ -97,6 +99,11 @@ final class Transcriber {
                 let key = defaults.string(forKey: "AnthropicAPIKey") ?? configuration.claude?.key
                 configuration.claude = URL(string: url).map { Claude.Endpoint(url: $0, key: key) }
             }
+            switch defaults.string(forKey: "JournalDirectory") {
+            case nil: configuration.journal = Journal.debugDirectory
+            case ""?: configuration.journal = nil
+            case let path?: configuration.journal = URL(filePath: path, directoryHint: .isDirectory)
+            }
             #endif
             return configuration
         }
@@ -116,6 +123,7 @@ final class Transcriber {
     private var alarm: (at: ContinuousClock.Instant, task: Task<Void, Never>)?
     private let archive: Archive?
     private let conversation: Conversation?
+    let journal: Journal?
     private let speaker: Speaker?
 
     init(configuration: Configuration = .current) {
@@ -123,7 +131,11 @@ final class Transcriber {
         self.configuration = configuration
         self.urlSession = urlSession
         archive = configuration.archive.map { Archive(project: $0, urlSession: urlSession) }
-        conversation = configuration.claude.map { Conversation(endpoint: $0, urlSession: urlSession, forgetAfter: configuration.forgetAfter) }
+        let journal = configuration.journal.map { Journal(directory: $0) }
+        self.journal = journal
+        conversation = configuration.claude.map {
+            Conversation(endpoint: $0, urlSession: urlSession, forgetAfter: configuration.forgetAfter, journal: journal)
+        }
         speaker = configuration.voice.map { Speaker(endpoint: $0, urlSession: urlSession) }
         tokens = Tokens(key: configuration.key, url: configuration.endpoints.token, urlSession: urlSession)
         dictation = Dictation(limits: configuration.limits)

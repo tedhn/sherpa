@@ -9,6 +9,7 @@ final class MenuBarController: NSObject {
     // Assigned, never read. Not a second visibility flag: panel.isVisible stays
     // the single source of truth for that, and this answers what the app owes.
     private var presentation: PanelPresentation?
+    private lazy var pastSessions = state.journal.map { PastSessionsWindow(journal: $0) }
 
     init(state: AppState) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -45,10 +46,10 @@ final class MenuBarController: NSObject {
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
         let event = NSApp.currentEvent
-        let wantsQuitMenu = event?.type == .rightMouseUp
+        let wantsMenu = event?.type == .rightMouseUp
             || event?.modifierFlags.contains(.control) == true
-        if wantsQuitMenu {
-            showQuitMenu(from: sender)
+        if wantsMenu {
+            showMenu(from: sender)
         } else {
             togglePanel()
         }
@@ -95,13 +96,22 @@ final class MenuBarController: NSObject {
         state.panelClosed()
     }
 
-    private func showQuitMenu(from button: NSStatusBarButton) {
+    private func showMenu(from button: NSStatusBarButton) {
         let menu = NSMenu()
+        if pastSessions != nil {
+            menu.addItem(withTitle: "Past Sessions…", action: #selector(showPastSessions), keyEquivalent: "").target = self
+            menu.addItem(.separator())
+        }
         menu.addItem(
             withTitle: "Quit Sherpa",
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         )
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.minY - 4), in: button)
+    }
+
+    @objc private func showPastSessions() {
+        if panel.isVisible { hidePanel() }
+        pastSessions?.show()
     }
 }

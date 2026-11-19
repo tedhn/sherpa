@@ -287,19 +287,29 @@ nonisolated extension Claude.Target {
     }
 }
 
+nonisolated extension Journal.Point {
+    init?(_ target: Claude.Target?) {
+        guard case .point(let x, let y, let label, let screen)? = target else { return nil }
+        self.init(label: label, screen: screen, x: x, y: y)
+    }
+}
+
 final class Conversation {
     private let endpoint: Claude.Endpoint
     private let urlSession: URLSession
+    private let journal: Journal?
     private var history: Claude.History
 
-    init(endpoint: Claude.Endpoint, urlSession: URLSession, forgetAfter: Duration = Claude.History.idle) {
+    init(endpoint: Claude.Endpoint, urlSession: URLSession, forgetAfter: Duration = Claude.History.idle, journal: Journal? = nil) {
         self.endpoint = endpoint
         self.urlSession = urlSession
+        self.journal = journal
         history = Claude.History(forgetAfter: forgetAfter)
     }
 
     func answer(_ question: Claude.Question, utterance: Int, writing: (String) -> Void) async throws(Claude.Failure) -> Claude.Said {
         let started = ContinuousClock.now
+        let asked = Date.now
         let elapsed = { Int((started.duration(to: .now) / .milliseconds(1)).rounded()) }
         do throws(Claude.Failure) {
             let recalled = history.recalled(at: .now)
@@ -333,6 +343,10 @@ final class Conversation {
             }
             let said = try reading.finished()
             history.remember(Claude.Exchange(question: question.text, screens: question.images.count, answer: said.spoken), at: .now)
+            await journal?.keep(
+                asked: asked, question: question.text, screenshots: question.images.map(\.jpeg),
+                answer: said.spoken, pointed: Journal.Point(said.target), recalled: recalled.count
+            )
             let target = said.target?.logField ?? "missing"
             logger.notice("claude answered utterance=\(utterance) first=\(first) ms=\(elapsed()) chars=\(said.spoken.count) updates=\(updates) target=\(target, privacy: .public)")
             return said

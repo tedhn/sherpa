@@ -55,6 +55,8 @@ final class AppState {
         }
     }
 
+    var journal: Journal? { transcriber.journal }
+
     func panelOpened() {
         transcriber.warm()
     }

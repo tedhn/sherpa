@@ -60,6 +60,8 @@ check() {
 }
 
 cd "$(dirname "$0")/.."
+mkdir -p "$DERIVED"
+touch "$DERIVED/run-start"
 # Only ever touch the build this script owns. Anything running from Xcode's own
 # DerivedData belongs to whoever launched it.
 pkill -f "$DERIVED" 2>/dev/null
@@ -100,8 +102,18 @@ swiftc -parse-as-library -o "$DERIVED/screenshot-check" \
 
 echo "claude"
 swiftc -parse-as-library -o "$DERIVED/claude-check" \
-    sherpa/Screenshot.swift sherpa/Claude.swift sherpa/Companion.swift scripts/claude-check.swift >/dev/null \
+    sherpa/Screenshot.swift sherpa/Journal.swift sherpa/Claude.swift sherpa/Companion.swift scripts/claude-check.swift >/dev/null \
     && "$DERIVED/claude-check" || failures=$((failures + 1))
+
+echo "journal"
+swiftc -parse-as-library -o "$DERIVED/journal-check" \
+    sherpa/Journal.swift scripts/journal-check.swift >/dev/null \
+    && "$DERIVED/journal-check" || failures=$((failures + 1))
+
+echo "past sessions transcript"
+swiftc -parse-as-library -o "$DERIVED/transcript-check" \
+    sherpa/Journal.swift sherpa/PastSessions.swift scripts/transcript-check.swift >/dev/null \
+    && "$DERIVED/transcript-check" || failures=$((failures + 1))
 
 echo "voice"
 swiftc -parse-as-library -target arm64-apple-macos14.2 -o "$DERIVED/speaker-check" \
@@ -140,7 +152,7 @@ swiftc -o "$DERIVED/fake-assemblyai" scripts/fake-assemblyai.swift >/dev/null \
     && swiftc -o "$DERIVED/fake-claude" scripts/fake-claude.swift >/dev/null \
     && swiftc -o "$DERIVED/fake-voice" scripts/fake-voice.swift >/dev/null \
     && swiftc -parse-as-library "${app_swift_flags[@]}" -o "$DERIVED/transcription-check" \
-        sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Supabase.swift sherpa/Screenshot.swift sherpa/Claude.swift sherpa/Speaker.swift sherpa/Transcription.swift sherpa/Companion.swift \
+        sherpa/SpeechAudio.swift sherpa/AssemblyAI.swift sherpa/Dictation.swift sherpa/Supabase.swift sherpa/Screenshot.swift sherpa/Journal.swift sherpa/Claude.swift sherpa/Speaker.swift sherpa/Transcription.swift sherpa/Companion.swift \
         scripts/transcription-check.swift >/dev/null \
     && "$DERIVED/transcription-check" "$DERIVED/fake-assemblyai" || failures=$((failures + 1))
 
@@ -206,18 +218,23 @@ else
     failures=$((failures + 1))
     fake_archive=""
 fi
+journal_dir="$DERIVED/journal"
+rm -rf "$journal_dir"
+swift "$(dirname "$0")/past-sessions-check.swift" fixture "$journal_dir" || failures=$((failures + 1))
 if [[ -s "$fake_ports" ]]; then
     read -r token_field socket_field < "$fake_ports"
     open -a "$APP" --args -AssemblyAITokenURL "${token_field#token=}" \
         -AssemblyAISocketURL "${socket_field#socket=}" -AssemblyAIAPIKey fake -AssemblyAIIdleSeconds "$idle_seconds" \
         -CompanionRestSeconds 8 \
-        "${supabase_flags[@]}" "${claude_flags[@]}" "${voice_flags[@]}" -MicrophoneScenarioFile "$microphone_scenario"
+        "${supabase_flags[@]}" "${claude_flags[@]}" "${voice_flags[@]}" -MicrophoneScenarioFile "$microphone_scenario" \
+        -JournalDirectory "$journal_dir"
 else
     echo "  FAIL the fake AssemblyAI never wrote its ports"
     failures=$((failures + 1))
     fake_capture=""
     fake_archive=""
-    open -a "$APP" --args -SupabaseURL '' -AnthropicURL '' -AssemblyAIVoiceURL ''
+    open -a "$APP" --args -SupabaseURL '' -AnthropicURL '' -AssemblyAIVoiceURL '' \
+        -JournalDirectory "$journal_dir"
 fi
 app_pid=""
 # A cold first launch from a fresh build location takes longer than any fixed
@@ -330,10 +347,8 @@ echo "menu bar over a fullscreen app"
 # generate it. What is checked is that the app claims and releases the pin.
 swift "$(dirname "$0")/menu-bar-tracking-check.swift" toggle "$app_pid" || failures=$((failures + 1))
 
-# Not checked here: right-click on the icon opens the Quit Sherpa menu. The
-# Accessibility API exposes no right-click on a status item, though the posted
-# CGEvents the clicking modes use could drive one. Confirm it by hand once after
-# changing the click routing.
+echo "past sessions"
+swift "$(dirname "$0")/past-sessions-check.swift" window "$app_pid" "$journal_dir" || failures=$((failures + 1))
 
 mkdir -p "$DERIVED/shots"
 proc 'to click menu bar item 1 of menu bar 2' >/dev/null
@@ -358,5 +373,9 @@ elif [[ -n "$fake_capture" ]]; then
     grep -o 'transcription [a-z]* session=[0-9]*[^"]*' <<<"$quit_log" | tail -3 | sed 's/^/    /'
 fi
 pkill -f "$DERIVED" 2>/dev/null
+echo "journal stores"
+support="$HOME/Library/Application Support/my.rooftop.sherpa"
+check "the real and Debug journals were not touched by this run" "" \
+    "$(find "$support/Journal" "$support/Journal-Debug" -newer "$DERIVED/run-start" 2>/dev/null)"
 if [[ $failures -eq 0 ]]; then echo "all checks passed"; else echo "$failures check(s) failed"; fi
 exit $failures
