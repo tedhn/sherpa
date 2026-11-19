@@ -97,10 +97,11 @@ final class Bench {
     private let captureFile: URL?
     private let outputFile: URL?
     private let claude: (server: Process, requests: URL)?
+    let journal: URL?
 
     private init(
         name: String, tail: LogTail, transcriber: Transcriber, server: Process?,
-        files: (mode: URL, capture: URL, output: URL)?, claude: (server: Process, requests: URL)? = nil
+        files: (mode: URL, capture: URL, output: URL)?, claude: (server: Process, requests: URL)? = nil, journal: URL? = nil
     ) {
         self.name = name
         self.tail = tail
@@ -111,6 +112,7 @@ final class Bench {
         captureFile = files?.capture
         outputFile = files?.output
         self.claude = claude
+        self.journal = journal
     }
 
     static func fake(_ scenario: Scenario, binary: String, tail: LogTail, workspace: URL) async -> Bench? {
@@ -162,11 +164,12 @@ final class Bench {
                 return nil
             }
         }
+        let journal = scenario.journal ? file("journal") : nil
         let transcriber = Transcriber(configuration: .init(
             key: scenario.key, endpoints: endpoints, limits: limits, screenshots: scenario.screenshots, claude: endpoint,
-            forgetAfter: scenario.forgetAfter
+            forgetAfter: scenario.forgetAfter, journal: journal
         ))
-        return Bench(name: scenario.name, tail: tail, transcriber: transcriber, server: server, files: (mode, capture, output), claude: claude)
+        return Bench(name: scenario.name, tail: tail, transcriber: transcriber, server: server, files: (mode, capture, output), claude: claude, journal: journal)
     }
 
     static func live(_ name: String, key: String, tail: LogTail) -> Bench {
@@ -310,6 +313,18 @@ final class Bench {
         }
     }
 
+    var sentJPEGs: [[Data]] {
+        guard let requests = claude?.requests else { return [] }
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: requests.path)) ?? []
+        return names.compactMap { Int($0.dropLast(".json".count)) }.sorted().map { number in
+            let body = try? Data(contentsOf: requests.appending(path: "\(number).json"))
+            let messages = body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["messages"] as? [[String: Any]]
+            let content = messages?.last?["content"] as? [[String: Any]] ?? []
+            return content.filter { $0["type"] as? String == "image" }
+                .compactMap { (($0["source"] as? [String: Any])?["data"] as? String).flatMap { Data(base64Encoded: $0) } }
+        }
+    }
+
     var requestBlocks: [[SentBlock]] { sentTurns.compactMap { $0.last?.blocks } }
 
     private(set) var partials: [String] = []
@@ -355,6 +370,7 @@ struct Scenario {
     var claudeMode = "ok"
     var claudeKey: String? = "fake"
     var forgetAfter = Claude.History.idle
+    var journal = false
     let run: (Bench) async -> Void
 }
 
@@ -393,7 +409,7 @@ enum TranscriptionCheck {
         Scenario(name: "expired-once", mode: "expired-once", run: expiredOnce),
         Scenario(name: "no-termination", mode: "no-termination", run: noTermination),
         Scenario(name: "screenshot", screenshots: capturing(), claude: true, run: screenshot),
-        Scenario(name: "follow-up", screenshots: capturing(), claude: true, forgetAfter: .seconds(6), run: followUp),
+        Scenario(name: "follow-up", screenshots: capturing(), claude: true, forgetAfter: .seconds(6), journal: true, run: followUp),
         Scenario(name: "screenshot-merge", screenshots: capturing(displaysPerCall: [1, 2]), claude: true, run: screenshotMerge),
         Scenario(name: "screenshot-slow", screenshots: capturing(delay: .seconds(3)), claude: true, run: screenshotSlow),
         Scenario(name: "screenshot-denied", screenshots: capturing(failing: .noAccess), claude: true, run: screenshotDenied),
@@ -543,6 +559,17 @@ enum TranscriptionCheck {
             asking.map { $0.split(separator: " ").last.map(String.init) ?? "" } == ["history=0", "history=1", "history=0"],
             "follow-up: the asking lines end in history=0, 1, 0, got \(asking)"
         )
+        guard let directory = bench.journal else { return }
+        let journal = Journal(directory: directory)
+        expect(journal.sessions.map(\.exchanges.count) == [1, 2], "follow-up: the journal holds two sessions of 1 and 2 exchanges, newest first, got \(journal.sessions.map(\.exchanges.count))")
+        let kept = journal.sessions.reversed().flatMap(\.exchanges)
+        expect(kept.map(\.recalled) == [0, 1, 0], "follow-up: the journal's recalled counts are 0, 1, 0, got \(kept.map(\.recalled))")
+        expect(kept.map(\.question) == questions, "follow-up: the journal holds each question as heard, got \(kept.map(\.question))")
+        expect(kept.map(\.answer) == answers, "follow-up: the journal holds each answer as shown, got \(kept.map(\.answer.count)) against \(answers.map(\.count))")
+        let jpegs = bench.sentJPEGs
+        expect(jpegs.map(\.count) == [1, 1, 1] && jpegs.allSatisfy { $0[0].starts(with: [0xFF, 0xD8]) }, "follow-up: each request carried one JPEG, got \(jpegs.map(\.count))")
+        expect(kept.map { $0.shots.compactMap { try? Data(contentsOf: $0) } } == jpegs, "follow-up: each kept shot is byte-equal to the JPEG Claude was sent")
+        expect(kept.allSatisfy { $0.pointed == Journal.Point(label: "panel", screen: 1, x: 640, y: 400) }, "follow-up: each exchange kept the tag the fake sent, got \(kept.map(\.pointed))")
     }
 
     static func screenshotMerge(_ bench: Bench) async {
