@@ -19,7 +19,7 @@ final class Companion {
     private static let follow = Animation.spring(response: 0.2, dampingFraction: 0.6)
 
     /// True once the pointer has sat still for `restAfter`, five minutes outside tests; the glyph
-    /// fades out until the next move.
+    /// fades out until the next activity.
     private(set) var resting = false
 
     // A mouse tap needs the Accessibility grant (an ungranted app gets a non-nil tap that reads
@@ -35,7 +35,7 @@ final class Companion {
     ].reduce(0) { $0 | 1 << $1.rawValue }
 
     @ObservationIgnored private var feed: Feed?
-    @ObservationIgnored private var lastMove = ContinuousClock.now
+    @ObservationIgnored private var lastActivity = ContinuousClock.now
     @ObservationIgnored private var restWatch: Task<Void, Never>?
     let restAfter: Duration
 
@@ -94,12 +94,18 @@ final class Companion {
     fileprivate func followPointer() {
         let next = Self.position(following: NSEvent.mouseLocation, on: NSScreen.screens.map(\.frame))
         if next == position { return }
-        lastMove = .now
+        withAnimation(Self.follow) { position = next }
+        wake()
+    }
+
+    /// Voice activity counts as activity, so a hold wakes a resting companion and the rest time
+    /// restarts when Sherpa goes back to idle.
+    func wake() {
+        lastActivity = .now
         if resting {
             withAnimation(.easeOut(duration: 0.2)) { resting = false }
             logger.notice("companion woke")
         }
-        withAnimation(Self.follow) { position = next }
         watchForRest()
     }
 
@@ -107,7 +113,7 @@ final class Companion {
         if restWatch != nil { return }
         restWatch = Task { [weak self] in
             while let self {
-                let due = lastMove + restAfter
+                let due = lastActivity + restAfter
                 if .now >= due {
                     withAnimation(.easeIn(duration: 1)) { self.resting = true }
                     logger.notice("companion resting")

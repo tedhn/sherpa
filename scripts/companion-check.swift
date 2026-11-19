@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import ImageIO
+import SwiftUI
 
 final class RecordingView: NSView {
     var downs = 0
@@ -13,6 +14,94 @@ final class RecordingView: NSView {
 struct Overlay {
     let number: Int
     let bounds: CGRect
+}
+
+enum Seen: String { case none, arrow, waveform, spinner, unknown }
+
+struct Pixels {
+    var rgba: [UInt8]
+    var width: Int
+    var height: Int
+}
+
+func decode(_ image: CGImage) -> Pixels? {
+    let width = image.width
+    let height = image.height
+    var rgba = [UInt8](repeating: 0, count: width * height * 4)
+    let drawn = rgba.withUnsafeMutableBytes { buffer -> Bool in
+        guard let context = CGContext(
+            data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return false }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return true
+    }
+    return drawn ? Pixels(rgba: rgba, width: width, height: height) : nil
+}
+
+/// Opaque pixels inside the 40 x 40 pt square around `centre`, as a column mask and a count of
+/// the pixels within 2.5 pt of the centre.
+func opaqueColumns(_ rgba: [UInt8], width: Int, height: Int, scale: Double, centre: CGPoint)
+    -> (columns: [Bool], first: Int, count: Int, nearCentre: Int)
+{
+    let x0 = max(0, Int(((centre.x - 20) * scale).rounded()))
+    let x1 = min(width, Int(((centre.x + 20) * scale).rounded()))
+    let y0 = max(0, Int(((centre.y - 20) * scale).rounded()))
+    let y1 = min(height, Int(((centre.y + 20) * scale).rounded()))
+    var columns = [Bool](repeating: false, count: max(0, x1 - x0))
+    var count = 0
+    var nearCentre = 0
+    let reach = 2.5 * scale
+    for y in y0..<max(y0, y1) {
+        for x in x0..<max(x0, x1) where rgba[(y * width + x) * 4 + 3] >= 230 {
+            columns[x - x0] = true
+            count += 1
+            let dx = Double(x) + 0.5 - centre.x * scale
+            let dy = Double(y) + 0.5 - centre.y * scale
+            if (dx * dx + dy * dy).squareRoot() <= reach { nearCentre += 1 }
+        }
+    }
+    return (columns, x0, count, nearCentre)
+}
+
+func runs(of columns: [Bool]) -> [ClosedRange<Int>] {
+    var found: [ClosedRange<Int>] = []
+    var start: Int?
+    for (index, filled) in columns.enumerated() {
+        if filled, start == nil { start = index }
+        if !filled, let begin = start {
+            found.append(begin...(index - 1))
+            start = nil
+        }
+    }
+    if let begin = start { found.append(begin...(columns.count - 1)) }
+    return found
+}
+
+func classify(_ rgba: [UInt8], width: Int, height: Int, scale: Double, centre: CGPoint) -> Seen {
+    let seen = opaqueColumns(rgba, width: width, height: height, scale: scale, centre: centre)
+    if seen.count == 0 { return .none }
+    if seen.nearCentre == 0 { return .spinner }
+    let separate = runs(of: seen.columns).count
+    if separate >= 4 { return .waveform }
+    return separate == 1 ? .arrow : .unknown
+}
+
+/// Height in points of the middle bar of a waveform: the opaque rows across its column run.
+func middleBarHeight(_ rgba: [UInt8], width: Int, height: Int, scale: Double, centre: CGPoint) -> Double {
+    let seen = opaqueColumns(rgba, width: width, height: height, scale: scale, centre: centre)
+    let bars = runs(of: seen.columns)
+    guard !bars.isEmpty else { return 0 }
+    let middle = bars[bars.count / 2]
+    var top = Int.max
+    var bottom = Int.min
+    for y in 0..<height {
+        for column in middle where rgba[(y * width + seen.first + column) * 4 + 3] >= 230 {
+            top = min(top, y)
+            bottom = max(bottom, y)
+        }
+    }
+    return bottom < top ? 0 : Double(bottom - top + 1) / scale
 }
 
 @main
@@ -30,10 +119,13 @@ enum CompanionCheck {
         Task {
             if (3...4).contains(arguments.count), arguments[1] == "--app", let pid = Int32(arguments[2]) {
                 await checkApp(pid: pid, restSeconds: arguments.count == 4 ? Double(arguments[3]) : nil)
+            } else if arguments.count == 4, arguments[1] == "--looks", let pid = Int32(arguments[2]), let rest = Double(arguments[3]) {
+                await checkLooks(pid: pid, restSeconds: rest)
             } else if arguments.count == 3, arguments[1] == "--panel", let pid = Int32(arguments[2]) {
                 await checkPanel(pid: pid)
             } else {
                 checkPlacement()
+                checkLooksRender()
             }
             exit(failures == 0 ? 0 : 1)
         }
@@ -94,7 +186,7 @@ enum CompanionCheck {
         try? await Task.sleep(for: .milliseconds(800))
     }
 
-    static func glyph(in overlay: Overlay) -> (centre: CGPoint, count: Int)? {
+    static func capture(_ overlay: Overlay) -> (pixels: Pixels, scale: Double)? {
         let path = NSTemporaryDirectory() + "companion-check-\(UUID().uuidString).png"
         defer { try? FileManager.default.removeItem(atPath: path) }
         let capture = Process()
@@ -103,33 +195,31 @@ enum CompanionCheck {
         guard (try? capture.run()) != nil else { return nil }
         capture.waitUntilExit()
         guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+              let pixels = decode(image)
         else { return nil }
-        let width = image.width
-        let height = image.height
-        var pixels = [UInt8](repeating: 0, count: width * height * 4)
-        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
-            guard let context = CGContext(
-                data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
-                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-            else { return false }
-            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-            return true
-        }
-        guard drawn else { return nil }
+        return (pixels, Double(pixels.width) / overlay.bounds.width)
+    }
+
+    static func glyph(in overlay: Overlay) -> (centre: CGPoint, count: Int)? {
+        guard let (pixels, scale) = capture(overlay) else { return nil }
         var sumX = 0.0
         var sumY = 0.0
         var count = 0
-        for y in 0..<height {
-            for x in 0..<width where pixels[(y * width + x) * 4 + 3] >= 230 {
+        for y in 0..<pixels.height {
+            for x in 0..<pixels.width where pixels.rgba[(y * pixels.width + x) * 4 + 3] >= 230 {
                 sumX += Double(x) + 0.5
                 sumY += Double(y) + 0.5
                 count += 1
             }
         }
         guard count > 0 else { return nil }
-        let scale = Double(width) / overlay.bounds.width
         return (CGPoint(x: sumX / Double(count) / scale, y: sumY / Double(count) / scale), count)
+    }
+
+    static func seen(in overlay: Overlay, centre: CGPoint) -> Seen {
+        guard let (pixels, scale) = capture(overlay) else { return .unknown }
+        return classify(pixels.rgba, width: pixels.width, height: pixels.height, scale: scale, centre: centre)
     }
 
     static func near(_ a: CGPoint?, _ b: CGPoint, within tolerance: CGFloat) -> Bool {
@@ -249,11 +339,12 @@ enum CompanionCheck {
                "\(describe(found)) vs \(describe(local))")
     }
 
-    static func companionLog(pid: Int32) -> String {
+    static func companionLog(pid: Int32, categories: [String] = ["companion"]) -> String {
+        let match = categories.map { "category == \"\($0)\"" }.joined(separator: " OR ")
         let log = Process()
         log.executableURL = URL(fileURLWithPath: "/usr/bin/log")
         log.arguments = ["show", "--last", "2m", "--style", "syslog", "--predicate",
-                         "processIdentifier == \(pid) AND subsystem == \"my.rooftop.sherpa\" AND category == \"companion\""]
+                         "processIdentifier == \(pid) AND subsystem == \"my.rooftop.sherpa\" AND (\(match))"]
         let pipe = Pipe()
         log.standardOutput = pipe
         log.standardError = FileHandle.nullDevice
@@ -263,6 +354,136 @@ enum CompanionCheck {
             log.waitUntilExit()
         }
         return text
+    }
+
+    @MainActor
+    static func render(_ look: CompanionGlyph.Look, time: Double) -> (pixels: Pixels, scale: Double)? {
+        let renderer = ImageRenderer(content: CompanionGlyph(look: look, time: time).frame(width: 60, height: 60))
+        renderer.scale = 2
+        guard let image = renderer.cgImage, let pixels = decode(image) else { return nil }
+        return (pixels, 2)
+    }
+
+    @MainActor
+    static func checkLooksRender() {
+        let centre = CGPoint(x: 30, y: 30)
+        func seen(_ look: CompanionGlyph.Look, time: Double = 0) -> Seen {
+            guard let (pixels, scale) = render(look, time: time) else { return .unknown }
+            return classify(pixels.rgba, width: pixels.width, height: pixels.height, scale: scale, centre: centre)
+        }
+        expect(seen(.arrow) == .arrow, "the idle look is the arrowhead", seen(.arrow).rawValue)
+        let quiet = seen(.waveform(level: 0.05))
+        let loud = seen(.waveform(level: 1.0))
+        expect(quiet == .waveform && loud == .waveform, "the listening look is a waveform", "\(quiet.rawValue), \(loud.rawValue)")
+        func barHeight(_ level: Double) -> Double {
+            guard let (pixels, scale) = render(.waveform(level: level), time: 0) else { return 0 }
+            return middleBarHeight(pixels.rgba, width: pixels.width, height: pixels.height, scale: scale, centre: centre)
+        }
+        let low = barHeight(0.05)
+        let high = barHeight(1.0)
+        expect(high - low >= 10, "the waveform rises with the level", String(format: "%.1f pt at 0.05, %.1f pt at 1.0", low, high))
+        let first = render(.spinner, time: 0)
+        let second = render(.spinner, time: 0.2)
+        let spinning = [first, second].map { $0.map { classify($0.pixels.rgba, width: $0.pixels.width, height: $0.pixels.height, scale: $0.scale, centre: centre) } }
+        expect(spinning == [.spinner, .spinner] && first?.pixels.rgba != second?.pixels.rgba, "the spinner turns",
+               "\(spinning.map { $0?.rawValue ?? "nil" })")
+    }
+
+    static func checkLooks(pid: Int32, restSeconds: Double) async {
+        let saved = CGEvent(source: nil)?.location ?? .zero
+        guard let display = NSScreen.screens.map(displayID).first(where: { CGDisplayBounds($0).contains(saved) }),
+              let overlay = overlays(pid).first(where: { $0.bounds == CGDisplayBounds(display) })
+        else {
+            expect(false, "the display holding the pointer has an overlay", "pointer \(describe(saved))")
+            return
+        }
+        let b = overlay.bounds
+        let here = CGPoint(x: saved.x - b.minX > 60 ? saved.x - 30 : saved.x + 30, y: saved.y)
+        move(to: here)
+        try? await Task.sleep(for: .milliseconds(800))
+        let centre = CGPoint(
+            x: min(max(here.x - b.minX + 35, 12), b.width - 12),
+            y: min(max(here.y - b.minY + 25, 12), b.height - 12))
+
+        func sample(upTo seconds: Double, until wanted: Seen) -> Seen {
+            let deadline = Date().addingTimeInterval(seconds)
+            var last = Seen.unknown
+            repeat {
+                last = seen(in: overlay, centre: centre)
+                if last == wanted { return last }
+            } while Date() < deadline
+            return last
+        }
+        func chord(down: Bool) async {
+            if down {
+                postModifier(59, down: true, flags: .maskControl)
+                try? await Task.sleep(for: .milliseconds(100))
+                postModifier(58, down: true, flags: [.maskControl, .maskAlternate])
+            } else {
+                postModifier(58, down: false, flags: .maskControl)
+                try? await Task.sleep(for: .milliseconds(100))
+                postModifier(59, down: false, flags: [])
+            }
+        }
+
+        func lastState() -> String? {
+            companionLog(pid: pid, categories: ["state"]).split(separator: "\n").last { $0.contains("state voice=") }.map(String.init)
+        }
+        let idleBy = Date().addingTimeInterval(20)
+        var state = lastState()
+        while let line = state, !line.contains("voice=idle"), Date() < idleBy {
+            try? await Task.sleep(for: .milliseconds(500))
+            state = lastState()
+        }
+        expect(state?.contains("voice=idle") ?? true, "the previous turn has ended in idle", state ?? "no state line in 2 minutes")
+
+        let before = seen(in: overlay, centre: centre)
+        expect(before == .arrow, "before the hold the companion is the arrowhead", before.rawValue)
+
+        try? await Task.sleep(for: .seconds(restSeconds + 1.5))
+        let resting = seen(in: overlay, centre: centre)
+        expect(resting == .none, "a still pointer past the rest time hides it", resting.rawValue)
+
+        var sequence: [Seen] = []
+        func note(_ look: Seen) { if look != .unknown, sequence.last != look { sequence.append(look) } }
+
+        let pressed = Date()
+        await chord(down: true)
+        let held = sample(upTo: 2.5, until: .waveform)
+        note(held)
+        expect(held == .waveform, "holding the hotkey wakes it as a waveform", held.rawValue)
+
+        let remaining = 2 - Date().timeIntervalSince(pressed)
+        if remaining > 0 { try? await Task.sleep(for: .seconds(remaining)) }
+        await chord(down: false)
+        let released = sample(upTo: 1.5, until: .spinner)
+        note(released)
+        expect(released == .spinner, "after the release it spins", released.rawValue)
+
+        let done = sample(upTo: 20, until: .arrow)
+        note(done)
+        expect(done == .arrow, "once the voice has the answer it is the arrowhead again", done.rawValue)
+        print("  info looks from the press: \(sequence.map(\.rawValue).joined(separator: " -> "))")
+
+        try? await Task.sleep(for: .seconds(1))
+        let lines = companionLog(pid: pid, categories: ["companion", "state"])
+            .split(separator: "\n").map(String.init)
+        let lastRest = lines.lastIndex { $0.contains("companion resting") }
+        let woke = lastRest.flatMap { rest in lines[rest...].firstIndex { $0.contains("companion woke") } }
+        expect(woke != nil, "the companion logged woke after resting", lines.filter { $0.contains("companion ") }.joined(separator: "\n"))
+        let listening = lines.lastIndex { $0.contains("state voice=listening") }
+        let responding = listening.flatMap { start in lines[start...].firstIndex { $0.contains("state voice=responding") } }
+        expect(responding != nil, "the state went through responding", lines.filter { $0.contains("state voice=") }.joined(separator: "\n"))
+
+        move(to: saved)
+        try? await Task.sleep(for: .milliseconds(300))
+    }
+
+    static func postModifier(_ virtualKey: CGKeyCode, down: Bool, flags: CGEventFlags) {
+        guard let event = CGEvent(keyboardEventSource: CGEventSource(stateID: .hidSystemState), virtualKey: virtualKey, keyDown: down) else { return }
+        event.type = .flagsChanged
+        event.flags = flags
+        event.post(tap: .cghidEventTap)
     }
 
     static func checkFeed(pid: Int32) {
