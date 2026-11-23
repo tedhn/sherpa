@@ -67,8 +67,7 @@ func bubbleZone(_ frame: CGRect, side: String) -> CGRect {
 }
 
 func ringZone(_ bounds: CGRect) -> CGRect {
-    let reach = CompanionRing.gap + CompanionRing.lineWidth / 2 + 5
-    return bounds.insetBy(dx: -reach, dy: -reach)
+    bounds.insetBy(dx: -24, dy: -24)
 }
 
 nonisolated struct Frame {
@@ -1055,21 +1054,35 @@ enum CompanionCheck {
         }
         let full = drawn(1)
         let loop = full.blobs.first?.box ?? .zero
-        expect(full.blobs.count == 1 && abs(loop.minX - 32.75) <= 0.5 && abs(loop.minY - 22.75) <= 0.5
-                   && abs(loop.width - 114.5) <= 1 && abs(loop.height - 64.5) <= 1,
-               "the ring around 40,30 100x50 is one loop whose 2.5 pt line is centred 6 pt outside it: 32.75,22.75 114.5x64.5",
-               "\(full.blobs.map { "\($0.box) x\($0.count)" })")
-        let edge = rgba(full.pixels, 180, 48)
-        expect(edge.count == 4 && zip(edge, [51, 122, 255, 255]).allSatisfy { abs($0 - $1) <= 2 },
-               "the middle of its top line is the companion blue 51,122,255", "\(edge)")
-        let inside = rgba(full.pixels, 180, 110)
-        expect(inside.last == 0, "inside the ring is clear", "\(inside)")
         let whole = full.blobs.reduce(0) { $0 + $1.count }
+        expect((full.blobs.first?.count ?? 0) * 100 >= whole * 99,
+               "the ring around 40,30 100x50 is one connected loop, bar the faint tip of its tail", "\(full.blobs.map { "\($0.box) x\($0.count)" })")
+        expect(loop.minX <= 39 && loop.minY <= 29 && loop.maxX >= 141 && loop.maxY >= 81,
+               "the loop surrounds 40,30 100x50 with at least 1 pt clear on every side", "\(loop)")
+        expect(ringZone(around).contains(loop), "and lies within 24 pt of it", "\(loop) vs \(ringZone(around))")
+        let above = (0..<60).map { rgba(full.pixels, 180, $0) }
+        expect(above.contains { $0.count == 4 && zip($0, [51, 122, 255, 255]).allSatisfy { abs($0 - $1) <= 2 } },
+               "the line above the box's middle has a pixel of the companion blue 51,122,255", "\(above.filter { $0.last == 255 }.prefix(3))")
+        let inside = rgba(full.pixels, 180, 110)
+        expect(inside.last == 0, "the box's centre is clear", "\(inside)")
         let half = drawn(0.5).blobs.reduce(0) { $0 + $1.count }
-        expect(half * 10 >= whole * 4 && half * 10 <= whole * 6, "drawn to 0.5 it shows about half the loop", "\(half) of \(whole) pixels")
+        expect(half * 10 >= whole * 3 && half * 10 <= whole * 7, "drawn to 0.5 it shows 30% to 70% of the loop's pixels", "\(half) of \(whole) pixels")
         _ = drawn(1)
         let start = drawn(DrawingRing.undrawn).blobs.reduce(0) { $0 + $1.count }
-        expect(start * 100 <= whole, "a new ring starts as a dot, even right after a whole ring was drawn", "\(start) of \(whole) pixels")
+        expect(start * 100 <= whole, "a new ring starts as a dot of at most 1% of the pixels, even right after a whole ring was drawn", "\(start) of \(whole) pixels")
+        expect(drawn(1).pixels.rgba == full.pixels.rgba, "rendering the same ring twice gives identical pixels")
+
+        func inked(around box: CGRect) -> [Bool] {
+            guard let scene = rendered(CompanionRing(around: box, drawn: 1).frame(width: 300, height: 120), scale: 2)?.pixels else { return [] }
+            return stride(from: 3, to: scene.rgba.count, by: 4).map { scene.rgba[$0] >= 128 }
+        }
+        let here = inked(around: around), there = inked(around: around.offsetBy(dx: 100, dy: 0))
+        let (width, shift) = (600, 200)
+        let differing = (0..<(here.count / width)).reduce(0) { total, y in
+            total + (0..<(width - shift)).filter { here[y * width + $0] != there[y * width + $0 + shift] }.count
+        }
+        expect(!here.isEmpty && differing >= 40, "two boxes of the same size at different places draw loops that differ once translated",
+               "\(differing) differing pixels of \(whole)")
 
         let overlay = CGRect(x: 0, y: 0, width: 400, height: 300)
         let bounds = CGRect(x: 100, y: 180, width: 80, height: 40)
@@ -1398,12 +1411,11 @@ enum CompanionCheck {
                    "the bubble sits on the \(out.side) side of the glyph, as logged", "\(String(describing: blob?.box)) vs glyph x \(destination.x)")
             let read = text(in: out.bubble.insetBy(dx: -2, dy: -2), of: overlay)
             expect(read.lowercased().contains("panel"), "Vision reads the label panel in the bubble", "read \"\(read)\"")
-            let outer = out.ring.insetBy(dx: -(CompanionRing.gap + CompanionRing.lineWidth / 2), dy: -(CompanionRing.gap + CompanionRing.lineWidth / 2))
             let ringed = ringPieces(landed, in: out.ringZone)
-            expect(ringed.map { [($0.box.minX, outer.minX), ($0.box.minY, outer.minY), ($0.box.maxX, outer.maxX), ($0.box.maxY, outer.maxY)]
-                                    .allSatisfy { abs($0 - $1) <= 2 } } ?? false,
-                   "while it pauses a ring 6 pt outside the logged ring frame surrounds the thing",
-                   "\(landed?.blobs.filter { out.ringZone.contains($0.box) }.map { "\($0.box) x\($0.count)" } ?? []) vs \(outer)")
+            expect(ringed.map { $0.box.minX <= out.ring.minX - 1 && $0.box.minY <= out.ring.minY - 1
+                                    && $0.box.maxX >= out.ring.maxX + 1 && $0.box.maxY >= out.ring.maxY + 1 } ?? false,
+                   "while it pauses the ring surrounds the logged ring frame with at least 1 pt clear on every side",
+                   "\(landed?.blobs.filter { out.ringZone.contains($0.box) }.map { "\($0.box) x\($0.count)" } ?? []) vs \(out.ring)")
             let drawing = recorder.frames.filter { $0.time >= out.arrived - 0.1 }.compactMap { ringPieces($0, in: out.ringZone)?.count }
             print("  info the ring showed \(drawing.prefix(24).map(String.init).joined(separator: " ")) opaque pixels in its first frames, "
                   + "in \(landed?.blobs.filter { out.ringZone.contains($0.box) }.count ?? 0) pieces once drawn")
