@@ -52,16 +52,28 @@ nonisolated enum Claude {
 
     enum Target: Equatable, Sendable {
         case none
-        case point(Screenshot.Box, label: String, screen: Int)
+        /// The box, label and screen are where the mark lands, so an arrow's are its head's.
+        case point(Screenshot.Box, label: String, screen: Int, mark: Mark)
+
+        enum Mark: Equatable, Sendable {
+            case ring
+            case underline
+            case arrow(from: Screenshot.Box, label: String, screen: Int)
+        }
 
         static let cursorScreen = 1
 
         var logField: String {
             switch self {
             case .none: "none"
-            case .point(let box, _, let screen) where box.isPoint: "screen\(screen):\(box.x1),\(box.y1)"
-            case .point(let box, _, let screen): "screen\(screen):\(box.x1),\(box.y1),\(box.x2),\(box.y2)"
+            case .point(let box, _, let screen, .ring): Self.field(box, on: screen)
+            case .point(let box, _, let screen, .underline): "underline:" + Self.field(box, on: screen)
+            case .point(let box, _, let screen, .arrow(let from, _, let start)): "arrow:\(Self.field(from, on: start))->\(Self.field(box, on: screen))"
             }
+        }
+
+        private static func field(_ box: Screenshot.Box, on screen: Int) -> String {
+            box.isPoint ? "screen\(screen):\(box.x1),\(box.y1)" : "screen\(screen):\(box.x1),\(box.y1),\(box.x2),\(box.y2)"
         }
     }
 
@@ -71,7 +83,14 @@ nonisolated enum Claude {
         let target: Target?
 
         init(_ text: String) {
-            let suffix = #/(?i)\[(?:POINT:[^\]\n\r]*\]?|P(?:O(?:I(?:N(?:T)?)?)?)?)?\s*\z/#
+            let suffix = #/
+                (?i) \[ (?:
+                    (?: POINT | UNDERLINE | ARROW ) : [^\]\n\r]* \]?
+                    | P (?: O (?: I (?: N (?: T )? )? )? )?
+                    | U (?: N (?: D (?: E (?: R (?: L (?: I (?: N (?: E )? )? )? )? )? )? )? )?
+                    | A (?: R (?: R (?: O (?: W )? )? )? )?
+                )? \s* \z
+                /#
             guard let match = text.firstMatch(of: suffix) else {
                 (spoken, tag, target) = (text.trimmingCharacters(in: .whitespacesAndNewlines), nil, nil)
                 return
@@ -82,19 +101,39 @@ nonisolated enum Claude {
             target = Self.parse(removed)
         }
 
-        /// The prompt asks for a box, but a model can still write the older two-number form, one pixel.
         private static func parse(_ tag: String) -> Target? {
-            let strict = #/\[POINT:(?:(none)|([0-9]+)\s*,\s*([0-9]+)(?:\s*,\s*([0-9]+)\s*,\s*([0-9]+))?\s*:([^\]:\n\r]+?)(?::screen([0-9]+))?)\]/#
-            guard let match = tag.wholeMatch(of: strict) else { return nil }
-            let (_, none, x1, y1, x2, y2, label, screen) = match.output
-            if none != nil { return Target.none }
-            let name = label?.trimmingCharacters(in: .whitespaces) ?? ""
-            let number = screen.map { Int($0) ?? 0 } ?? Target.cursorScreen
-            guard let x1 = x1.flatMap({ Int($0) }), let y1 = y1.flatMap({ Int($0) }),
-                  let x2 = x2.map({ Int($0) }) ?? x1, let y2 = y2.map({ Int($0) }) ?? y1,
-                  !name.isEmpty, number > 0
+            guard let (verb, body) = tag.wholeMatch(of: #/\[(POINT|UNDERLINE|ARROW):([^\]\n\r]*)\]/#).map({ ($0.output.1, $0.output.2) }) else { return nil }
+            if verb == "POINT", body == "none" { return Target.none }
+            var fields = body.split(separator: ":", omittingEmptySubsequences: false)[...]
+            guard var end = spot(&fields) else { return nil }
+            let mark: Target.Mark
+            switch verb {
+            case "ARROW":
+                guard let head = spot(&fields) else { return nil }
+                (mark, end) = (.arrow(from: end.box, label: end.label, screen: end.screen), head)
+            case "UNDERLINE": mark = .underline
+            default: mark = .ring
+            }
+            guard fields.isEmpty else { return nil }
+            return .point(end.box, label: end.label, screen: end.screen, mark: mark)
+        }
+
+        /// Reads `x1,y1,x2,y2:label` and an optional `:screenN` off the front of `fields`. The prompt
+        /// asks for a box, but a model can still write the older two-number form, one pixel.
+        private static func spot(_ fields: inout ArraySlice<Substring>) -> (box: Screenshot.Box, label: String, screen: Int)? {
+            let corners = #/\s*([0-9]+)\s*,\s*([0-9]+)\s*(?:,\s*([0-9]+)\s*,\s*([0-9]+)\s*)?/#
+            guard let (_, x1, y1, x2, y2) = fields.popFirst()?.wholeMatch(of: corners)?.output,
+                  let label = fields.popFirst()?.trimmingCharacters(in: .whitespaces), !label.isEmpty
             else { return nil }
-            return .point(Screenshot.Box(x1: x1, y1: y1, x2: x2, y2: y2), label: name, screen: number)
+            var screen = Target.cursorScreen
+            if let named = fields.first?.wholeMatch(of: #/screen([0-9]+)/#) {
+                screen = Int(named.output.1) ?? 0
+                fields.removeFirst()
+            }
+            guard let left = Int(x1), let top = Int(y1),
+                  let right = x2.map({ Int($0) }) ?? left, let bottom = y2.map({ Int($0) }) ?? top, screen > 0
+            else { return nil }
+            return (Screenshot.Box(x1: left, y1: top, x2: right, y2: bottom), label, screen)
         }
     }
 
@@ -282,18 +321,24 @@ nonisolated extension Claude.Question {
 
 nonisolated extension Claude.Target {
     func callout(on shots: [Screenshot]) -> Callout? {
-        guard case .point(let box, let label, let screen) = self, shots.indices.contains(screen - 1) else { return nil }
+        guard case .point(let box, let label, let screen, let mark) = self, shots.indices.contains(screen - 1) else { return nil }
         let shot = shots[screen - 1]
+        let drawn: Callout.Mark = switch mark {
+        case .ring: .ring
+        case .underline: .underline
+        // An arrow is drawn on one overlay, so one that starts on another screen rings its end instead.
+        case .arrow(let from, _, let start): start == screen ? .arrow(from: shot.appKitRect(of: from)) : .ring
+        }
         return Callout(
             point: shot.appKitCentre(ofPixelX: box.centre.x, y: box.centre.y), label: label,
-            bounds: box.isPoint ? nil : shot.appKitRect(of: box)
+            bounds: box.isPoint ? nil : shot.appKitRect(of: box), mark: drawn
         )
     }
 }
 
 nonisolated extension Journal.Point {
     init?(_ target: Claude.Target?) {
-        guard case .point(let box, let label, let screen)? = target else { return nil }
+        guard case .point(let box, let label, let screen, _)? = target else { return nil }
         self.init(label: label, screen: screen, x: box.centre.x, y: box.centre.y)
     }
 }

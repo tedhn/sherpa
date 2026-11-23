@@ -42,6 +42,7 @@ enum ClaudeCheck {
         checkHistory()
         checkQuestion()
         checkCallout()
+        checkLogField()
         checkSaid()
         checkAnswer()
         checkFailureFields()
@@ -143,19 +144,52 @@ enum ClaudeCheck {
         }
         let shots = [sized(CGRect(x: 0, y: 0, width: 8, height: 4)), sized(CGRect(x: 100, y: -40, width: 40, height: 20))]
         let want: [(Claude.Target, Callout?)] = [
-            (.point(.init(x: 1, y: 0), label: "a", screen: 1), Callout(point: CGPoint(x: 3, y: 3), label: "a", bounds: nil)),
-            (.point(.init(x: 1, y: 0), label: "a", screen: 2), Callout(point: CGPoint(x: 115, y: -25), label: "a", bounds: nil)),
-            (.point(.init(x1: 1, y1: 0, x2: 2, y2: 1), label: "b", screen: 1),
+            (.point(.init(x: 1, y: 0), label: "a", screen: 1, mark: .ring), Callout(point: CGPoint(x: 3, y: 3), label: "a", bounds: nil)),
+            (.point(.init(x: 1, y: 0), label: "a", screen: 2, mark: .ring), Callout(point: CGPoint(x: 115, y: -25), label: "a", bounds: nil)),
+            (.point(.init(x1: 1, y1: 0, x2: 2, y2: 1), label: "b", screen: 1, mark: .ring),
              Callout(point: CGPoint(x: 3, y: 3), label: "b", bounds: CGRect(x: 2, y: 0, width: 4, height: 4))),
-            (.point(.init(x1: 0, y1: 1, x2: 3, y2: 9), label: "c", screen: 2),
+            (.point(.init(x1: 0, y1: 1, x2: 3, y2: 9), label: "c", screen: 2, mark: .ring),
              Callout(point: CGPoint(x: 115, y: -35), label: "c", bounds: CGRect(x: 100, y: -40, width: 40, height: 10))),
-            (.point(.init(x: 1, y: 0), label: "a", screen: 3), nil),
-            (.point(.init(x: 1, y: 0), label: "a", screen: 0), nil),
+            (.point(.init(x: 1, y: 0), label: "a", screen: 3, mark: .ring), nil),
+            (.point(.init(x: 1, y: 0), label: "a", screen: 0, mark: .ring), nil),
             (.none, nil),
+            (.point(.init(x1: 1, y1: 0, x2: 2, y2: 1), label: "u", screen: 1, mark: .underline),
+             Callout(point: CGPoint(x: 3, y: 3), label: "u", bounds: CGRect(x: 2, y: 0, width: 4, height: 4), mark: .underline)),
+            (.point(.init(x1: 0, y1: 1, x2: 3, y2: 1), label: "to", screen: 2, mark: .arrow(from: .init(x1: 0, y1: 0, x2: 1, y2: 0), label: "from", screen: 2)),
+             Callout(point: CGPoint(x: 115, y: -35), label: "to", bounds: CGRect(x: 100, y: -40, width: 40, height: 10),
+                     mark: .arrow(from: CGRect(x: 100, y: -30, width: 20, height: 10)))),
+            (.point(.init(x1: 1, y1: 0, x2: 2, y2: 1), label: "to", screen: 1, mark: .arrow(from: .init(x: 0, y: 0), label: "from", screen: 2)),
+             Callout(point: CGPoint(x: 3, y: 3), label: "to", bounds: CGRect(x: 2, y: 0, width: 4, height: 4), mark: .ring)),
+            (.point(.init(x1: 1, y1: 0, x2: 2, y2: 1), label: "to", screen: 1, mark: .arrow(from: .init(x: 0, y: 0), label: "from", screen: 3)),
+             Callout(point: CGPoint(x: 3, y: 3), label: "to", bounds: CGRect(x: 2, y: 0, width: 4, height: 4), mark: .ring)),
+            (.point(.init(x: 1, y: 0), label: "to", screen: 3, mark: .arrow(from: .init(x: 0, y: 0), label: "from", screen: 1)), nil),
         ]
         for (target, expected) in want {
             let got = target.callout(on: shots)
             expect(got == expected, "\(target) calls out \(String(describing: expected)), got \(String(describing: got))")
+        }
+        let arrow = Claude.Target.point(
+            .init(x1: 600, y1: 380, x2: 680, y2: 420), label: "Invoices", screen: 2,
+            mark: .arrow(from: .init(x1: 10, y1: 20, x2: 30, y2: 40), label: "PDF", screen: 1)
+        )
+        expect(
+            Journal.Point(arrow) == Journal.Point(label: "Invoices", screen: 2, x: 640, y: 400),
+            "the journal keeps an arrow's end, got \(String(describing: Journal.Point(arrow)))"
+        )
+    }
+
+    static func checkLogField() {
+        print("target field")
+        let fields: [(Claude.Target, String)] = [
+            (.none, "none"),
+            (.point(.init(x: 12, y: 40), label: "Save", screen: 2, mark: .ring), "screen2:12,40"),
+            (.point(.init(x1: 600, y1: 380, x2: 680, y2: 420), label: "panel", screen: 1, mark: .ring), "screen1:600,380,680,420"),
+            (.point(.init(x1: 600, y1: 380, x2: 680, y2: 420), label: "panel", screen: 1, mark: .underline), "underline:screen1:600,380,680,420"),
+            (.point(.init(x1: 600, y1: 380, x2: 680, y2: 420), label: "Invoices", screen: 2,
+                    mark: .arrow(from: .init(x: 12, y: 40), label: "PDF", screen: 1)), "arrow:screen1:12,40->screen2:600,380,680,420"),
+        ]
+        for (target, field) in fields {
+            expect(target.logField == field, "\(target) logs \(field), got \(target.logField)")
         }
     }
 
@@ -200,17 +234,22 @@ enum ClaudeCheck {
 
     static func checkSaid() {
         print("said")
-        let point = Claude.Target.point(.init(x: 12, y: 40), label: "Save", screen: 1)
-        let panel = Claude.Target.point(.init(x1: 600, y1: 380, x2: 680, y2: 420), label: "panel", screen: 1)
+        let point = Claude.Target.point(.init(x: 12, y: 40), label: "Save", screen: 1, mark: .ring)
+        let panel = Claude.Target.point(.init(x1: 600, y1: 380, x2: 680, y2: 420), label: "panel", screen: 1, mark: .ring)
+        let underlined = Claude.Target.point(.init(x1: 600, y1: 380, x2: 680, y2: 420), label: "panel", screen: 1, mark: .underline)
+        let dragged = Claude.Target.point(
+            .init(x1: 600, y1: 380, x2: 680, y2: 420), label: "Invoices", screen: 2,
+            mark: .arrow(from: .init(x1: 10, y1: 20, x2: 30, y2: 40), label: "PDF", screen: 1)
+        )
         let probes: [(text: String, spoken: String, tag: String?, target: Claude.Target?)] = [
             ("Done. [POINT:none]", "Done.", "[POINT:none]", Claude.Target.none),
             ("Click it. [POINT:600,380,680,420:panel:screen1]", "Click it.", "[POINT:600,380,680,420:panel:screen1]", panel),
             ("Click it. [POINT:1212,72,1260,120:profile picture:screen2]", "Click it.", "[POINT:1212,72,1260,120:profile picture:screen2]",
-             .point(.init(x1: 1212, y1: 72, x2: 1260, y2: 120), label: "profile picture", screen: 2)),
+             .point(.init(x1: 1212, y1: 72, x2: 1260, y2: 120), label: "profile picture", screen: 2, mark: .ring)),
             ("Click it. [POINT:600,380,680,420:panel]", "Click it.", "[POINT:600,380,680,420:panel]", panel),
             ("Click it. [POINT:600 , 380, 680 ,420 :  panel  :screen1]\n", "Click it.", "[POINT:600 , 380, 680 ,420 :  panel  :screen1]", panel),
             ("Click it. [POINT:680,420,600,380:panel:screen1]", "Click it.", "[POINT:680,420,600,380:panel:screen1]", panel),
-            ("Click it. [POINT:640,400,640,400:panel:screen1]", "Click it.", "[POINT:640,400,640,400:panel:screen1]", .point(.init(x: 640, y: 400), label: "panel", screen: 1)),
+            ("Click it. [POINT:640,400,640,400:panel:screen1]", "Click it.", "[POINT:640,400,640,400:panel:screen1]", .point(.init(x: 640, y: 400), label: "panel", screen: 1, mark: .ring)),
             ("Click it. [POINT:600,380,680:panel]", "Click it.", "[POINT:600,380,680:panel]", nil),
             ("Click it. [POINT:600,380,680,420,9:panel]", "Click it.", "[POINT:600,380,680,420,9:panel]", nil),
             ("Click it. [POINT:600,380,-680,420:panel]", "Click it.", "[POINT:600,380,-680,420:panel]", nil),
@@ -219,9 +258,9 @@ enum ClaudeCheck {
             ("Click it. [POINT:600,38", "Click it.", "[POINT:600,38", nil),
             ("Click it. [POINT:600,380,680,42", "Click it.", "[POINT:600,380,680,42", nil),
             ("Click it. [POINT:600,380,680,420:pan", "Click it.", "[POINT:600,380,680,420:pan", nil),
-            ("Click it. [POINT:1012,199:Wi-Fi switch:screen2]", "Click it.", "[POINT:1012,199:Wi-Fi switch:screen2]", .point(.init(x: 1012, y: 199), label: "Wi-Fi switch", screen: 2)),
+            ("Click it. [POINT:1012,199:Wi-Fi switch:screen2]", "Click it.", "[POINT:1012,199:Wi-Fi switch:screen2]", .point(.init(x: 1012, y: 199), label: "Wi-Fi switch", screen: 2, mark: .ring)),
             ("Click it. [POINT:12,40:Save]", "Click it.", "[POINT:12,40:Save]", point),
-            ("  Click it.  \n [POINT:12 , 40 :  Save  :screen2]\n\n", "Click it.", "[POINT:12 , 40 :  Save  :screen2]", .point(.init(x: 12, y: 40), label: "Save", screen: 2)),
+            ("  Click it.  \n [POINT:12 , 40 :  Save  :screen2]\n\n", "Click it.", "[POINT:12 , 40 :  Save  :screen2]", .point(.init(x: 12, y: 40), label: "Save", screen: 2, mark: .ring)),
             ("Click it. [POINT:12,40:Save]  ", "Click it.", "[POINT:12,40:Save]", point),
             ("Click [POINT:1,2:a] it. [POINT:none]", "Click [POINT:1,2:a] it.", "[POINT:none]", Claude.Target.none),
             ("Click [POINT:1,2:a] it.", "Click [POINT:1,2:a] it.", nil, nil),
@@ -237,6 +276,38 @@ enum ClaudeCheck {
             ("Click it. [POINT:12,4", "Click it.", "[POINT:12,4", nil),
             ("See [note]", "See [note]", nil, nil),
             ("Pick [1, 2]", "Pick [1, 2]", nil, nil),
+            ("Read it. [UNDERLINE:600,380,680,420:panel:screen1]", "Read it.", "[UNDERLINE:600,380,680,420:panel:screen1]", underlined),
+            ("Read it. [UNDERLINE:600 ,380,680, 420 : panel ]\n", "Read it.", "[UNDERLINE:600 ,380,680, 420 : panel ]", underlined),
+            ("Read it. [UNDERLINE:640,400:panel:screen1]", "Read it.", "[UNDERLINE:640,400:panel:screen1]",
+             .point(.init(x: 640, y: 400), label: "panel", screen: 1, mark: .underline)),
+            ("Drag it. [ARROW:10,20,30,40:PDF:screen1:600,380,680,420:Invoices:screen2]", "Drag it.",
+             "[ARROW:10,20,30,40:PDF:screen1:600,380,680,420:Invoices:screen2]", dragged),
+            ("Drag it. [ARROW:30,40,10,20 : PDF :600,380,680,420: Invoices :screen2]", "Drag it.",
+             "[ARROW:30,40,10,20 : PDF :600,380,680,420: Invoices :screen2]", dragged),
+            ("Drag it. [ARROW:12,40:a:screen2:600,380:b]", "Drag it.", "[ARROW:12,40:a:screen2:600,380:b]",
+             .point(.init(x: 600, y: 380), label: "b", screen: 1, mark: .arrow(from: .init(x: 12, y: 40), label: "a", screen: 2))),
+            ("Drag it. [ARROW:10,20,30,40:PDF:screen1]", "Drag it.", "[ARROW:10,20,30,40:PDF:screen1]", nil),
+            ("Drag it. [ARROW:10,20,30,40:PDF:screen1:600,380,680,420]", "Drag it.", "[ARROW:10,20,30,40:PDF:screen1:600,380,680,420]", nil),
+            ("Drag it. [ARROW:10,20,30,40:PDF:screen1:600,380,680,420:Invoices:screen2:x]", "Drag it.",
+             "[ARROW:10,20,30,40:PDF:screen1:600,380,680,420:Invoices:screen2:x]", nil),
+            ("Drag it. [ARROW:10,20,30,40:PDF:screen0:600,380,680,420:Invoices]", "Drag it.", "[ARROW:10,20,30,40:PDF:screen0:600,380,680,420:Invoices]", nil),
+            ("Drag it. [ARROW:none]", "Drag it.", "[ARROW:none]", nil),
+            ("Read it. [UNDERLINE:none]", "Read it.", "[UNDERLINE:none]", nil),
+            ("Read it. [UNDERLINE:600,380,680,420]", "Read it.", "[UNDERLINE:600,380,680,420]", nil),
+            ("Read it. [UNDERLINE:600,380,680,420:panel:screen1:10,20:x]", "Read it.", "[UNDERLINE:600,380,680,420:panel:screen1:10,20:x]", nil),
+            ("Click it. [POINT:600,380,680,420:panel:screen1:10,20,30,40:x:screen1]", "Click it.", "[POINT:600,380,680,420:panel:screen1:10,20,30,40:x:screen1]", nil),
+            ("Read it. [underline:600,380,680,420:panel]", "Read it.", "[underline:600,380,680,420:panel]", nil),
+            ("Read it. [U", "Read it.", "[U", nil),
+            ("Read it. [UNDERL", "Read it.", "[UNDERL", nil),
+            ("Read it. [UNDERLINE:600,38", "Read it.", "[UNDERLINE:600,38", nil),
+            ("Drag it. [A", "Drag it.", "[A", nil),
+            ("Drag it. [ARR", "Drag it.", "[ARR", nil),
+            ("Drag it. [ARROW:10,20,30,40:PDF:scr", "Drag it.", "[ARROW:10,20,30,40:PDF:scr", nil),
+            ("Drag it. [ARROW:10,20,30,40:PDF:screen1:600,380", "Drag it.", "[ARROW:10,20,30,40:PDF:screen1:600,380", nil),
+            ("Drag [ARROW:1,2:a:3,4:b] it.", "Drag [ARROW:1,2:a:3,4:b] it.", nil, nil),
+            ("Read [UNDERLINE:1,2:a] it. [POINT:none]", "Read [UNDERLINE:1,2:a] it.", "[POINT:none]", Claude.Target.none),
+            ("Press [Up]", "Press [Up]", nil, nil),
+            ("Press [A]", "Press [A]", nil, nil),
             ("[POINT:none]", "", "[POINT:none]", Claude.Target.none),
             ("", "", nil, nil),
         ]
@@ -253,8 +324,8 @@ enum ClaudeCheck {
         let pointing = Claude.system.matches(of: #/\[POINT:[0-9][^\]]*\]/#).map { Claude.Said(String($0.output)).target }
         expect(
             pointing == [
-                .point(.init(x1: 196, y1: 2, x2: 226, y2: 22), label: "File menu", screen: 1),
-                .point(.init(x1: 1212, y1: 72, x2: 1260, y2: 120), label: "profile picture", screen: 2),
+                .point(.init(x1: 196, y1: 2, x2: 226, y2: 22), label: "File menu", screen: 1, mark: .ring),
+                .point(.init(x1: 1212, y1: 72, x2: 1260, y2: 120), label: "profile picture", screen: 2, mark: .ring),
             ],
             "the prompt's two pointing examples are boxes, got \(pointing)"
         )
@@ -282,7 +353,7 @@ enum ClaudeCheck {
         expect(shown == ["", "Click File", "Click File in the menu bar."], "a tag as it streams in never shows, got \(shown)")
         let tail = stream(start + [delta("Click File"), delta(" in the menu bar. ["), delta("POINT:211,"), delta("12:File menu:sc"), delta("reen1]")] + end)
         expect(
-            tail.map(\.spoken) == .success("Click File in the menu bar.") && tail.map(\.target) == .success(Claude.Target.point(.init(x: 211, y: 12), label: "File menu", screen: 1)),
+            tail.map(\.spoken) == .success("Click File in the menu bar.") && tail.map(\.target) == .success(Claude.Target.point(.init(x: 211, y: 12), label: "File menu", screen: 1, mark: .ring)),
             "a tag split across deltas is stripped and parsed, got \(tail)"
         )
         let boxed = ["Click File", " in the menu bar. [", "POINT:196,", "2,22", "6,22:File menu:sc", "reen1]"].map(delta)
@@ -296,7 +367,7 @@ enum ClaudeCheck {
         let boxTail = stream(start + boxed + end)
         expect(
             boxTail.map(\.spoken) == .success("Click File in the menu bar.")
-                && boxTail.map(\.target) == .success(Claude.Target.point(.init(x1: 196, y1: 2, x2: 226, y2: 22), label: "File menu", screen: 1)),
+                && boxTail.map(\.target) == .success(Claude.Target.point(.init(x1: 196, y1: 2, x2: 226, y2: 22), label: "File menu", screen: 1, mark: .ring)),
             "a box tag split across deltas is stripped and parsed, got \(boxTail)"
         )
         expect(

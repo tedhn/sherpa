@@ -42,10 +42,18 @@ nonisolated struct Flight: Equatable, Sendable {
 }
 
 nonisolated struct Callout: Equatable, Sendable {
+    /// In AppKit global space, like `bounds`. An arrow runs from its `from` to the callout's bounds.
+    enum Mark: Equatable, Sendable {
+        case ring
+        case underline
+        case arrow(from: CGRect)
+    }
+
     let point: CGPoint
     let label: String
     /// The thing's bounds in AppKit global space. Nil when Claude named a single pixel.
     let bounds: CGRect?
+    var mark = Mark.ring
 }
 
 nonisolated struct Bubble: Equatable, Sendable {

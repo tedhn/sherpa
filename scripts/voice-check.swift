@@ -399,28 +399,61 @@ extension Scene {
         canvas.outline(372, 760, 880, 44, NSColor(hex: 0xC7C7CC), radius: 22)
         canvas.text("Message", x: 396, y: 772, size: 17, color: NSColor(hex: 0x9A9AA0))
     }
+
 }
 
 enum Aim {
     static let slack: CGFloat = 10
 
+    enum Kind: String, CaseIterable {
+        case ring, underline, arrow
+    }
+
     case anything
     case nothing
-    case at(screen: Int, CGRect)
+    case at(screen: Int, CGRect, marks: Set<Kind> = [.ring])
+    case arrow(from: CGRect, to: CGRect, screen: Int)
+
+    /// Where the mark should land: the thing itself, or the arrow's head.
+    var end: (screen: Int, box: CGRect)? {
+        switch self {
+        case .anything, .nothing: nil
+        case .at(let screen, let box, _): (screen, box)
+        case .arrow(_, let to, let screen): (screen, to)
+        }
+    }
 
     private static func gap(_ box: CGRect, _ x: Int, _ y: Int) -> (dx: CGFloat, dy: CGFloat) {
         (max(box.minX - CGFloat(x), 0, CGFloat(x) - box.maxX), max(box.minY - CGFloat(y), 0, CGFloat(y) - box.maxY))
     }
 
     func distance(to target: Claude.Target) -> Double? {
-        guard case .at(let screen, let box) = self, case .point(let named, _, let onScreen) = target, onScreen == screen else { return nil }
-        let gap = Aim.gap(box, named.centre.x, named.centre.y)
+        guard let end, case .point(let named, _, let onScreen, _) = target, onScreen == end.screen else { return nil }
+        let gap = Aim.gap(end.box, named.centre.x, named.centre.y)
         return Double(hypot(gap.dx, gap.dy))
     }
 
-    func iou(_ target: Claude.Target) -> Double? {
-        guard case .at(let screen, let box) = self, case .point(let named, _, let onScreen) = target, !named.isPoint, onScreen == screen else { return nil }
-        return Aim.iou(Aim.rect(named), box)
+    /// The IoU of each box Claude drew on the right screen, keyed by the part of the mark it is.
+    func ious(_ target: Claude.Target) -> [String: Double] {
+        guard let end, case .point(let named, _, let onScreen, let mark) = target else { return [:] }
+        var found: [String: Double] = [:]
+        if onScreen == end.screen, !named.isPoint { found[mark.kind == .arrow ? "arrow end" : mark.kind.rawValue] = Aim.iou(Aim.rect(named), end.box) }
+        if case .arrow(let from, _, let screen) = self, case .arrow(let start, _, let startScreen) = mark, startScreen == screen, !start.isPoint {
+            found["arrow start"] = Aim.iou(Aim.rect(start), from)
+        }
+        return found
+    }
+
+    func wrongMark(_ target: Claude.Target) -> String? {
+        guard case .point(_, _, _, let mark) = target else { return nil }
+        let wanted: Set<Kind>
+        switch self {
+        case .anything, .nothing: return nil
+        case .at(_, _, let marks): wanted = marks
+        case .arrow: wanted = [.arrow]
+        }
+        guard !wanted.contains(mark.kind) else { return nil }
+        return "\(mark.kind.rawValue) but expected \(Kind.allCases.filter(wanted.contains).map(\.rawValue).joined(separator: " or "))"
     }
 
     static func iou(_ a: CGRect, _ b: CGRect) -> Double {
@@ -438,17 +471,36 @@ enum Aim {
         box.isPoint ? "\(box.x1),\(box.y1)" : "box \(box.x1),\(box.y1),\(box.x2),\(box.y2) centred on \(box.centre.x),\(box.centre.y)"
     }
 
+    private static func miss(_ named: Screenshot.Box, on onScreen: Int, from box: CGRect, on screen: Int) -> String? {
+        guard onScreen == screen else { return "screen\(onScreen) but expected screen\(screen)" }
+        let gap = Aim.gap(box, named.centre.x, named.centre.y)
+        guard gap.dx > Aim.slack || gap.dy > Aim.slack else { return nil }
+        return "screen\(screen) \(Aim.spot(named)) is \(Int(hypot(gap.dx, gap.dy).rounded())) px from the box"
+    }
+
+    /// Where the mark landed. The `mark` rule judges its kind, so a ring at an arrow's head passes here.
     func offense(_ target: Claude.Target) -> String? {
         switch (self, target) {
         case (.anything, _): return nil
         case (.nothing, .none): return nil
-        case (.nothing, .point(let named, _, let screen)): return "pointed at screen\(screen) \(Aim.spot(named)) but expected none"
-        case (.at(let screen, _), .none): return "none but expected a point on screen\(screen)"
-        case (.at(let screen, let box), .point(let named, _, let onScreen)):
-            guard onScreen == screen else { return "screen\(onScreen) but expected screen\(screen)" }
-            let gap = Aim.gap(box, named.centre.x, named.centre.y)
-            guard gap.dx > Aim.slack || gap.dy > Aim.slack else { return nil }
-            return "screen\(screen) \(Aim.spot(named)) is \(Int(hypot(gap.dx, gap.dy).rounded())) px from the box"
+        case (.nothing, .point(let named, _, let screen, _)): return "pointed at screen\(screen) \(Aim.spot(named)) but expected none"
+        case (.at(let screen, _, _), .none), (.arrow(_, _, let screen), .none): return "none but expected a point on screen\(screen)"
+        case (.at(let screen, let box, _), .point(let named, _, let onScreen, _)):
+            return Aim.miss(named, on: onScreen, from: box, on: screen)
+        case (.arrow(let from, let to, let screen), .point(let named, _, let onScreen, let mark)):
+            if let miss = Aim.miss(named, on: onScreen, from: to, on: screen) { return "end " + miss }
+            guard case .arrow(let start, _, let startScreen) = mark else { return nil }
+            return Aim.miss(start, on: startScreen, from: from, on: screen).map { "start " + $0 }
+        }
+    }
+}
+
+extension Claude.Target.Mark {
+    var kind: Aim.Kind {
+        switch self {
+        case .ring: .ring
+        case .underline: .underline
+        case .arrow: .arrow
         }
     }
 }
@@ -535,6 +587,9 @@ struct Rule {
         },
         Rule(name: "aim") { reply in
             reply.said.target.flatMap { reply.turn.aim.offense($0) }
+        },
+        Rule(name: "mark") { reply in
+            reply.said.target.flatMap { reply.turn.aim.wrongMark($0) }
         },
     ]
 
@@ -680,7 +735,8 @@ struct Tally {
     var aimed = 0
     var inside = 0
     var misses: [Double] = []
-    var ious: [Double] = []
+    var ious: [String: [Double]] = [:]
+    var cases: [(name: String, passed: Int, runs: Int)] = []
 }
 
 @main
@@ -716,12 +772,12 @@ enum VoiceCheck {
         }
     }
 
-    static func marked(_ scene: Scene, box: CGRect?, target: Claude.Target) -> Data {
+    static func marked(_ scene: Scene, expected: [CGRect], target: Claude.Target) -> Data {
         scene.png { canvas in
-            if let box {
+            for box in expected {
                 canvas.outline(box.minX, box.minY, box.width, box.height, NSColor(hex: 0x00B050), thickness: 3)
             }
-            guard case .point(let named, _, _) = target else { return }
+            guard case .point(let named, _, let screen, let mark) = target else { return }
             let red = NSColor(hex: 0xFF0000)
             if !named.isPoint {
                 let drawn = Aim.rect(named)
@@ -731,15 +787,27 @@ enum VoiceCheck {
             canvas.line(from: CGPoint(x: center.x - 16, y: center.y), to: CGPoint(x: center.x + 16, y: center.y), red, thickness: 2)
             canvas.line(from: CGPoint(x: center.x, y: center.y - 16), to: CGPoint(x: center.x, y: center.y + 16), red, thickness: 2)
             canvas.outline(center.x - 9, center.y - 9, 18, 18, red, radius: 9, thickness: 2)
+            switch mark {
+            case .underline:
+                canvas.line(from: CGPoint(x: named.x1, y: named.y2 + 4), to: CGPoint(x: named.x2, y: named.y2 + 4), red, thickness: 4)
+            case .arrow(let from, _, let start) where start == screen:
+                let drawn = Aim.rect(from)
+                canvas.outline(drawn.minX, drawn.minY, drawn.width, drawn.height, red, thickness: 2)
+                canvas.line(from: CGPoint(x: from.centre.x, y: from.centre.y), to: center, red, thickness: 2)
+            case .ring, .arrow: break
+            }
         }
     }
 
     static func writePoint(_ target: Claude.Target, for turn: Turn, to path: String) {
-        guard case .point(_, _, let screen) = target, turn.scenes.indices.contains(screen - 1) else { return }
-        var box: CGRect?
-        if case .at(screen, let expected) = turn.aim { box = expected }
+        guard case .point(_, _, let screen, _) = target, turn.scenes.indices.contains(screen - 1) else { return }
+        let expected: [CGRect] = switch turn.aim {
+        case .at(screen, let box, _): [box]
+        case .arrow(let from, let to, screen): [from, to]
+        default: []
+        }
         do {
-            try marked(turn.scenes[screen - 1], box: box, target: target).write(to: URL(fileURLWithPath: path))
+            try marked(turn.scenes[screen - 1], expected: expected, target: target).write(to: URL(fileURLWithPath: path))
         } catch {
             print("FAIL writing \(path): \(error.localizedDescription)")
         }
@@ -755,7 +823,9 @@ enum VoiceCheck {
         }
         var utterance = 0
         for current in cases {
+            var passed = 0
             for run in 1...runs {
+                var clean = true
                 let conversation = Conversation(endpoint: Claude.Endpoint(url: Claude.Endpoint.production, key: key), urlSession: .shared)
                 for (index, turn) in current.turns.enumerated() {
                     utterance += 1
@@ -790,7 +860,12 @@ enum VoiceCheck {
                         switch target {
                         case nil: print("  T: missing" + (said.tag.map { " (tag \($0.debugDescription))" } ?? ""))
                         case .some(.none): print("  T: none")
-                        case .some(.point(let named, let label, let screen)): print("  T: screen\(screen) \(Aim.spot(named)) \"\(label)\"")
+                        case .some(.point(let named, let label, let screen, let mark)):
+                            let start = switch mark {
+                            case .arrow(let from, let fromLabel, let startScreen): " from screen\(startScreen) \(Aim.spot(from)) \"\(fromLabel)\""
+                            case .ring, .underline: ""
+                            }
+                            print("  T: \(mark.kind.rawValue) screen\(screen) \(Aim.spot(named)) \"\(label)\"\(start)")
                         }
                     }
                     print("  \(words) words, first text \(first) ms, total \(total) ms")
@@ -801,10 +876,12 @@ enum VoiceCheck {
                     }
                     tally.answers += 1
                     if !findings.isEmpty { tally.failed += 1 }
+                    if !findings.isEmpty { clean = false }
                     for finding in findings { tally.byRule[finding.rule, default: 0] += 1 }
-                    if reply != nil, case .at = turn.aim {
+                    let ious = target.map(turn.aim.ious) ?? [:]
+                    if reply != nil, turn.aim.end != nil {
                         tally.aimed += 1
-                        if let target, let overlap = turn.aim.iou(target) { tally.ious.append(overlap) }
+                        for (part, overlap) in ious { tally.ious[part, default: []].append(overlap) }
                         if !findings.contains(where: { $0.rule == "tag" || $0.rule == "aim" }) {
                             tally.inside += 1
                         } else if let target, let miss = turn.aim.distance(to: target) {
@@ -819,15 +896,24 @@ enum VoiceCheck {
                         "words": words, "firstMs": first, "totalMs": total, "target": targetRecord(target),
                         "failures": findings.map { "\($0.rule): \($0.snippet)" },
                     ]
-                    if case .at(let screen, let box) = turn.aim {
-                        record["expected"] = ["screen": screen, "x1": Int(box.minX), "y1": Int(box.minY), "x2": Int(box.maxX), "y2": Int(box.maxY)]
-                        if let target, let overlap = turn.aim.iou(target) { record["iou"] = overlap }
+                    if let end = turn.aim.end {
+                        var expected = boxRecord(end.box, screen: end.screen)
+                        switch turn.aim {
+                        case .at(_, _, let marks): expected["marks"] = Aim.Kind.allCases.filter(marks.contains).map(\.rawValue)
+                        case .arrow(let from, _, let screen): (expected["marks"], expected["from"]) = (["arrow"], boxRecord(from, screen: screen))
+                        case .anything, .nothing: break
+                        }
+                        record["expected"] = expected
+                        record["ious"] = ious
+                        if let overlap = ious["ring"] ?? ious["underline"] ?? ious["arrow end"] { record["iou"] = overlap }
                     }
                     if let line = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .withoutEscapingSlashes]) {
                         out?.write(line + Data("\n".utf8))
                     }
                 }
+                if clean { passed += 1 }
             }
+            tally.cases.append((current.name, passed, runs))
         }
         try? out?.close()
         return tally
@@ -835,11 +921,24 @@ enum VoiceCheck {
 
     static func targetRecord(_ target: Claude.Target?) -> Any {
         switch target {
-        case nil: NSNull()
-        case .some(.none): "none"
-        case .some(.point(let named, let label, let screen)) where named.isPoint: ["screen": screen, "x": named.x1, "y": named.y1, "label": label]
-        case .some(.point(let named, let label, let screen)): ["screen": screen, "x1": named.x1, "y1": named.y1, "x2": named.x2, "y2": named.y2, "label": label]
+        case nil: return NSNull()
+        case .some(.none): return "none"
+        case .some(.point(let named, let label, let screen, let mark)):
+            var record = spotRecord(named, label: label, screen: screen)
+            record["mark"] = mark.kind.rawValue
+            if case .arrow(let from, let fromLabel, let start) = mark { record["from"] = spotRecord(from, label: fromLabel, screen: start) }
+            return record
         }
+    }
+
+    static func spotRecord(_ box: Screenshot.Box, label: String, screen: Int) -> [String: Any] {
+        box.isPoint
+            ? ["screen": screen, "x": box.x1, "y": box.y1, "label": label]
+            : ["screen": screen, "x1": box.x1, "y1": box.y1, "x2": box.x2, "y2": box.y2, "label": label]
+    }
+
+    static func boxRecord(_ box: CGRect, screen: Int) -> [String: Any] {
+        ["screen": screen, "x1": Int(box.minX), "y1": Int(box.minY), "x2": Int(box.maxX), "y2": Int(box.maxY)]
     }
 
     static func printSummary(_ tally: Tally) {
@@ -848,8 +947,15 @@ enum VoiceCheck {
             print("  \(name.padding(toLength: 15, withPad: " ", startingAt: 0)) \(tally.byRule[name, default: 0])")
         }
         print("  pointing        \(tally.inside) of \(tally.aimed) inside the box, median miss \(median(tally.misses).map { "\(Int($0.rounded())) px" } ?? "none")")
-        print("  boxes           \(tally.ious.count) of \(tally.aimed) boxed on the right screen, median IoU \(median(tally.ious).map { String(format: "%.2f", $0) } ?? "none")")
+        for part in ["ring", "underline", "arrow start", "arrow end"] {
+            let ious = tally.ious[part, default: []]
+            print("  \("\(part) IoU".padding(toLength: 15, withPad: " ", startingAt: 0)) \(ious.count) boxes on the right screen, median \(median(ious).map { String(format: "%.2f", $0) } ?? "none")")
+        }
         print("  failing answers \(tally.failed) of \(tally.answers)")
+        print("cases")
+        for row in tally.cases {
+            print("  \(row.name.padding(toLength: 15, withPad: " ", startingAt: 0)) \(row.passed) of \(row.runs) runs passed")
+        }
     }
 
     static func median(_ values: [Double]) -> Double? {
@@ -868,6 +974,10 @@ enum VoiceCheck {
         let switchAim = Aim.at(screen: 1, CGRect(x: 990, y: 184, width: 52, height: 30))
         let aimTurn = Turn(question: "", scenes: [], aim: switchAim)
         let nothingTurn = Turn(question: "", scenes: [], aim: .nothing)
+        let underlineTurn = Turn(question: "", scenes: [], aim: .at(screen: 1, CGRect(x: 400, y: 300, width: 120, height: 28), marks: [.underline]))
+        let eitherTurn = Turn(question: "", scenes: [], aim: .at(screen: 1, CGRect(x: 400, y: 300, width: 120, height: 28), marks: [.ring, .underline]))
+        let arrowAim = Aim.arrow(from: CGRect(x: 100, y: 100, width: 100, height: 100), to: CGRect(x: 600, y: 400, width: 100, height: 100), screen: 1)
+        let arrowTurn = Turn(question: "", scenes: [], aim: arrowAim)
         let probes = [
             Probe(text: "Press Cmd+Shift+4.", failing: ["abbreviation"]),
             Probe(text: "Press Command Shift 4.", failing: []),
@@ -931,9 +1041,27 @@ enum VoiceCheck {
             Probe(text: "Flip it. [POINT:12,40]", tagged: false, failing: ["tag"], detail: "[POINT:12,40]"),
             Probe(text: "Use `reversed()` [POINT:none]", tagged: false, failing: ["markdown", "code"]),
             Probe(text: "Click [POINT:1,2:a](b) here.", tagged: false, failing: ["markdown", "tag"], detail: "Click [POINT:1,2:a](b) here."),
+            Probe(text: "Fix it. [UNDERLINE:400,300,520,328:word:screen1]", turn: underlineTurn, tagged: false, failing: []),
+            Probe(text: "Fix it. [POINT:400,300,520,328:word:screen1]", turn: underlineTurn, tagged: false, failing: ["mark"], detail: "ring but expected underline"),
+            Probe(text: "Fix it. [UNDERLINE:700,300,820,328:word:screen1]", turn: underlineTurn, tagged: false, failing: ["aim"],
+                  detail: "screen1 box 700,300,820,328 centred on 760,314 is 240 px from the box"),
+            Probe(text: "Fix it. [POINT:400,300,520,328:word:screen1]", turn: eitherTurn, tagged: false, failing: []),
+            Probe(text: "Fix it. [UNDERLINE:400,300,520,328:word:screen1]", turn: eitherTurn, tagged: false, failing: []),
+            Probe(text: "Fix it. [ARROW:1,2:a:400,300,520,328:word:screen1]", turn: eitherTurn, tagged: false, failing: ["mark"], detail: "arrow but expected ring or underline"),
+            Probe(text: "Fix it. [UNDERLINE:1,2,3,4:x:screen1]", turn: nothingTurn, tagged: false, failing: ["aim"],
+                  detail: "pointed at screen1 box 1,2,3,4 centred on 2,3 but expected none"),
+            Probe(text: "Drag it. [ARROW:110,110,190,190:file:screen1:610,410,690,490:folder:screen1]", turn: arrowTurn, tagged: false, failing: []),
+            Probe(text: "Drag it. [POINT:610,410,690,490:folder:screen1]", turn: arrowTurn, tagged: false, failing: ["mark"], detail: "ring but expected arrow"),
+            Probe(text: "Drag it. [ARROW:610,410,690,490:folder:screen1:110,110,190,190:file:screen1]", turn: arrowTurn, tagged: false, failing: ["aim"],
+                  detail: "end screen1 box 110,110,190,190 centred on 150,150 is 515 px from the box"),
+            Probe(text: "Drag it. [ARROW:300,300,340,340:file:screen1:610,410,690,490:folder:screen1]", turn: arrowTurn, tagged: false, failing: ["aim"],
+                  detail: "start screen1 box 300,300,340,340 centred on 320,320 is 170 px from the box"),
+            Probe(text: "Drag it. [ARROW:110,110,190,190:file:screen2:610,410,690,490:folder:screen1]", turn: arrowTurn, tagged: false, failing: ["aim"],
+                  detail: "start screen2 but expected screen1"),
+            Probe(text: "Drag it. [POINT:none]", turn: arrowTurn, tagged: false, failing: ["aim"], detail: "none but expected a point on screen1"),
         ]
         var mismatches = 0
-        let png = marked(.wifiSettings, box: CGRect(x: 990, y: 184, width: 52, height: 30), target: .point(.init(x: 700, y: 600), label: "x", screen: 1))
+        let png = marked(.wifiSettings, expected: [CGRect(x: 990, y: 184, width: 52, height: 30)], target: .point(.init(x: 700, y: 600), label: "x", screen: 1, mark: .ring))
         let pixel = { (x: Int, y: Int) in NSBitmapImageRep(data: png)?.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) }
         let red = pixel(712, 600), box = pixel(1000, 184), bare = pixel(720, 650)
         let drawn = (red?.redComponent ?? 0) > 0.9 && (red?.greenComponent ?? 1) < 0.2
@@ -954,7 +1082,7 @@ enum VoiceCheck {
         let labelled = labels[0].contains(marks) && !labels[1].contains(marks)
         print("  \(labelled ? "ok  " : "FAIL") an inked scene's label says the user drew the red marks, a plain scene's does not")
         if !labelled { mismatches += 1 }
-        let boxPng = marked(.wifiSettings, box: nil, target: .point(.init(x1: 600, y1: 500, x2: 800, y2: 700), label: "x", screen: 1))
+        let boxPng = marked(.wifiSettings, expected: [], target: .point(.init(x1: 600, y1: 500, x2: 800, y2: 700), label: "x", screen: 1, mark: .ring))
         let boxPixel = { (x: Int, y: Int) in NSBitmapImageRep(data: boxPng)?.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) }
         let boxEdge = boxPixel(600, 600), boxCross = boxPixel(712, 600), boxInside = boxPixel(650, 650)
         let outlined = [boxEdge, boxCross].allSatisfy { ($0?.redComponent ?? 0) > 0.9 && ($0?.greenComponent ?? 1) < 0.2 }
@@ -962,16 +1090,35 @@ enum VoiceCheck {
         print("  \(outlined ? "ok  " : "FAIL") a boxed target draws a red outline at 600,500 to 800,700 and a crosshair on its centre 700,600")
         if !outlined { mismatches += 1 }
         let boxSaid = Claude.Said("Flip the switch. [POINT:990,184,1042,214:Wi-Fi switch:screen1]")
-        let boxTarget = Claude.Target.point(.init(x1: 990, y1: 184, x2: 1042, y2: 214), label: "Wi-Fi switch", screen: 1)
+        let boxTarget = Claude.Target.point(.init(x1: 990, y1: 184, x2: 1042, y2: 214), label: "Wi-Fi switch", screen: 1, mark: .ring)
         let boxOK = boxSaid.spoken == "Flip the switch." && boxSaid.target == boxTarget
         print("  \(boxOK ? "ok  " : "FAIL") Said strips a box tag and parses its box")
         if !boxOK { mismatches += 1 }
         let halves = Aim.iou(CGRect(x: 0, y: 0, width: 10, height: 10), CGRect(x: 5, y: 0, width: 10, height: 10))
-        let exact = switchAim.iou(boxTarget)
-        let elsewhere = Aim.at(screen: 2, CGRect(x: 990, y: 184, width: 52, height: 30)).iou(boxTarget)
-        let iouOK = abs(halves - 1.0 / 3.0) < 1e-9 && exact == 1 && elsewhere == nil && switchAim.iou(.point(.init(x: 1016, y: 199), label: "x", screen: 1)) == nil
+        let exact = switchAim.ious(boxTarget)
+        let elsewhere = Aim.at(screen: 2, CGRect(x: 990, y: 184, width: 52, height: 30)).ious(boxTarget)
+        let iouOK = abs(halves - 1.0 / 3.0) < 1e-9 && exact == ["ring": 1] && elsewhere.isEmpty
+            && switchAim.ious(.point(.init(x: 1016, y: 199), label: "x", screen: 1, mark: .ring)).isEmpty
         print("  \(iouOK ? "ok  " : "FAIL") IoU is 1/3 for half-overlapping squares, 1 for the switch's own box, none on another screen or for a point")
         if !iouOK { mismatches += 1 }
+        let arrowIous = Claude.Said("Drag it. [ARROW:100,100,200,200:file:screen1:600,400,700,450:folder:screen1]").target.map(arrowAim.ious)
+        let ringIous = Claude.Said("Drag it. [POINT:600,400,700,500:folder:screen1]").target.map(arrowAim.ious)
+        let partsOK = arrowIous == ["arrow start": 1, "arrow end": 0.5] && ringIous == ["ring": 1]
+        print("  \(partsOK ? "ok  " : "FAIL") an arrow scores its start and end apart, a ring at the arrow's end scores as a ring, got \(String(describing: arrowIous)), \(String(describing: ringIous))")
+        if !partsOK { mismatches += 1 }
+        let isRedAt = { (png: Data, x: Int, y: Int) in
+            let colour = NSBitmapImageRep(data: png)?.colorAt(x: x, y: y)?.usingColorSpace(.sRGB)
+            return (colour?.redComponent ?? 0) > 0.9 && (colour?.greenComponent ?? 1) < 0.2
+        }
+        let wordBox = Screenshot.Box(x1: 300, y1: 500, x2: 500, y2: 530)
+        let underlinePng = marked(.wifiSettings, expected: [], target: .point(wordBox, label: "x", screen: 1, mark: .underline))
+        let ringPng = marked(.wifiSettings, expected: [], target: .point(wordBox, label: "x", screen: 1, mark: .ring))
+        let arrowPng = marked(.wifiSettings, expected: [], target: .point(
+            .init(x1: 600, y1: 280, x2: 700, y2: 320), label: "x", screen: 1, mark: .arrow(from: .init(x1: 100, y1: 280, x2: 200, y2: 320), label: "y", screen: 1)
+        ))
+        let strokes = isRedAt(underlinePng, 400, 534) && !isRedAt(ringPng, 400, 534) && isRedAt(arrowPng, 400, 300) && isRedAt(arrowPng, 100, 300)
+        print("  \(strokes ? "ok  " : "FAIL") an underline draws a red line under its box and a ring does not; an arrow outlines its start and joins the two centres")
+        if !strokes { mismatches += 1 }
         for probe in probes {
             let findings = Rule.findings(in: Answered(said: Claude.Said(probe.tagged ? probe.text + " [POINT:none]" : probe.text), turn: probe.turn))
             let got = findings.map(\.rule)
