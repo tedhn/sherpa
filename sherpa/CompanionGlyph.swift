@@ -142,25 +142,29 @@ struct CompanionRing: View {
     let around: CGRect
     let drawn: Double
 
-    static let gap: CGFloat = 6
-    static let lineWidth: CGFloat = 2.5
-
     var body: some View {
-        RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .trim(from: 0, to: drawn)
-            .stroke(CompanionGlyph.tint, lineWidth: Self.lineWidth)
-            .frame(width: around.width + 2 * Self.gap, height: around.height + 2 * Self.gap)
-            .position(x: around.midX, y: around.midY)
+        HandRing(loop: HandLoop(around: around), drawn: drawn)
+            .fill(CompanionGlyph.tint)
+    }
+}
+
+private struct HandRing: Shape {
+    let loop: HandLoop
+    var drawn: Double
+
+    var animatableData: Double {
+        get { drawn }
+        set { drawn = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        Path(loop.path(drawnTo: drawn))
     }
 }
 
 struct DrawingRing: View {
-    /// Not 0: SwiftUI can draw an empty trim as the last non-empty trim of the same shape (ImageRenderer
-    /// does), which would flash a whole ring before this one draws on.
-    static let undrawn = 0.001
-
     let around: CGRect
-    @State private var drawn = DrawingRing.undrawn
+    @State private var drawn = 0.0
 
     static let fade = AnyTransition.asymmetric(
         insertion: .identity,
@@ -169,7 +173,9 @@ struct DrawingRing: View {
 
     var body: some View {
         CompanionRing(around: around, drawn: drawn)
-            .onAppear { withAnimation(.easeOut(duration: 0.3)) { drawn = 1 } }
+            .onAppear {
+                withAnimation(.timingCurve(0.35, 0.05, 0.25, 1, duration: HandLoop(around: around).duration)) { drawn = 1 }
+            }
     }
 }
 
