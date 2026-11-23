@@ -23,6 +23,7 @@ struct CompanionView: View {
             if let mark = companion.mark {
                 DrawingMark(shape: shape(of: mark))
                     .transition(DrawingMark.fade)
+                    .id(companion.bubble?.appeared)
             }
         }
         .overlay {
