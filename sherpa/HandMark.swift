@@ -4,6 +4,8 @@ import Foundation
 nonisolated struct HandMark: Equatable, Sendable {
     enum Shape: Equatable, Sendable {
         case ring(CGRect)
+        case underline(CGRect)
+        case arrow(from: CGRect, to: CGRect)
     }
 
     struct Nib: Equatable, Sendable {
@@ -34,6 +36,13 @@ nonisolated struct HandMark: Equatable, Sendable {
         case .ring(let box):
             drawn = [Self.ring(around: box)]
             duration = min(0.38 + 0.14 * log2(max((box.width + box.height) / 60, 1)), 0.75)
+        case .underline(let box):
+            drawn = [Self.underline(under: box)]
+            duration = 0.3 + 0.2 * min(box.width / 400, 1)
+        case .arrow(let from, let to):
+            drawn = Self.arrow(from: from, to: to)
+            let length = Self.length(of: drawn[0].map(\.point))
+            duration = 0.45 + 0.3 * min(length / 500, 1)
         }
         let lengths = drawn.map { Self.length(of: $0.map(\.point)) }
         let pauses = Self.pause * Double(drawn.count - 1)
@@ -90,6 +99,80 @@ nonisolated struct HandMark: Equatable, Sendable {
             let flutter = 1 + 0.12 * sin(2 * .pi * 1.3 * t + widthPhase)
             return (points[i], baseWidth * taperIn * taperOut * flutter)
         }
+    }
+
+    private static func underline(under box: CGRect) -> Stroke {
+        var rng = SplitMix64(seeded: [box.minX, box.minY, box.width, box.height])
+        let y = box.maxY + 5.5 + rng.range(-0.5, 0.5)
+        let start = CGPoint(x: box.minX - rng.range(2, 6), y: y + rng.range(-0.3, 0.8))
+        let end = CGPoint(x: box.maxX + rng.range(3, 9), y: y - rng.range(1, 3))
+        let sag = rng.range(0.8, 2.0), phase = rng.range(0, 2 * .pi)
+        let count = max(Int(hypot(end.x - start.x, end.y - start.y) / 2), 40)
+        return (0...count).map { i in
+            let t = Double(i) / Double(count)
+            let point = CGPoint(x: start.x + (end.x - start.x) * t,
+                                y: start.y + (end.y - start.y) * t + sag * sin(.pi * t) + 0.4 * sin(2 * .pi * 2.3 * t + phase))
+            return (point, 3.2 * (0.45 + 0.55 * smoothstep(0, 0.06, t)) * (1 - 0.7 * smoothstep(0.8, 1, t)))
+        }
+    }
+
+    private static func arrow(from source: CGRect, to target: CGRect) -> [Stroke] {
+        var rng = SplitMix64(seeded: [source.minX, source.minY, source.width, source.height, target.minX, target.minY, target.width, target.height])
+        let (a, b) = nearestPoints(source, target)
+        let gap = hypot(b.x - a.x, b.y - a.y)
+        let start: CGPoint, tip: CGPoint
+        if gap >= 2 * arrowPush + shortestShaft {
+            let dx = (b.x - a.x) / gap, dy = (b.y - a.y) / gap
+            start = CGPoint(x: a.x + dx * arrowPush, y: a.y + dy * arrowPush)
+            tip = CGPoint(x: b.x - dx * arrowPush, y: b.y - dy * arrowPush)
+        } else {
+            // Boxes that overlap or nearly touch leave no room between them, so the arrow comes in from the far side of the target along the line between centres.
+            let cx = target.midX - source.midX, cy = target.midY - source.midY
+            let norm = hypot(cx, cy)
+            let (dx, dy) = norm > 1e-3 ? (cx / norm, cy / norm) : (1, 0)
+            let reach = min(abs(dx) > 1e-6 ? target.width / 2 / abs(dx) : .infinity, abs(dy) > 1e-6 ? target.height / 2 / abs(dy) : .infinity) + arrowPush
+            tip = CGPoint(x: target.midX + dx * reach, y: target.midY + dy * reach)
+            start = CGPoint(x: tip.x + dx * farShaft, y: tip.y + dy * farShaft)
+        }
+        let length = hypot(tip.x - start.x, tip.y - start.y)
+        let bend = rng.range(0.08, 0.16) * (rng.range(0, 1) < 0.5 ? -1 : 1) * length
+        let mid = CGPoint(x: (start.x + tip.x) / 2 - (tip.y - start.y) / length * bend, y: (start.y + tip.y) / 2 + (tip.x - start.x) / length * bend)
+        let count = max(Int(length / 2), 40)
+        let shaft = (0...count).map { i -> CGPoint in
+            let t = Double(i) / Double(count), u = 1 - t
+            return CGPoint(x: u * u * start.x + 2 * u * t * mid.x + t * t * tip.x, y: u * u * start.y + 2 * u * t * mid.y + t * t * tip.y)
+        }
+        let heading = atan2(tip.y - shaft[count - 3].y, tip.x - shaft[count - 3].x)
+        let barb = min(15, 0.28 * length), spread = rng.range(24, 32) * .pi / 180, skew = rng.range(-4, 4) * .pi / 180
+        let left = CGPoint(x: tip.x - barb * cos(heading - spread + skew), y: tip.y - barb * sin(heading - spread + skew))
+        let right = CGPoint(x: tip.x - barb * 0.9 * cos(heading + spread + skew), y: tip.y - barb * 0.9 * sin(heading + spread + skew))
+        let headCount = 20
+        let head = (0...headCount).map { i -> CGPoint in
+            let t = Double(i) / Double(headCount)
+            let (from, to, along) = t < 0.5 ? (left, tip, t * 2) : (tip, right, (t - 0.5) * 2)
+            return CGPoint(x: from.x + (to.x - from.x) * along, y: from.y + (to.y - from.y) * along)
+        }
+        return [
+            shaft.indices.map { i in
+                let t = Double(i) / Double(count)
+                return (shaft[i], 3.2 * (0.4 + 0.6 * smoothstep(0, 0.1, t)) * (1 - 0.25 * smoothstep(0.85, 1, t)))
+            },
+            head.indices.map { i in
+                let t = Double(i) / Double(headCount)
+                return (head[i], 3.0 * (0.5 + 0.5 * smoothstep(0, 0.2, t)) * (1 - 0.6 * smoothstep(0.75, 1, t)))
+            },
+        ]
+    }
+
+    private static func nearestPoints(_ a: CGRect, _ b: CGRect) -> (CGPoint, CGPoint) {
+        func facing(_ aLow: Double, _ aHigh: Double, _ bLow: Double, _ bHigh: Double) -> (Double, Double) {
+            if aHigh < bLow { return (aHigh, bLow) }
+            if bHigh < aLow { return (aLow, bHigh) }
+            let middle = (max(aLow, bLow) + min(aHigh, bHigh)) / 2
+            return (middle, middle)
+        }
+        let x = facing(a.minX, a.maxX, b.minX, b.maxX), y = facing(a.minY, a.maxY, b.minY, b.maxY)
+        return (CGPoint(x: x.0, y: y.0), CGPoint(x: x.1, y: y.1))
     }
 
     private static func length(of points: [CGPoint]) -> Double {

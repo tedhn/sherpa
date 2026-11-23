@@ -261,6 +261,7 @@ enum CompanionCheck {
                 checkLooksRender()
                 checkBubbleRender()
                 checkRingRender()
+                checkMarkRender()
                 checkInkRender()
             }
             exit(failures == 0 ? 0 : 1)
@@ -1105,6 +1106,78 @@ enum CompanionCheck {
                    && near(glyph, Companion.local(spot, in: overlay), within: 1),
                "at the stream's scale the ring, the glyph beside its corner and the bubble read as separate blobs",
                "\(sampled.blobs.map { "\($0.box) x\($0.count)" }), glyph \(describe(glyph))")
+    }
+
+    /// Points (in pt) whose alpha is at least half, from a scale-2 render.
+    @MainActor
+    static func ink(of shape: HandMark.Shape, drawn: Double, size: CGSize) -> [CGPoint] {
+        guard let pixels = rendered(CompanionMark(shape: shape, drawn: drawn).frame(width: size.width, height: size.height), scale: 2)?.pixels else { return [] }
+        return pixels.rgba.indices.filter { $0 % 4 == 3 && pixels.rgba[$0] >= 128 }.map { i in
+            CGPoint(x: Double((i / 4) % pixels.width) / 2, y: Double((i / 4) / pixels.width) / 2)
+        }
+    }
+
+    static func gap(from point: CGPoint, to box: CGRect) -> Double {
+        hypot(max(box.minX - point.x, 0, point.x - box.maxX), max(box.minY - point.y, 0, point.y - box.maxY))
+    }
+
+    @MainActor
+    static func checkMarkRender() {
+        func bounds(_ points: [CGPoint]) -> CGRect {
+            guard let first = points.first else { return .null }
+            return points.reduce(CGRect(origin: first, size: .zero)) { $0.union(CGRect(origin: $1, size: .zero)) }
+        }
+        for width in [30.0, 120.0, 260.0] {
+            let box = CGRect(x: 40, y: 30, width: width, height: 16)
+            let shape = HandMark.Shape.underline(box)
+            let size = CGSize(width: width + 100, height: 90)
+            let full = ink(of: shape, drawn: 1, size: size)
+            let all = bounds(full)
+            expect(!full.isEmpty && all.minY >= box.maxY + 1 && all.minY <= box.maxY + 10 && all.maxY <= box.maxY + 12,
+                   "the underline of 40,30 \(Int(width))x16 starts 1 to 10 pt under the box's bottom edge and stays within 12 pt", "\(all)")
+            expect(all.minX <= box.minX && all.maxX >= box.maxX && all.minX >= box.minX - 9 && all.maxX <= box.maxX + 12,
+                   "and spans the box's width, running up to 9 pt past the left and 12 past the right", "\(all)")
+            expect(!full.contains { box.contains($0) }, "and has no ink inside the box")
+            let half = bounds(ink(of: shape, drawn: 0.5, size: size))
+            expect(half.minX <= box.minX && half.maxX >= box.minX + width * 0.2 && half.maxX <= box.maxX - width * 0.15,
+                   "drawn to 0.5 it covers the left part of the box and stops short of its right end", "\(half) of \(all)")
+            let start = bounds(ink(of: shape, drawn: 0, size: size))
+            expect(!start.isNull && start.width <= 6 && start.height <= 6, "a new underline starts as a dot at most 6 pt across", "\(start)")
+            expect(ink(of: shape, drawn: 1, size: size) == full, "rendering the same underline twice gives identical pixels")
+        }
+
+        let target = CGRect(x: 200, y: 90, width: 60, height: 30)
+        let source = CGRect(x: 30, y: 40, width: 40, height: 30)
+        let arrows: [(name: String, from: CGRect, to: CGRect)] = [
+            ("rightward", source, target),
+            ("leftward", target, source),
+            ("downward", CGRect(x: 100, y: 10, width: 40, height: 30), CGRect(x: 110, y: 160, width: 50, height: 30)),
+            ("upward", CGRect(x: 110, y: 160, width: 50, height: 30), CGRect(x: 100, y: 10, width: 40, height: 30)),
+            ("short", CGRect(x: 30, y: 60, width: 40, height: 20), CGRect(x: 110, y: 60, width: 40, height: 20)),
+        ]
+        for (name, from, to) in arrows {
+            let shape = HandMark.Shape.arrow(from: from, to: to)
+            let size = CGSize(width: 300, height: 220)
+            let full = ink(of: shape, drawn: 1, size: size)
+            let half = ink(of: shape, drawn: 0.5, size: size)
+            expect(!full.isEmpty && !full.contains { from.contains($0) || to.contains($0) }, "the \(name) arrow has no ink inside either box")
+            expect(full.contains { gap(from: $0, to: from) <= 12 } && full.contains { gap(from: $0, to: to) <= 12 },
+                   "and has ink within 12 pt of each box", "\(bounds(full))")
+            let head = full.filter { gap(from: $0, to: to) <= 12 }
+            expect(head.count >= 30, "and its head puts at least 30 half-points of ink within 12 pt of the box it points at", "\(head.count)")
+            expect(!half.isEmpty && !half.contains { gap(from: $0, to: to) <= 10 } && half.contains { gap(from: $0, to: from) <= 12 },
+                   "drawn to 0.5 the shaft has left the first box and no ink is within 10 pt of the second", "\(bounds(half))")
+            let start = bounds(ink(of: shape, drawn: 0, size: size))
+            expect(!start.isNull && start.width <= 6 && start.height <= 6, "a new arrow starts as a dot at most 6 pt across", "\(start)")
+            expect(ink(of: shape, drawn: 1, size: size) == full, "rendering the same arrow twice gives identical pixels")
+        }
+
+        for (name, from, to) in [("overlapping", CGRect(x: 100, y: 60, width: 50, height: 30), CGRect(x: 130, y: 80, width: 50, height: 30)),
+                                 ("nearly touching", CGRect(x: 60, y: 60, width: 50, height: 30), CGRect(x: 120, y: 60, width: 50, height: 30))] {
+            let full = ink(of: .arrow(from: from, to: to), drawn: 1, size: CGSize(width: 300, height: 220))
+            expect(!full.isEmpty && !full.contains { to.contains($0) } && full.contains { gap(from: $0, to: to) <= 12 },
+                   "an arrow between \(name) boxes comes in from outside the box it points at, with ink within 12 pt of it", "\(bounds(full))")
+        }
     }
 
     static func checkLooks(pid: Int32, restSeconds: Double) async {
