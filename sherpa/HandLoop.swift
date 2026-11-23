@@ -11,46 +11,54 @@ nonisolated struct HandLoop: Equatable, Sendable {
     let nibs: [Nib]
     let duration: Double
 
-    private static let baseWidth = 3.0
-    private static let gap = 6.0
-    private static let clearance = 5.0
-    private static let roundest = 18.0
+    private static let baseWidth = 3.4
+    private static let turns = 1.12
+    private static let exponent = 2.6
+    private static let leastMargin = 4.0
+    private static let cornerClearance = 3.0
 
     init(around box: CGRect) {
         var rng = SplitMix64(seeded: [box.minX, box.minY, box.width, box.height])
-        let wobbles = (0..<3).map { k in
-            (amplitude: rng.range(0.3, 0.8) / Double(k + 1), frequency: Double(k + 1) * rng.range(0.8, 1.25), phase: rng.range(0, 2 * .pi))
-        }
-        let drift = rng.range(1.5, 2.5)
-        let long = max(box.width, box.height), short = min(box.width, box.height)
-        let tilt = rng.range(-1, 1) * min(1.2, 120 / long) * .pi / 180
-        let startShare = rng.range(0.36, 0.44)
+        let spiral = rng.range(0.03, 0.07)
+        let tilt = rng.range(-2.5, 2.5) * min(1, 120 / max(box.width, box.height)) * .pi / 180
+        let start = rng.range(1.55, 1.8) * .pi
+        let wobbles = (2...4).map { k in (frequency: Double(k), amplitude: rng.range(0.006, 0.02), phase: rng.range(0, 2 * .pi)) }
+        let shift = CGPoint(x: rng.range(-0.02, 0.02) * box.width, y: rng.range(-0.04, 0.04) * box.height)
         let widthPhase = rng.range(0, 2 * .pi)
-        let shift = CGPoint(x: rng.range(-1.5, 1.5), y: rng.range(-0.6, 0.6))
 
-        let outline = Outline(long: long, short: short)
-        let overrun = min(max(0.12 * outline.perimeter, 16), 60)
-        let length = outline.perimeter + overrun
-        let count = max(Int(length / 2), 120)
-        let lying = box.width >= box.height
-        let points: [CGPoint] = (0...count).map { i in
-            let t = Double(i) / Double(count)
-            let s = startShare * outline.perimeter + length * t
-            let (point, normal) = outline.counterclockwiseFromRightMiddle(s)
-            var push = 0.6 - drift * t
-            for wobble in wobbles {
-                push += wobble.amplitude * sin(2 * .pi * wobble.frequency * 2 * s / outline.perimeter + wobble.phase)
+        func oval(margin: Double, count: Int) -> [CGPoint] {
+            let a = box.width / 2 + margin, b = box.height / 2 + margin
+            return (0...count).map { i in
+                let t = Double(i) / Double(count)
+                let theta = start - 2 * .pi * Self.turns * t
+                var scale = 1 + spiral * (t - 0.5) * 2 / Self.turns
+                for wobble in wobbles { scale += wobble.amplitude * sin(wobble.frequency * theta + wobble.phase) }
+                let c = cos(theta), s = sin(theta)
+                let x = a * scale * (c < 0 ? -1 : 1) * pow(abs(c), 2 / Self.exponent)
+                let y = b * scale * (s < 0 ? -1 : 1) * pow(abs(s), 2 / Self.exponent)
+                return CGPoint(x: box.midX + shift.x + x * cos(tilt) - y * sin(tilt), y: box.midY + shift.y + x * sin(tilt) + y * cos(tilt))
             }
-            let x = point.x + normal.x * push, y = point.y + normal.y * push
-            let tilted = CGPoint(x: x * cos(tilt) - y * sin(tilt) + shift.x, y: x * sin(tilt) + y * cos(tilt) + shift.y)
-            let upright = lying ? tilted : CGPoint(x: -tilted.y, y: tilted.x)
-            return CGPoint(x: box.midX + upright.x, y: box.midY + upright.y)
         }
+        let corners = [CGPoint(x: box.minX, y: box.minY), CGPoint(x: box.maxX, y: box.minY), CGPoint(x: box.maxX, y: box.maxY), CGPoint(x: box.minX, y: box.maxY)]
+        func clearsBox(_ margin: Double) -> Bool {
+            let points = oval(margin: margin, count: 240)
+            let firstTurn = Array(points.prefix(Int(240 / Self.turns) + 1))
+            return corners.allSatisfy { Self.encloses(firstTurn, $0) && Self.distance(from: $0, toPolyline: points) >= Self.cornerClearance }
+        }
+        var low = 0.0, high = 4 * max(box.width, box.height) + 20
+        for _ in 0..<16 {
+            let middle = (low + high) / 2
+            if clearsBox(middle) { high = middle } else { low = middle }
+        }
+        let margin = max(high, Self.leastMargin)
+        let length = Self.turns * 2 * .pi * sqrt(((box.width / 2 + margin) * (box.width / 2 + margin) + (box.height / 2 + margin) * (box.height / 2 + margin)) / 2)
+        let count = max(240, Int(length / 2))
+        let points = oval(margin: margin, count: count)
         let times = Self.twoThirdsPowerLawTimeShares(of: points)
         nibs = points.indices.map { i in
             let t = Double(i) / Double(count)
-            let taperIn = 0.35 + 0.65 * Self.smoothstep(0, 0.08, t)
-            let taperOut = 1 - 0.75 * Self.smoothstep(0.86, 1, t)
+            let taperIn = 0.35 + 0.65 * Self.smoothstep(0, 0.1, t)
+            let taperOut = 1 - 0.75 * Self.smoothstep(1 - 0.22 / Self.turns, 1, t)
             let flutter = 1 + 0.12 * sin(2 * .pi * 1.3 * t + widthPhase)
             return Nib(point: points[i], width: Self.baseWidth * taperIn * taperOut * flutter, timeShare: times[i])
         }
@@ -96,47 +104,25 @@ nonisolated struct HandLoop: Equatable, Sendable {
         return times.map { $0 / total }
     }
 
-    private struct Outline {
-        let radius: Double, straightX: Double, straightY: Double, perimeter: Double
-
-        init(long: Double, short: Double) {
-            radius = min(short / 2 + HandLoop.gap, HandLoop.roundest)
-            straightX = long / 2 + Self.endGapClearingCorners(radius: radius) - radius
-            straightY = short / 2 + HandLoop.gap - radius
-            perimeter = 4 * straightX + 4 * straightY + 2 * .pi * radius
+    private static func encloses(_ polygon: [CGPoint], _ point: CGPoint) -> Bool {
+        var inside = false
+        var j = polygon.count - 1
+        for i in polygon.indices {
+            let a = polygon[i], b = polygon[j]
+            if (a.y > point.y) != (b.y > point.y), point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x { inside.toggle() }
+            j = i
         }
+        return inside
+    }
 
-        private static func endGapClearingCorners(radius: Double) -> Double {
-            max(HandLoop.gap, radius - sqrt(max(pow(radius - HandLoop.clearance, 2) - pow(radius - HandLoop.gap, 2), 0)))
+    private static func distance(from point: CGPoint, toPolyline polyline: [CGPoint]) -> Double {
+        var nearest = Double.infinity
+        for (a, b) in zip(polyline, polyline.dropFirst()) {
+            let dx = b.x - a.x, dy = b.y - a.y
+            let along = min(max(((point.x - a.x) * dx + (point.y - a.y) * dy) / max(dx * dx + dy * dy, 1e-9), 0), 1)
+            nearest = min(nearest, hypot(point.x - (a.x + along * dx), point.y - (a.y + along * dy)))
         }
-
-        func counterclockwiseFromRightMiddle(_ distance: Double) -> (point: CGPoint, normal: CGPoint) {
-            var s = distance.truncatingRemainder(dividingBy: perimeter)
-            if s < 0 { s += perimeter }
-            let quarter = Double.pi * radius / 2
-            let (hx, hy, r) = (straightX, straightY, radius)
-            func arc(_ cx: Double, _ cy: Double, from start: Double, _ u: Double) -> (CGPoint, CGPoint) {
-                let a = start - u / r
-                return (CGPoint(x: cx + r * cos(a), y: cy + r * sin(a)), CGPoint(x: cos(a), y: sin(a)))
-            }
-            let pieces: [(Double, (Double) -> (CGPoint, CGPoint))] = [
-                (hy, { (CGPoint(x: hx + r, y: -$0), CGPoint(x: 1, y: 0)) }),
-                (quarter, { arc(hx, -hy, from: 0, $0) }),
-                (2 * hx, { (CGPoint(x: hx - $0, y: -hy - r), CGPoint(x: 0, y: -1)) }),
-                (quarter, { arc(-hx, -hy, from: -.pi / 2, $0) }),
-                (2 * hy, { (CGPoint(x: -hx - r, y: -hy + $0), CGPoint(x: -1, y: 0)) }),
-                (quarter, { arc(-hx, hy, from: -.pi, $0) }),
-                (2 * hx, { (CGPoint(x: -hx + $0, y: hy + r), CGPoint(x: 0, y: 1)) }),
-                (quarter, { arc(hx, hy, from: .pi / 2, $0) }),
-                (hy, { (CGPoint(x: hx + r, y: hy - $0), CGPoint(x: 1, y: 0)) }),
-            ]
-            for (length, place) in pieces {
-                if s <= length { return place(s) }
-                s -= length
-            }
-            let (length, place) = pieces[pieces.count - 1]
-            return place(length)
-        }
+        return nearest
     }
 }
 
