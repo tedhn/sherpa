@@ -111,7 +111,8 @@ nonisolated final class TapRouter: Sendable {
 
 /// Keeps one input engine open while Sherpa runs, so a press never starts or
 /// stops CoreAudio IO. Opening a Bluetooth headset's microphone switches it from
-/// A2DP to HFP and pauses every app's audio while it does.
+/// A2DP to HFP and pauses every app's audio while it does. A failed open leaves
+/// `device` nil, so `wanted` records that the input should still be open.
 final class Microphone {
     private struct Open {
         let engine: AVAudioEngine
@@ -121,6 +122,8 @@ final class Microphone {
 
     private let router = TapRouter()
     private var device: Open?
+    private var wanted = false
+    private var retry: Task<Void, Never>?
 
     init() {
         var address = AudioObjectPropertyAddress(
@@ -178,10 +181,35 @@ final class Microphone {
 
     func openIfAllowed(reason: String) {
         guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
-        _ = try? open(reason: reason)
+        wanted = true
+        openWanted(reason: reason)
     }
 
     func close(reason: String) {
+        wanted = false
+        retry?.cancel()
+        tearDown(reason: reason)
+    }
+
+    private func reopen(reason: String) {
+        guard wanted || device != nil else { return }
+        tearDown(reason: reason)
+        openWanted(reason: reason)
+    }
+
+    private func openWanted(reason: String) {
+        retry?.cancel()
+        if (try? open(reason: reason)) != nil { return }
+        retry = Task { [weak self] in
+            for _ in 1...5 {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, let self else { return }
+                if (try? open(reason: "retry")) != nil { return }
+            }
+        }
+    }
+
+    private func tearDown(reason: String) {
         guard let device else { return }
         self.device = nil
         router.detachAll()
@@ -189,12 +217,6 @@ final class Microphone {
         device.engine.stop()
         NotificationCenter.default.removeObserver(device.observer)
         logger.notice("microphone closed reason=\(reason, privacy: .public)")
-    }
-
-    private func reopen(reason: String) {
-        guard device != nil else { return }
-        close(reason: reason)
-        openIfAllowed(reason: reason)
     }
 
     func capture() throws(MicrophoneProblem) -> (capture: MicrophoneCapture, speech: SpeechStream, recorded: @Sendable () -> Data) {
