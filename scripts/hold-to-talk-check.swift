@@ -138,6 +138,30 @@ func deviceIsRunning() -> Bool? {
     return uint32Property(device, kAudioDevicePropertyDeviceIsRunningSomewhere).map { $0 != 0 }
 }
 
+func inputRunners() -> [pid_t: Bool] {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyProcessObjectList,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr else { return [:] }
+    var processes = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &processes) == noErr else { return [:] }
+    var runners: [pid_t: Bool] = [:]
+    for process in processes {
+        guard let owner = uint32Property(process, kAudioProcessPropertyPID),
+              let running = uint32Property(process, kAudioProcessPropertyIsRunningInput)
+        else { continue }
+        runners[pid_t(owner)] = running != 0
+    }
+    return runners
+}
+
+func sherpaRunsInput() -> Bool {
+    inputRunners()[pid] == true
+}
+
 func speakersBlocker() -> String? {
     if osascript("output muted of (get volume settings)") != "false" {
         return "the output is muted, and this check never unmutes it"
@@ -808,13 +832,18 @@ if caption() == "Microphone access is off" {
     print("  FAIL microphone access is off for Sherpa, enable it in System Settings > Privacy & Security > Microphone")
     exit(1)
 }
-guard let runningBefore = deviceIsRunning() else {
+guard deviceIsRunning() != nil else {
     print("  skip hold to talk: there is no default input device to read")
     exit(0)
 }
-guard !runningBefore else {
+guard !inputRunners().contains(where: { $0.key != pid && $0.value }) else {
     print("  skip hold to talk: another app is already using the microphone, so the device flag says nothing about this one")
     exit(0)
+}
+if wait(upTo: 3, until: sherpaRunsInput) {
+    print("  ok   Sherpa has the microphone open before the first hold")
+} else {
+    fail("Sherpa was not running input before the first hold, so a press would open the device")
 }
 
 let tail = LogTail()
@@ -884,12 +913,12 @@ func hold(_ label: String, _ kind: Hold) {
 
     post(.leftMouseUp, at: release)
     let releasedAt = Date()
-    let stopped = wait(upTo: 2) { deviceIsRunning() == false && caption() == "Hold to talk" }
-    guard stopped else {
-        fail("\(label): 2 s after the mouse-up the device running was \(deviceIsRunning() as Any) and the caption '\(caption())'")
+    let stopped = wait(upTo: 2) { caption() == "Hold to talk" }
+    guard stopped, deviceIsRunning() == true, sherpaRunsInput() else {
+        fail("\(label): 2 s after the mouse-up the caption was '\(caption())', the device running was \(deviceIsRunning() as Any) and Sherpa running input was \(sherpaRunsInput()), expected 'Hold to talk' with the microphone still open")
         return
     }
-    print("  ok   \(label): the device stopped after the mouse-up")
+    print("  ok   \(label): the caption is back to 'Hold to talk' and the microphone stays open after the mouse-up")
     let released = meterSamples(1).first
     if kind == .still, requestsPath != nil {
         wait(0.2)

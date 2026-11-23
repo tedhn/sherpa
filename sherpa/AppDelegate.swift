@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var overlays: [OverlayWindow] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        state.openMicrophone()
         menuBar = MenuBarController(state: state)
         let companion = Companion()
         self.companion = companion

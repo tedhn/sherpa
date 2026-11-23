@@ -35,6 +35,7 @@ enum MicrophonePhase {
 @Observable
 final class AppState {
     private(set) var microphone: MicrophonePhase = .ready
+    @ObservationIgnored private let input = Microphone()
     private(set) var transcription: Transcription?
     private(set) var sheet = Sheet()
     private let transcriber = Transcriber()
@@ -128,13 +129,17 @@ final class AppState {
         }
     }
 
+    func openMicrophone() {
+        input.openIfAllowed(reason: "launch")
+    }
+
     /// The record is replaced only by a press that reached the Transcriber, so a
     /// press whose microphone fails leaves the answer, and its voice, in place.
     private func beginHold() {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             do throws(MicrophoneProblem) {
-                let (capture, speech, recorded) = try MicrophoneCapture.start()
+                let (capture, speech, recorded) = try input.capture()
                 microphone = .listening(capture)
                 stale?.cancel()
                 let record = transcriber.press(speech, recorded: recorded)
@@ -147,6 +152,7 @@ final class AppState {
             microphone = .askingForAccess
             Task {
                 let granted = await AVCaptureDevice.requestAccess(for: .audio)
+                input.openIfAllowed(reason: "access")
                 guard case .askingForAccess = microphone else { return }
                 microphone = granted ? .ready : .failed(.accessDenied)
             }

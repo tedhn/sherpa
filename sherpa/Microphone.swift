@@ -1,5 +1,7 @@
 import Accelerate
+import AppKit
 import AVFoundation
+import CoreAudio
 import os
 
 private nonisolated let logger = Logger(subsystem: "my.rooftop.sherpa", category: "microphone")
@@ -85,15 +87,117 @@ private extension AVAudioPCMBuffer {
     }
 }
 
-final class MicrophoneCapture {
-    private static let wavURL = URL.cachesDirectory.appending(components: "my.rooftop.sherpa", "last-hold.wav")
+// One tap lives as long as the input engine, so it delivers to whichever hold
+// is attached and drops buffers between holds.
+nonisolated final class TapRouter: Sendable {
+    private let attached = OSAllocatedUnfairLock<TapReceiver?>(initialState: nil)
 
-    private let engine: AVAudioEngine
-    private let receiver: TapReceiver
-    private let rate: Double
-    private let started: ContinuousClock.Instant
+    func receive(_ buffer: AVAudioPCMBuffer, at time: AVAudioTime) {
+        attached.withLock { $0 }?.receive(buffer, at: time)
+    }
 
-    static func start() throws(MicrophoneProblem) -> (capture: MicrophoneCapture, speech: SpeechStream, recorded: @Sendable () -> Data) {
+    func attach(_ receiver: TapReceiver) {
+        attached.withLock { $0 = receiver }
+    }
+
+    func detach(_ receiver: TapReceiver) {
+        attached.withLock { if $0 === receiver { $0 = nil } }
+    }
+
+    func detachAll() {
+        attached.withLock { $0 = nil }
+    }
+}
+
+/// Keeps one input engine open while Sherpa runs, so a press never starts or
+/// stops CoreAudio IO. Opening a Bluetooth headset's microphone switches it from
+/// A2DP to HFP and pauses every app's audio while it does.
+final class Microphone {
+    private struct Open {
+        let engine: AVAudioEngine
+        let format: AVAudioFormat
+        let observer: NSObjectProtocol
+    }
+
+    private let router = TapRouter()
+    private var device: Open?
+
+    init() {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, .main) { [weak self] _, _ in
+            self?.reopen(reason: "device")
+        }
+        // An open input holds a PreventUserIdleSystemSleep assertion, so the
+        // Mac would never idle-sleep while Sherpa runs.
+        let workspace = NSWorkspace.shared.notificationCenter
+        workspace.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.close(reason: "sleep") }
+        }
+        workspace.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.openIfAllowed(reason: "wake") }
+        }
+    }
+
+    @discardableResult
+    func open(reason: String) throws(MicrophoneProblem) -> AVAudioFormat {
+        if let device { return device.format }
+        let engine = AVAudioEngine()
+        let input = engine.inputNode
+        let format = input.outputFormat(forBus: 0)
+        // installTap raises an Objective-C exception on a 0-channel format,
+        // which Swift cannot catch.
+        guard format.channelCount > 0, format.sampleRate > 0 else {
+            logger.notice("microphone open failed reason=\(reason, privacy: .public) problem=noInputDevice")
+            throw .noInputDevice
+        }
+        // The tap delivers 100 to 400 ms per buffer whatever is asked, so ask
+        // for the shortest. It is the method reference `router.receive` for the
+        // reason given on TapReceiver.
+        let tenthOfASecond = AVAudioFrameCount(format.sampleRate / 10)
+        input.installTap(onBus: 0, bufferSize: tenthOfASecond, format: format, block: router.receive)
+        do {
+            try engine.start()
+        } catch {
+            input.removeTap(onBus: 0)
+            logger.error("microphone open failed reason=\(reason, privacy: .public) problem=engineFailed error=\(error.localizedDescription, privacy: .public)")
+            throw .engineFailed
+        }
+        let observer = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.reopen(reason: "configuration") }
+        }
+        device = Open(engine: engine, format: format, observer: observer)
+        logger.notice("microphone opened reason=\(reason, privacy: .public) rate=\(format.sampleRate, format: .fixed(precision: 0)) channels=\(format.channelCount)")
+        return format
+    }
+
+    func openIfAllowed(reason: String) {
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
+        _ = try? open(reason: reason)
+    }
+
+    func close(reason: String) {
+        guard let device else { return }
+        self.device = nil
+        router.detachAll()
+        device.engine.inputNode.removeTap(onBus: 0)
+        device.engine.stop()
+        NotificationCenter.default.removeObserver(device.observer)
+        logger.notice("microphone closed reason=\(reason, privacy: .public)")
+    }
+
+    private func reopen(reason: String) {
+        guard device != nil else { return }
+        close(reason: reason)
+        openIfAllowed(reason: reason)
+    }
+
+    func capture() throws(MicrophoneProblem) -> (capture: MicrophoneCapture, speech: SpeechStream, recorded: @Sendable () -> Data) {
         #if DEBUG
         // The harness cannot make a working Mac's microphone fail, so it writes
         // engineFailed into this file between presses. Read on each press.
@@ -104,14 +208,12 @@ final class MicrophoneCapture {
         }
         #endif
         let started = ContinuousClock.now
-        let engine = AVAudioEngine()
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        // installTap raises an Objective-C exception on a 0-channel format,
-        // which Swift cannot catch.
-        guard format.channelCount > 0, format.sampleRate > 0 else {
-            logger.notice("hold failed reason=noInputDevice")
-            throw .noInputDevice
+        let format: AVAudioFormat
+        do throws(MicrophoneProblem) {
+            format = try open(reason: "press")
+        } catch {
+            logger.notice("hold failed reason=\(String(describing: error), privacy: .public)")
+            throw error
         }
         guard let converter = SpeechConverter(from: format) else {
             logger.notice("hold failed reason=converter")
@@ -119,24 +221,23 @@ final class MicrophoneCapture {
         }
         let (speech, continuation) = SpeechStream.makeStream(bufferingPolicy: .unbounded)
         let receiver = TapReceiver(converter: converter, speech: continuation)
-        // The tap delivers 100 to 400 ms per buffer whatever is asked, so ask
-        // for the shortest.
-        let tenthOfASecond = AVAudioFrameCount(format.sampleRate / 10)
-        input.installTap(onBus: 0, bufferSize: tenthOfASecond, format: format, block: receiver.receive)
-        do {
-            try engine.start()
-        } catch {
-            input.removeTap(onBus: 0)
-            logger.error("hold failed reason=engineFailed error=\(error.localizedDescription, privacy: .public)")
-            throw .engineFailed
-        }
+        router.attach(receiver)
         logger.notice("hold began rate=\(format.sampleRate, format: .fixed(precision: 0)) channels=\(format.channelCount)")
-        let capture = MicrophoneCapture(engine: engine, receiver: receiver, rate: format.sampleRate, started: started)
+        let capture = MicrophoneCapture(router: router, receiver: receiver, rate: format.sampleRate, started: started)
         return (capture, speech, { receiver.recorded })
     }
+}
 
-    private init(engine: AVAudioEngine, receiver: TapReceiver, rate: Double, started: ContinuousClock.Instant) {
-        self.engine = engine
+final class MicrophoneCapture {
+    private static let wavURL = URL.cachesDirectory.appending(components: "my.rooftop.sherpa", "last-hold.wav")
+
+    private let router: TapRouter
+    private let receiver: TapReceiver
+    private let rate: Double
+    private let started: ContinuousClock.Instant
+
+    fileprivate init(router: TapRouter, receiver: TapReceiver, rate: Double, started: ContinuousClock.Instant) {
+        self.router = router
         self.receiver = receiver
         self.rate = rate
         self.started = started
@@ -145,8 +246,7 @@ final class MicrophoneCapture {
     var level: BarFill { receiver.level }
 
     isolated deinit {
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        router.detach(receiver)
         let counts = receiver.snapshot
         let seconds = started.duration(to: .now) / .seconds(1)
         let firstBuffer = counts.firstBuffer.map { String(format: "%.3f", started.duration(to: $0) / .seconds(1)) } ?? "none"
