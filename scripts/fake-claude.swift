@@ -2,7 +2,7 @@ import Foundation
 import Network
 
 enum Scenario: String {
-    case ok, slow, unauthorized = "401", rateLimited = "429", refusal, overloaded
+    case ok, slow, unauthorized = "401", rateLimited = "429", refusal, overloaded, underline, arrow
 }
 
 var positional: [String] = []
@@ -159,10 +159,16 @@ final class Exchange {
             event("ping"),
         ]
         let head = [start] + thinking + [block]
-        let answer = chunks(of: "Answer to: \(lastText(in: body))\n\n" + paragraphs.joined(separator: "\n\n") + " [POINT:600,380,680,420:panel:screen1]")
+        let current = scenario()
+        let tag = switch current {
+        case .underline: "[UNDERLINE:600,380,680,420:panel:screen1]"
+        case .arrow: "[ARROW:200,380,280,420:level bar:screen1:600,380,680,420:panel:screen1]"
+        default: "[POINT:600,380,680,420:panel:screen1]"
+        }
+        let answer = chunks(of: "Answer to: \(lastText(in: body))\n\n" + paragraphs.joined(separator: "\n\n") + " " + tag)
         let ended = [event("content_block_stop", ["index": 1])] + messageEnd("end_turn")
-        switch scenario() {
-        case .ok:
+        switch current {
+        case .ok, .underline, .arrow:
             return .stream(head: head, chunks: answer, tail: ended)
         case .slow:
             return .stream(head: head, chunks: answer, tail: ended, interval: 0.5)
