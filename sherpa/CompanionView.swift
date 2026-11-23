@@ -21,8 +21,8 @@ struct CompanionView: View {
         .background { UserInk(state: state, screenFrame: screenFrame) }
         .overlay {
             if let ring = companion.ring {
-                DrawingRing(around: CGRect(origin: Companion.local(CGPoint(x: ring.minX, y: ring.maxY), in: screenFrame), size: ring.size))
-                    .transition(DrawingRing.fade)
+                DrawingMark(shape: .ring(CGRect(origin: Companion.local(CGPoint(x: ring.minX, y: ring.maxY), in: screenFrame), size: ring.size)))
+                    .transition(DrawingMark.fade)
             }
         }
         .overlay {

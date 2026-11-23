@@ -1,23 +1,52 @@
 import CoreGraphics
 import Foundation
 
-nonisolated struct HandLoop: Equatable, Sendable {
+nonisolated struct HandMark: Equatable, Sendable {
+    enum Shape: Equatable, Sendable {
+        case ring(CGRect)
+    }
+
     struct Nib: Equatable, Sendable {
         let point: CGPoint
         let width: CGFloat
         let timeShare: Double
     }
 
-    let nibs: [Nib]
+    /// The pen lifts between strokes.
+    let strokes: [[Nib]]
     let duration: Double
+
+    private typealias Stroke = [(point: CGPoint, width: CGFloat)]
 
     private static let baseWidth = 3.4
     private static let turns = 1.12
     private static let exponent = 2.6
     private static let leastMargin = 4.0
     private static let cornerClearance = 3.0
+    private static let pause = 0.07
+    private static let arrowPush = 6.0
+    private static let shortestShaft = 16.0
+    private static let farShaft = 28.0
 
-    init(around box: CGRect) {
+    init(_ shape: Shape) {
+        let drawn: [Stroke]
+        switch shape {
+        case .ring(let box):
+            drawn = [Self.ring(around: box)]
+            duration = min(0.38 + 0.14 * log2(max((box.width + box.height) / 60, 1)), 0.75)
+        }
+        let lengths = drawn.map { Self.length(of: $0.map(\.point)) }
+        let pauses = Self.pause * Double(drawn.count - 1)
+        var start = 0.0
+        strokes = drawn.indices.map { k in
+            let share = (1 - pauses) * lengths[k] / lengths.reduce(0, +)
+            let times = Self.twoThirdsPowerLawTimeShares(of: drawn[k].map(\.point))
+            defer { start += share + Self.pause }
+            return drawn[k].indices.map { Nib(point: drawn[k][$0].point, width: drawn[k][$0].width, timeShare: start + share * times[$0]) }
+        }
+    }
+
+    private static func ring(around box: CGRect) -> Stroke {
         var rng = SplitMix64(seeded: [box.minX, box.minY, box.width, box.height])
         let spiral = rng.range(0.03, 0.07)
         let tilt = rng.range(-2.5, 2.5) * min(1, 120 / max(box.width, box.height)) * .pi / 180
@@ -30,47 +59,51 @@ nonisolated struct HandLoop: Equatable, Sendable {
             let a = box.width / 2 + margin, b = box.height / 2 + margin
             return (0...count).map { i in
                 let t = Double(i) / Double(count)
-                let theta = start - 2 * .pi * Self.turns * t
-                var scale = 1 + spiral * (t - 0.5) * 2 / Self.turns
+                let theta = start - 2 * .pi * turns * t
+                var scale = 1 + spiral * (t - 0.5) * 2 / turns
                 for wobble in wobbles { scale += wobble.amplitude * sin(wobble.frequency * theta + wobble.phase) }
                 let c = cos(theta), s = sin(theta)
-                let x = a * scale * (c < 0 ? -1 : 1) * pow(abs(c), 2 / Self.exponent)
-                let y = b * scale * (s < 0 ? -1 : 1) * pow(abs(s), 2 / Self.exponent)
+                let x = a * scale * (c < 0 ? -1 : 1) * pow(abs(c), 2 / exponent)
+                let y = b * scale * (s < 0 ? -1 : 1) * pow(abs(s), 2 / exponent)
                 return CGPoint(x: box.midX + shift.x + x * cos(tilt) - y * sin(tilt), y: box.midY + shift.y + x * sin(tilt) + y * cos(tilt))
             }
         }
         let corners = [CGPoint(x: box.minX, y: box.minY), CGPoint(x: box.maxX, y: box.minY), CGPoint(x: box.maxX, y: box.maxY), CGPoint(x: box.minX, y: box.maxY)]
         func clearsBox(_ margin: Double) -> Bool {
             let points = oval(margin: margin, count: 240)
-            let firstTurn = Array(points.prefix(Int(240 / Self.turns) + 1))
-            return corners.allSatisfy { Self.encloses(firstTurn, $0) && Self.distance(from: $0, toPolyline: points) >= Self.cornerClearance }
+            let firstTurn = Array(points.prefix(Int(240 / turns) + 1))
+            return corners.allSatisfy { encloses(firstTurn, $0) && distance(from: $0, toPolyline: points) >= cornerClearance }
         }
         var low = 0.0, high = 4 * max(box.width, box.height) + 20
         for _ in 0..<16 {
             let middle = (low + high) / 2
             if clearsBox(middle) { high = middle } else { low = middle }
         }
-        let margin = max(high, Self.leastMargin)
-        let length = Self.turns * 2 * .pi * sqrt(((box.width / 2 + margin) * (box.width / 2 + margin) + (box.height / 2 + margin) * (box.height / 2 + margin)) / 2)
+        let margin = max(high, leastMargin)
+        let length = turns * 2 * .pi * sqrt(((box.width / 2 + margin) * (box.width / 2 + margin) + (box.height / 2 + margin) * (box.height / 2 + margin)) / 2)
         let count = max(240, Int(length / 2))
         let points = oval(margin: margin, count: count)
-        let times = Self.twoThirdsPowerLawTimeShares(of: points)
-        nibs = points.indices.map { i in
+        return points.indices.map { i in
             let t = Double(i) / Double(count)
-            let taperIn = 0.35 + 0.65 * Self.smoothstep(0, 0.1, t)
-            let taperOut = 1 - 0.75 * Self.smoothstep(1 - 0.22 / Self.turns, 1, t)
+            let taperIn = 0.35 + 0.65 * smoothstep(0, 0.1, t)
+            let taperOut = 1 - 0.75 * smoothstep(1 - 0.22 / turns, 1, t)
             let flutter = 1 + 0.12 * sin(2 * .pi * 1.3 * t + widthPhase)
-            return Nib(point: points[i], width: Self.baseWidth * taperIn * taperOut * flutter, timeShare: times[i])
+            return (points[i], baseWidth * taperIn * taperOut * flutter)
         }
-        duration = min(0.38 + 0.14 * log2(max((box.width + box.height) / 60, 1)), 0.75)
+    }
+
+    private static func length(of points: [CGPoint]) -> Double {
+        zip(points, points.dropFirst()).reduce(0) { $0 + hypot($1.1.x - $1.0.x, $1.1.y - $1.0.y) }
     }
 
     func path(drawnTo share: Double) -> CGPath {
         let path = CGMutablePath()
-        guard let first = nibs.first else { return path }
+        guard let first = strokes.first?.first else { return path }
         path.addPath(Self.capsule(from: first.point, to: first.point, width: first.width))
-        for (a, b) in zip(nibs, nibs.dropFirst()) where b.timeShare <= share {
-            path.addPath(Self.capsule(from: a.point, to: b.point, width: (a.width + b.width) / 2))
+        for stroke in strokes {
+            for (a, b) in zip(stroke, stroke.dropFirst()) where b.timeShare <= share {
+                path.addPath(Self.capsule(from: a.point, to: b.point, width: (a.width + b.width) / 2))
+            }
         }
         return path
     }

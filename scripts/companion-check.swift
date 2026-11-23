@@ -1045,7 +1045,7 @@ enum CompanionCheck {
     static func checkRingRender() {
         let around = CGRect(x: 40, y: 30, width: 100, height: 50)
         func drawn(_ fraction: Double) -> (pixels: Pixels, blobs: [Blob]) {
-            rendered(CompanionRing(around: around, drawn: fraction).frame(width: 200, height: 120), scale: 2)
+            rendered(CompanionMark(shape: .ring(around), drawn: fraction).frame(width: 200, height: 120), scale: 2)
                 ?? (Pixels(rgba: [], width: 0, height: 0), [])
         }
         func rgba(_ pixels: Pixels, _ x: Int, _ y: Int) -> [Int] {
@@ -1073,7 +1073,7 @@ enum CompanionCheck {
         expect(drawn(1).pixels.rgba == full.pixels.rgba, "rendering the same ring twice gives identical pixels")
 
         func inked(around box: CGRect) -> [Bool] {
-            guard let scene = rendered(CompanionRing(around: box, drawn: 1).frame(width: 300, height: 120), scale: 2)?.pixels else { return [] }
+            guard let scene = rendered(CompanionMark(shape: .ring(box), drawn: 1).frame(width: 300, height: 120), scale: 2)?.pixels else { return [] }
             return stride(from: 3, to: scene.rgba.count, by: 4).map { scene.rgba[$0] >= 128 }
         }
         let here = inked(around: around), there = inked(around: around.offsetBy(dx: 100, dy: 0))
@@ -1092,7 +1092,7 @@ enum CompanionCheck {
                                      size: landed.frame.size), side: landed.side.rawValue)
         let ring = CGRect(origin: Companion.local(CGPoint(x: bounds.minX, y: bounds.maxY), in: overlay), size: bounds.size)
         let scene = ZStack {
-            CompanionRing(around: ring, drawn: 1)
+            CompanionMark(shape: .ring(ring), drawn: 1)
             CompanionGlyph(look: .arrow(heading: Companion.restingHeading), time: 0)
                 .position(Companion.local(spot, in: overlay))
             CompanionBubble(bubble: landed, shown: landed.label.count)
