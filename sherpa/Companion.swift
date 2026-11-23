@@ -42,10 +42,18 @@ nonisolated struct Flight: Equatable, Sendable {
 }
 
 nonisolated struct Callout: Equatable, Sendable {
+    /// In AppKit global space, like `bounds`. An arrow runs from its `from` to the callout's bounds.
+    enum Mark: Equatable, Sendable {
+        case ring
+        case underline
+        case arrow(from: CGRect)
+    }
+
     let point: CGPoint
     let label: String
     /// The thing's bounds in AppKit global space. Nil when Claude named a single pixel.
     let bounds: CGRect?
+    var mark = Mark.ring
 }
 
 nonisolated struct Bubble: Equatable, Sendable {
@@ -110,7 +118,7 @@ final class Companion {
     private static let pop = Animation.spring(response: 0.4, dampingFraction: 0.6)
     private static let fade = Animation.easeOut(duration: 0.3)
     private static let deadZone: CGFloat = 24
-    private static let smallestRinged: CGFloat = 4
+    private static let smallestMarked: CGFloat = 4
 
     /// True once the pointer has sat still for `restAfter`, five minutes outside tests; the glyph
     /// fades out until the next activity.
@@ -122,10 +130,17 @@ final class Companion {
         let timer: Timer
     }
 
+    /// What the companion draws at the thing it points at, in AppKit global space.
+    nonisolated enum Mark: Equatable, Sendable {
+        case ring(CGRect)
+        case underline(CGRect)
+        case arrow(from: CGRect, to: CGRect)
+    }
+
     private enum Motion {
         case following
         case outbound(Leg, Callout)
-        case pausing(Bubble, ring: CGRect?, releasable: ContinuousClock.Instant, deadline: Task<Void, Never>)
+        case pausing(Bubble, mark: Mark?, releasable: ContinuousClock.Instant, deadline: Task<Void, Never>)
         case returning(Leg, anchor: CGPoint)
     }
 
@@ -145,9 +160,8 @@ final class Companion {
         if case .pausing(let bubble, _, _, _) = motion { bubble } else { nil }
     }
 
-    /// The bounds of the thing the companion points at, in AppKit global space, while it pauses there.
-    var ring: CGRect? {
-        if case .pausing(_, let ring, _, _) = motion { ring } else { nil }
+    var mark: Mark? {
+        if case .pausing(_, let mark, _, _) = motion { mark } else { nil }
     }
 
     // A mouse tap needs the Accessibility grant (an ungranted app gets a non-nil tap that reads
@@ -233,6 +247,10 @@ final class Companion {
         CGPoint(x: point.x - screenFrame.minX, y: screenFrame.maxY - point.y)
     }
 
+    static func local(_ rect: CGRect, in screenFrame: CGRect) -> CGRect {
+        CGRect(origin: local(CGPoint(x: rect.minX, y: rect.maxY), in: screenFrame), size: rect.size)
+    }
+
     func followPointer() {
         if case .returning(_, let anchor) = motion {
             let pointer = NSEvent.mouseLocation
@@ -303,7 +321,12 @@ final class Companion {
         logger.notice("companion landed at=\(Self.field(flight.to), privacy: .public)")
         guard let callout else { return follow() }
         let bubble = Bubble(label: callout.label, beside: flight.to, on: NSScreen.screens.map(\.frame), appeared: .now)
-        let ring = callout.bounds.flatMap { min($0.width, $0.height) < Self.smallestRinged ? nil : $0 }
+        let markable = callout.bounds.flatMap { min($0.width, $0.height) < Self.smallestMarked ? nil : $0 }
+        let mark: Mark? = switch callout.mark {
+        case .ring: markable.map(Mark.ring)
+        case .underline: markable.map(Mark.underline)
+        case .arrow(let from): .arrow(from: from, to: callout.bounds ?? CGRect(origin: callout.point, size: .zero))
+        }
         let releasable = ContinuousClock.now + bubble.typing + hold
         let deadline = Task { [weak self] in
             while ContinuousClock.now < releasable {
@@ -311,11 +334,11 @@ final class Companion {
             }
             self?.releaseIfDue()
         }
-        withAnimation(Self.pop) { motion = .pausing(bubble, ring: ring, releasable: releasable, deadline: deadline) }
+        withAnimation(Self.pop) { motion = .pausing(bubble, mark: mark, releasable: releasable, deadline: deadline) }
         logger.notice("""
             companion pausing chars=\(bubble.label.count) typed=\(Self.milliseconds(bubble.typing)) \
             side=\(bubble.side.rawValue, privacy: .public) bubble=\(Self.field(bubble.frame), privacy: .public) \
-            ring=\(ring.map { Self.field($0) } ?? "none", privacy: .public)
+            mark=\(Self.field(mark), privacy: .public)
             """)
     }
 
@@ -336,6 +359,15 @@ final class Companion {
 
     private static func field(_ rect: CGRect) -> String {
         String(format: "%.1f,%.1f,%.1f,%.1f", rect.minX, rect.minY, rect.width, rect.height)
+    }
+
+    private static func field(_ mark: Mark?) -> String {
+        switch mark {
+        case .ring(let box): "ring:" + field(box)
+        case .underline(let box): "underline:" + field(box)
+        case .arrow(let from, let to): "arrow:\(field(from))->\(field(to))"
+        case nil: "none"
+        }
     }
 
     private static func milliseconds(_ duration: Duration) -> Int {

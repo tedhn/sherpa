@@ -137,19 +137,19 @@ struct BubblePop: Transition {
     }
 }
 
-struct CompanionRing: View {
-    /// The thing's bounds in the overlay's SwiftUI space.
-    let around: CGRect
+struct CompanionMark: View {
+    /// What to draw, in the overlay's SwiftUI space.
+    let shape: HandMark.Shape
     let drawn: Double
 
     var body: some View {
-        HandRing(loop: HandLoop(around: around), drawn: drawn)
+        HandStrokes(mark: HandMark(shape), drawn: drawn)
             .fill(CompanionGlyph.tint)
     }
 }
 
-private struct HandRing: Shape {
-    let loop: HandLoop
+private struct HandStrokes: Shape {
+    let mark: HandMark
     var drawn: Double
 
     var animatableData: Double {
@@ -158,12 +158,12 @@ private struct HandRing: Shape {
     }
 
     func path(in rect: CGRect) -> Path {
-        Path(loop.path(drawnTo: drawn))
+        Path(mark.path(drawnTo: drawn))
     }
 }
 
-struct DrawingRing: View {
-    let around: CGRect
+struct DrawingMark: View {
+    let shape: HandMark.Shape
     @State private var drawn = 0.0
 
     static let fade = AnyTransition.asymmetric(
@@ -172,9 +172,9 @@ struct DrawingRing: View {
     )
 
     var body: some View {
-        CompanionRing(around: around, drawn: drawn)
+        CompanionMark(shape: shape, drawn: drawn)
             .onAppear {
-                withAnimation(.timingCurve(0.35, 0.05, 0.25, 1, duration: HandLoop(around: around).duration)) { drawn = 1 }
+                withAnimation(.timingCurve(0.35, 0.05, 0.25, 1, duration: HandMark(shape).duration)) { drawn = 1 }
             }
     }
 }

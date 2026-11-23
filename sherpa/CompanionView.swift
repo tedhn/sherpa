@@ -20,9 +20,10 @@ struct CompanionView: View {
         .position(Companion.local(companion.position, in: screenFrame))
         .background { UserInk(state: state, screenFrame: screenFrame) }
         .overlay {
-            if let ring = companion.ring {
-                DrawingRing(around: CGRect(origin: Companion.local(CGPoint(x: ring.minX, y: ring.maxY), in: screenFrame), size: ring.size))
-                    .transition(DrawingRing.fade)
+            if let mark = companion.mark {
+                DrawingMark(shape: shape(of: mark))
+                    .transition(DrawingMark.fade)
+                    .id(companion.bubble?.appeared)
             }
         }
         .overlay {
@@ -44,6 +45,14 @@ struct CompanionView: View {
         // The notched built-in display gives a full-screen window a top safe-area inset.
         // Without this, local y = 0 would sit below the notch, not at the screen's top edge.
         .ignoresSafeArea()
+    }
+
+    private func shape(of mark: Companion.Mark) -> HandMark.Shape {
+        switch mark {
+        case .ring(let box): .ring(Companion.local(box, in: screenFrame))
+        case .underline(let box): .underline(Companion.local(box, in: screenFrame))
+        case .arrow(let from, let to): .arrow(from: Companion.local(from, in: screenFrame), to: Companion.local(to, in: screenFrame))
+        }
     }
 
     private func look(for voice: VoiceState, heading: Angle) -> CompanionGlyph.Look {

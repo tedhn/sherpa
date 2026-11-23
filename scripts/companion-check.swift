@@ -257,10 +257,11 @@ enum CompanionCheck {
                 checkArc()
                 checkBubble()
                 await checkPointing()
-                await checkRing()
+                await checkMarks()
                 checkLooksRender()
                 checkBubbleRender()
                 checkRingRender()
+                checkMarkRender()
                 checkInkRender()
             }
             exit(failures == 0 ? 0 : 1)
@@ -519,9 +520,9 @@ enum CompanionCheck {
                logged.joined(separator: ", "))
     }
 
-    static func checkRing() async {
-        guard let frame = NSScreen.screens.first?.frame else {
-            expect(false, "a screen to ring on")
+    static func checkMarks() async {
+        guard let frame = NSScreen.screens.first?.frame, frame.width >= 800, frame.height >= 500 else {
+            expect(false, "a primary screen of at least 800x500 to mark on", "\(String(describing: NSScreen.screens.first?.frame))")
             return
         }
         let companion = Companion(hold: .milliseconds(300))
@@ -530,39 +531,59 @@ enum CompanionCheck {
             while !done(), ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(2)) }
             return done()
         }
-        func corner(_ bounds: CGRect) -> CGPoint { CGPoint(x: bounds.maxX + 35, y: bounds.minY - 25) }
-        let bounds = CGRect(x: frame.midX - 40, y: frame.midY - 20, width: 80, height: 40)
-        companion.point(at: Callout(point: CGPoint(x: bounds.midX, y: bounds.midY), label: "panel", bounds: bounds))
-        expect(companion.ring == nil, "on the way out there is no ring yet")
-        let landed = await wait(upTo: .seconds(2)) { companion.bubble != nil }
-        expect(landed && companion.position == corner(bounds) && companion.ring == bounds,
-               "a callout with bounds lands beside their bottom-right corner and rings exactly those bounds while it pauses",
-               "\(exact(companion.position)) vs \(exact(corner(bounds))), ring \(String(describing: companion.ring))")
+        func pause(at callout: Callout) async -> Bool {
+            companion.point(at: callout)
+            return await wait(upTo: .seconds(2)) { companion.bubble?.label == callout.label }
+        }
+        func paused(_ landed: Bool) -> String { "\(landed ? "landed" : "never landed") at \(exact(companion.position)), mark \(String(describing: companion.mark))" }
 
-        let pointed = Callout(point: CGPoint(x: frame.minX + 300, y: frame.midY), label: "Wi-Fi", bounds: nil)
+        let panel = Callout(point: CGPoint(x: 440, y: 320), label: "panel", bounds: CGRect(x: 400, y: 300, width: 80, height: 40))
+        companion.point(at: panel)
+        expect(companion.mark == nil, "on the way out there is no mark yet")
+        var landed = await wait(upTo: .seconds(2)) { companion.bubble?.label == "panel" }
+        expect(landed && companion.position == CGPoint(x: 515, y: 275) && companion.mark == .ring(CGRect(x: 400, y: 300, width: 80, height: 40)),
+               "a callout with bounds lands beside their bottom-right corner and rings exactly those bounds while it pauses", paused(landed))
+
+        let pointed = Callout(point: CGPoint(x: 300, y: 450), label: "Wi-Fi", bounds: nil)
         companion.point(at: pointed)
-        expect(companion.ring == nil && companion.bubble == nil, "a new callout takes the ring down with the bubble")
-        let pointLanded = await wait(upTo: .seconds(2)) { companion.bubble != nil }
-        let following = Companion.position(following: pointed.point, on: NSScreen.screens.map(\.frame))
-        expect(pointLanded && companion.position == following && companion.ring == nil,
-               "a callout without bounds lands where following its point would, and pauses with no ring",
-               "\(exact(companion.position)) vs \(exact(following)), ring \(String(describing: companion.ring))")
+        expect(companion.mark == nil && companion.bubble == nil, "a new callout takes the mark down with the bubble")
+        landed = await wait(upTo: .seconds(2)) { companion.bubble?.label == "Wi-Fi" }
+        expect(landed && companion.position == CGPoint(x: 335, y: 425) && companion.mark == nil,
+               "a callout without bounds lands where following its point would, and pauses with no ring", paused(landed))
 
-        let thin = CGRect(x: frame.maxX - 400, y: frame.midY, width: 3, height: 40)
-        companion.point(at: Callout(point: CGPoint(x: thin.midX, y: thin.midY), label: "line", bounds: thin))
-        let thinLanded = await wait(upTo: .seconds(2)) { companion.bubble?.label == "line" }
-        expect(thinLanded && companion.position == corner(thin) && companion.ring == nil,
-               "bounds under 4 pt across get no ring, though the glyph still lands beside their corner",
-               "\(exact(companion.position)) vs \(exact(corner(thin))), ring \(String(describing: companion.ring))")
+        landed = await pause(at: Callout(point: CGPoint(x: 601.5, y: 470), label: "line", bounds: CGRect(x: 600, y: 450, width: 3, height: 40)))
+        expect(landed && companion.position == CGPoint(x: 638, y: 425) && companion.mark == nil,
+               "bounds under 4 pt across get no ring, though the glyph still lands beside their corner", paused(landed))
+
+        landed = await pause(at: Callout(point: CGPoint(x: 260, y: 209), label: "Save", bounds: CGRect(x: 200, y: 200, width: 120, height: 18), mark: .underline))
+        expect(landed && companion.position == CGPoint(x: 355, y: 175) && companion.mark == .underline(CGRect(x: 200, y: 200, width: 120, height: 18)),
+               "an underline callout lands beside the corner of its bounds and underlines exactly those bounds", paused(landed))
+
+        landed = await pause(at: Callout(point: CGPoint(x: 545, y: 151), label: "rule", bounds: CGRect(x: 500, y: 150, width: 90, height: 2), mark: .underline))
+        expect(landed && companion.position == CGPoint(x: 625, y: 125) && companion.mark == nil,
+               "bounds under 4 pt across get no underline either", paused(landed))
+
+        landed = await pause(at: Callout(point: CGPoint(x: 470, y: 392), label: "Send", bounds: CGRect(x: 420, y: 380, width: 100, height: 24),
+                                         mark: .arrow(from: CGRect(x: 100, y: 500, width: 60, height: 30))))
+        expect(landed && companion.position == CGPoint(x: 555, y: 355)
+                   && companion.mark == .arrow(from: CGRect(x: 100, y: 500, width: 60, height: 30), to: CGRect(x: 420, y: 380, width: 100, height: 24)),
+               "an arrow callout lands beside the corner of its bounds and draws an arrow from its start to those bounds", paused(landed))
+
+        landed = await pause(at: Callout(point: CGPoint(x: 700, y: 260), label: "dot", bounds: nil, mark: .arrow(from: CGRect(x: 150, y: 120, width: 40, height: 20))))
+        expect(landed && companion.position == CGPoint(x: 735, y: 235)
+                   && companion.mark == .arrow(from: CGRect(x: 150, y: 120, width: 40, height: 20), to: CGRect(x: 700, y: 260, width: 0, height: 0)),
+               "an arrow to a single pixel draws to a zero-size box on that point", paused(landed))
+
         companion.point(at: nil)
         let gone = await wait(upTo: .seconds(1)) { companion.bubble == nil }
-        expect(gone && companion.ring == nil, "when the pause ends there is no ring")
+        expect(gone && companion.mark == nil, "when the pause ends there is no mark")
 
         try? await Task.sleep(for: .seconds(1))
-        let rings = companionLog(pid: ProcessInfo.processInfo.processIdentifier).split(separator: "\n")
-            .filter { $0.contains("companion pausing ") }.suffix(3).map { loggedField("ring", in: String($0)).map(String.init) ?? "missing" }
-        let logged = String(format: "%.1f,%.1f,%.1f,%.1f", bounds.minX, bounds.minY, bounds.width, bounds.height)
-        expect(rings == [logged, "none", "none"], "the three pauses log ring=\(logged), ring=none and ring=none", "\(rings)")
+        let marks = companionLog(pid: ProcessInfo.processInfo.processIdentifier).split(separator: "\n")
+            .filter { $0.contains("companion pausing ") }.suffix(7).map { loggedField("mark", in: String($0)).map(String.init) ?? "missing" }
+        expect(marks == ["ring:400.0,300.0,80.0,40.0", "none", "none", "underline:200.0,200.0,120.0,18.0", "none",
+                         "arrow:100.0,500.0,60.0,30.0->420.0,380.0,100.0,24.0", "arrow:150.0,120.0,40.0,20.0->700.0,260.0,0.0,0.0"],
+               "the seven pauses log their marks in order, none for each pause without one", "\(marks)")
     }
 
     static func displayID(_ screen: NSScreen) -> CGDirectDisplayID {
@@ -1045,7 +1066,7 @@ enum CompanionCheck {
     static func checkRingRender() {
         let around = CGRect(x: 40, y: 30, width: 100, height: 50)
         func drawn(_ fraction: Double) -> (pixels: Pixels, blobs: [Blob]) {
-            rendered(CompanionRing(around: around, drawn: fraction).frame(width: 200, height: 120), scale: 2)
+            rendered(CompanionMark(shape: .ring(around), drawn: fraction).frame(width: 200, height: 120), scale: 2)
                 ?? (Pixels(rgba: [], width: 0, height: 0), [])
         }
         func rgba(_ pixels: Pixels, _ x: Int, _ y: Int) -> [Int] {
@@ -1073,7 +1094,7 @@ enum CompanionCheck {
         expect(drawn(1).pixels.rgba == full.pixels.rgba, "rendering the same ring twice gives identical pixels")
 
         func inked(around box: CGRect) -> [Bool] {
-            guard let scene = rendered(CompanionRing(around: box, drawn: 1).frame(width: 300, height: 120), scale: 2)?.pixels else { return [] }
+            guard let scene = rendered(CompanionMark(shape: .ring(box), drawn: 1).frame(width: 300, height: 120), scale: 2)?.pixels else { return [] }
             return stride(from: 3, to: scene.rgba.count, by: 4).map { scene.rgba[$0] >= 128 }
         }
         let here = inked(around: around), there = inked(around: around.offsetBy(dx: 100, dy: 0))
@@ -1088,11 +1109,10 @@ enum CompanionCheck {
         let bounds = CGRect(x: 100, y: 180, width: 80, height: 40)
         let spot = Companion.landing(for: Callout(point: CGPoint(x: bounds.midX, y: bounds.midY), label: "panel", bounds: bounds), on: [overlay])
         let landed = Bubble(label: "panel", beside: spot, on: [overlay], appeared: .now)
-        let zone = bubbleZone(CGRect(origin: Companion.local(CGPoint(x: landed.frame.minX, y: landed.frame.maxY), in: overlay),
-                                     size: landed.frame.size), side: landed.side.rawValue)
-        let ring = CGRect(origin: Companion.local(CGPoint(x: bounds.minX, y: bounds.maxY), in: overlay), size: bounds.size)
+        let zone = bubbleZone(Companion.local(landed.frame, in: overlay), side: landed.side.rawValue)
+        let ring = Companion.local(bounds, in: overlay)
         let scene = ZStack {
-            CompanionRing(around: ring, drawn: 1)
+            CompanionMark(shape: .ring(ring), drawn: 1)
             CompanionGlyph(look: .arrow(heading: Companion.restingHeading), time: 0)
                 .position(Companion.local(spot, in: overlay))
             CompanionBubble(bubble: landed, shown: landed.label.count)
@@ -1105,6 +1125,79 @@ enum CompanionCheck {
                    && near(glyph, Companion.local(spot, in: overlay), within: 1),
                "at the stream's scale the ring, the glyph beside its corner and the bubble read as separate blobs",
                "\(sampled.blobs.map { "\($0.box) x\($0.count)" }), glyph \(describe(glyph))")
+    }
+
+    /// Points (in pt) whose alpha is at least half, from a scale-2 render.
+    @MainActor
+    static func ink(of shape: HandMark.Shape, drawn: Double, size: CGSize) -> [CGPoint] {
+        guard let pixels = rendered(CompanionMark(shape: shape, drawn: drawn).frame(width: size.width, height: size.height), scale: 2)?.pixels else { return [] }
+        return pixels.rgba.indices.filter { $0 % 4 == 3 && pixels.rgba[$0] >= 128 }.map { i in
+            CGPoint(x: Double((i / 4) % pixels.width) / 2, y: Double((i / 4) / pixels.width) / 2)
+        }
+    }
+
+    static func gap(from point: CGPoint, to box: CGRect) -> Double {
+        hypot(max(box.minX - point.x, 0, point.x - box.maxX), max(box.minY - point.y, 0, point.y - box.maxY))
+    }
+
+    @MainActor
+    static func checkMarkRender() {
+        func bounds(_ points: [CGPoint]) -> CGRect {
+            guard let first = points.first else { return .null }
+            return points.reduce(CGRect(origin: first, size: .zero)) { $0.union(CGRect(origin: $1, size: .zero)) }
+        }
+        for width in [30.0, 120.0, 260.0] {
+            let box = CGRect(x: 40, y: 30, width: width, height: 16)
+            let shape = HandMark.Shape.underline(box)
+            let size = CGSize(width: width + 100, height: 90)
+            let full = ink(of: shape, drawn: 1, size: size)
+            let all = bounds(full)
+            expect(!full.isEmpty && all.minY >= box.maxY + 1 && all.minY <= box.maxY + 10 && all.maxY <= box.maxY + 12,
+                   "the underline of 40,30 \(Int(width))x16 starts 1 to 10 pt under the box's bottom edge and stays within 12 pt", "\(all)")
+            expect(all.minX <= box.minX && all.maxX >= box.maxX && all.minX >= box.minX - 9 && all.maxX <= box.maxX + 12,
+                   "and spans the box's width, running up to 9 pt past the left and 12 past the right", "\(all)")
+            expect(!full.contains { box.contains($0) }, "and has no ink inside the box")
+            let half = bounds(ink(of: shape, drawn: 0.5, size: size))
+            expect(half.minX <= box.minX && half.maxX >= box.minX + width * 0.2 && half.maxX <= box.maxX - width * 0.15,
+                   "drawn to 0.5 it covers the left part of the box and stops short of its right end", "\(half) of \(all)")
+            let start = bounds(ink(of: shape, drawn: 0, size: size))
+            expect(!start.isNull && start.width <= 6 && start.height <= 6, "a new underline starts as a dot at most 6 pt across", "\(start)")
+            expect(ink(of: shape, drawn: 1, size: size) == full, "rendering the same underline twice gives identical pixels")
+        }
+
+        let target = CGRect(x: 200, y: 90, width: 60, height: 30)
+        let source = CGRect(x: 30, y: 40, width: 40, height: 30)
+        let arrows: [(name: String, from: CGRect, to: CGRect)] = [
+            ("rightward", source, target),
+            ("leftward", target, source),
+            ("downward", CGRect(x: 100, y: 10, width: 40, height: 30), CGRect(x: 110, y: 160, width: 50, height: 30)),
+            ("upward", CGRect(x: 110, y: 160, width: 50, height: 30), CGRect(x: 100, y: 10, width: 40, height: 30)),
+            ("short", CGRect(x: 30, y: 60, width: 40, height: 20), CGRect(x: 110, y: 60, width: 40, height: 20)),
+            ("single-pixel", source, CGRect(x: 200, y: 100, width: 0, height: 0)),
+        ]
+        for (name, from, to) in arrows {
+            let shape = HandMark.Shape.arrow(from: from, to: to)
+            let size = CGSize(width: 300, height: 220)
+            let full = ink(of: shape, drawn: 1, size: size)
+            let half = ink(of: shape, drawn: 0.5, size: size)
+            expect(!full.isEmpty && !full.contains { from.contains($0) || to.contains($0) }, "the \(name) arrow has no ink inside either box")
+            expect(full.contains { gap(from: $0, to: from) <= 12 } && full.contains { gap(from: $0, to: to) <= 12 },
+                   "and has ink within 12 pt of each box", "\(bounds(full))")
+            let head = full.filter { gap(from: $0, to: to) <= 12 }
+            expect(head.count >= 30, "and its head puts at least 30 half-points of ink within 12 pt of the box it points at", "\(head.count)")
+            expect(!half.isEmpty && !half.contains { gap(from: $0, to: to) <= 10 } && half.contains { gap(from: $0, to: from) <= 12 },
+                   "drawn to 0.5 the shaft has left the first box and no ink is within 10 pt of the second", "\(bounds(half))")
+            let start = bounds(ink(of: shape, drawn: 0, size: size))
+            expect(!start.isNull && start.width <= 6 && start.height <= 6, "a new arrow starts as a dot at most 6 pt across", "\(start)")
+            expect(ink(of: shape, drawn: 1, size: size) == full, "rendering the same arrow twice gives identical pixels")
+        }
+
+        for (name, from, to) in [("overlapping", CGRect(x: 100, y: 60, width: 50, height: 30), CGRect(x: 130, y: 80, width: 50, height: 30)),
+                                 ("nearly touching", CGRect(x: 60, y: 60, width: 50, height: 30), CGRect(x: 120, y: 60, width: 50, height: 30))] {
+            let full = ink(of: .arrow(from: from, to: to), drawn: 1, size: CGSize(width: 300, height: 220))
+            expect(!full.isEmpty && !full.contains { to.contains($0) } && full.contains { gap(from: $0, to: to) <= 12 },
+                   "an arrow between \(name) boxes comes in from outside the box it points at, with ink within 12 pt of it", "\(bounds(full))")
+        }
     }
 
     static func checkLooks(pid: Int32, restSeconds: Double) async {
@@ -1312,7 +1405,7 @@ enum CompanionCheck {
             let named = lines.last { $0.contains("transcription pointing") }
             let pausing = lines.last { $0.contains("companion pausing") }
             let frame = loggedNumbers("bubble", in: pausing)
-            let ringed = loggedNumbers("ring", in: pausing)
+            let ringed = loggedField("mark", in: pausing)?.wholeMatch(of: #/ring:(.+)/#)?.output.1.split(separator: ",").compactMap { Double($0) } ?? []
             guard let from = loggedPoint("from", in: flying), let to = loggedPoint("to", in: flying), let target = loggedPoint("at", in: named),
                   frame.count == 4, let side = loggedField("side", in: pausing), let typed = loggedNumbers("typed", in: pausing).first,
                   ringed.count == 4
