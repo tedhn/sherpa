@@ -1068,7 +1068,7 @@ enum CompanionCheck {
         let half = drawn(0.5).blobs.reduce(0) { $0 + $1.count }
         expect(half * 10 >= whole * 3 && half * 10 <= whole * 7, "drawn to 0.5 it shows 30% to 70% of the loop's pixels", "\(half) of \(whole) pixels")
         _ = drawn(1)
-        let start = drawn(DrawingRing.undrawn).blobs.reduce(0) { $0 + $1.count }
+        let start = drawn(0).blobs.reduce(0) { $0 + $1.count }
         expect(start * 100 <= whole, "a new ring starts as a dot of at most 1% of the pixels, even right after a whole ring was drawn", "\(start) of \(whole) pixels")
         expect(drawn(1).pixels.rgba == full.pixels.rgba, "rendering the same ring twice gives identical pixels")
 

@@ -163,12 +163,8 @@ private struct HandRing: Shape {
 }
 
 struct DrawingRing: View {
-    /// Not 0: SwiftUI can draw an empty shape as the last non-empty one of the same type
-    /// (ImageRenderer does), which would flash a whole ring before this one draws on.
-    static let undrawn = 0.001
-
     let around: CGRect
-    @State private var drawn = DrawingRing.undrawn
+    @State private var drawn = 0.0
 
     static let fade = AnyTransition.asymmetric(
         insertion: .identity,
