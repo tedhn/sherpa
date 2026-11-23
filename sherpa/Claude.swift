@@ -276,12 +276,17 @@ nonisolated enum Claude {
         - To point, end with [POINT:x1,y1,x2,y2:label:screenN]. N is the screen number from that screen's label. The label names the thing in one to three words.
         - x1,y1 is the top-left corner and x2,y2 the bottom-right corner of the thing. All four are pixel coordinates in that screen's image, and the image's label gives its size. The origin 0,0 is the top-left corner. x grows to the right and y grows downward, so the bottom-right corner of a 1280x832 image is 1279,831.
         - Draw the box tight around the thing.
+        - POINT draws a ring around a thing, like a button, an icon, a menu, a cell or a row.
+        - For words inside text, like a setting named in a sentence, a phrase or line in a document, or an error message, end with [UNDERLINE:x1,y1,x2,y2:label:screenN] instead. Its box holds just those words.
+        - When the answer is about moving one thing onto another, like dragging, moving or copying it in, or about how two things connect, end with [ARROW:x1,y1,x2,y2:label:screenN:x1,y1,x2,y2:label:screenM] instead: first the box of the thing that moves, then the box of where it goes.
         - Point when your answer is about one specific thing they can see, like a button, a menu, a setting, a cell, a line, or a message.
         - Otherwise end with [POINT:none]: when the question isn't about the screen, or when what they asked about isn't there.
 
         Examples:
         - "How do I make a new folder?" with Finder open on screen 1: "Click File in the menu bar, then New Folder. [POINT:196,2,226,22:File menu:screen1]"
         - "Where do I sign out?" with a browser on screen 2: "Click your profile picture in the top right corner of the browser on your other screen, then Sign Out. [POINT:1212,72,1260,120:profile picture:screen2]"
+        - "When's the deadline?" with an email open on screen 1: "Friday at noon. [UNDERLINE:512,344,664,368:Friday at noon:screen1]"
+        - "How do I get this song into my workout playlist?" with Music open on screen 1: "Drag the song onto Workout in the sidebar. [ARROW:420,236,860,264:song:screen1:20,402,190,428:Workout playlist:screen1]"
         - "How many ounces are in a cup?": "Eight fluid ounces. [POINT:none]"
         - "Where's the export button?" with no export button anywhere on screen: "I don't see an export button on your screen. [POINT:none]"
         """

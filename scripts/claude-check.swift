@@ -318,16 +318,22 @@ enum ClaudeCheck {
                 "\(probe.text.debugDescription) splits into \(probe.spoken.debugDescription), \(probe.tag.debugDescription), \(String(describing: probe.target)), got \(said.spoken.debugDescription), \(said.tag.debugDescription), \(String(describing: said.target))"
             )
         }
-        for example in Claude.system.matches(of: #/\[POINT:(?:none|[0-9][^\]]*)\]/#).map({ String($0.output) }) {
+        let examples = Claude.system.matches(of: #/\[(?:POINT|UNDERLINE|ARROW):(?:none|[0-9][^\]]*)\]/#).map { String($0.output) }
+        for example in examples {
             expect(Claude.Said(example).target != nil, "the prompt example \(example) parses")
         }
-        let pointing = Claude.system.matches(of: #/\[POINT:[0-9][^\]]*\]/#).map { Claude.Said(String($0.output)).target }
+        let marking = examples.compactMap { Claude.Said($0).target }.filter { $0 != .none }
         expect(
-            pointing == [
+            marking == [
                 .point(.init(x1: 196, y1: 2, x2: 226, y2: 22), label: "File menu", screen: 1, mark: .ring),
                 .point(.init(x1: 1212, y1: 72, x2: 1260, y2: 120), label: "profile picture", screen: 2, mark: .ring),
+                .point(.init(x1: 512, y1: 344, x2: 664, y2: 368), label: "Friday at noon", screen: 1, mark: .underline),
+                .point(
+                    .init(x1: 20, y1: 402, x2: 190, y2: 428), label: "Workout playlist", screen: 1,
+                    mark: .arrow(from: .init(x1: 420, y1: 236, x2: 860, y2: 264), label: "song", screen: 1)
+                ),
             ],
-            "the prompt's two pointing examples are boxes, got \(pointing)"
+            "the prompt's marking examples are two rings, an underline and an arrow, all boxes, got \(marking)"
         )
     }
 

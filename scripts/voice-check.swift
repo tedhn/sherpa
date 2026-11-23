@@ -177,7 +177,7 @@ struct Scene {
 }
 
 extension Scene {
-    static let all = [xcodeError, recipe, spreadsheet, wifiSettings, chat]
+    static let all = [xcodeError, recipe, spreadsheet, wifiSettings, chat, letter, article, finder]
 
     static let xcodeError = Scene(name: "xcodeError") { canvas in
         let keyword = NSColor(hex: 0xFC5FA3)
@@ -400,6 +400,145 @@ extension Scene {
         canvas.text("Message", x: 396, y: 772, size: 17, color: NSColor(hex: 0x9A9AA0))
     }
 
+    private static let letterLines = [
+        "Dear Ms. Alvarez,",
+        "",
+        "Thank you for meeting with me on Tuesday. I was glad to hear",
+        "about the new design team, and I hope to recieve your notes",
+        "on the portfolio soon. Please let me know if there is anything",
+        "else I can send before the next round.",
+        "",
+        "Best wishes,",
+        "Sam",
+    ]
+
+    static func words(_ words: String, after before: String, line: Int, left: CGFloat, top: CGFloat, step: CGFloat, size: CGFloat) -> CGRect {
+        let canvas = Canvas()
+        return CGRect(
+            x: left + canvas.width(of: before, size: size), y: top + CGFloat(line) * step,
+            width: canvas.width(of: words, size: size), height: (size * 1.25).rounded()
+        )
+    }
+
+    static let typo = words("recieve", after: "about the new design team, and I hope to ", line: 3, left: 220, top: 160, step: 38, size: 22)
+
+    static let letter = Scene(name: "letter") { canvas in
+        let ink = NSColor(hex: 0x1D1D1F)
+        canvas.fill(0, 0, Canvas.width, Canvas.height, NSColor(hex: 0xE5E5E7))
+        canvas.menuBar(["TextEdit", "File", "Edit", "Format", "View", "Window", "Help"], background: NSColor(hex: 0xF2F2F2), color: ink)
+        canvas.fill(0, 28, Canvas.width, 44, NSColor(hex: 0xE8E8EA))
+        canvas.trafficLights(x: 20, y: 43)
+        canvas.text("Letter to Ms. Alvarez.rtf", x: Canvas.width / 2, y: 40, size: 16, color: ink, weight: .semibold, anchor: .center)
+        canvas.fill(0, 72, Canvas.width, 36, NSColor(hex: 0xF6F6F8))
+        canvas.text("Helvetica     Regular     22     B   I   U", x: 24, y: 80, size: 15, color: NSColor(hex: 0x555555))
+        canvas.fill(160, 120, 960, 712, .white)
+        for (index, line) in letterLines.enumerated() {
+            canvas.text(line, x: 220, y: 160 + CGFloat(index) * 38, size: 22, color: ink)
+        }
+        canvas.squiggle(from: typo.minX, to: typo.maxX, y: typo.maxY - 1, NSColor(hex: 0xFF3B30))
+    }
+
+    static let storageSetting = words(
+        "Optimize Mac Storage", after: "click your name, then iCloud, and turn on ", line: 2, left: 200, top: 270, step: 34, size: 21
+    )
+
+    static let article = Scene(name: "article") { canvas in
+        let ink = NSColor(hex: 0x222222)
+        let muted = NSColor(hex: 0x666666)
+        canvas.fill(0, 0, Canvas.width, Canvas.height, .white)
+        canvas.menuBar(["Safari", "File", "Edit", "View", "History", "Bookmarks", "Window", "Help"], background: NSColor(hex: 0xF2F2F2), color: NSColor(hex: 0x1D1D1F))
+        canvas.fill(0, 28, Canvas.width, 56, NSColor(hex: 0xE8E8EA))
+        canvas.trafficLights(x: 20, y: 49)
+        canvas.fill(340, 40, 600, 32, .white, radius: 8)
+        canvas.text("support.example/mac-storage", x: 640, y: 47, size: 15, color: muted, anchor: .center)
+        canvas.text("Mac Help", x: 200, y: 112, size: 16, color: NSColor(hex: 0x0066CC), weight: .semibold)
+        canvas.text("If your Mac is running out of space", x: 200, y: 140, size: 40, color: ink, weight: .bold)
+        canvas.text("Store files in iCloud", x: 200, y: 220, size: 26, color: ink, weight: .bold)
+        let paragraph = [
+            "Your Mac can keep files in iCloud and store only the ones you",
+            "used recently on its disk. To set this up, open System Settings,",
+            "click your name, then iCloud, and turn on Optimize Mac Storage.",
+            "Older files stay in iCloud and download again when you open",
+            "them, so they never use space you need.",
+        ]
+        for (index, line) in paragraph.enumerated() {
+            canvas.text(line, x: 200, y: 270 + CGFloat(index) * 34, size: 21, color: ink)
+        }
+        canvas.text("Find large files", x: 200, y: 470, size: 26, color: ink, weight: .bold)
+        canvas.text("Large files you no longer need, like old disk images and", x: 200, y: 520, size: 21, color: ink)
+        canvas.text("movies, are the next place to look.", x: 200, y: 554, size: 21, color: ink)
+    }
+
+    private enum FinderIcon {
+        case folder
+        case document(band: UInt32, kind: String)
+    }
+
+    private static let finderItems: [(name: String, icon: FinderIcon, column: Int, row: Int)] = [
+        ("Invoices", .folder, 0, 0), ("Receipts", .folder, 1, 0), ("Taxes 2026", .folder, 2, 0), ("Projects", .folder, 3, 0),
+        ("March invoice.pdf", .document(band: 0xE5484D, kind: "PDF"), 0, 1),
+        ("Budget.xlsx", .document(band: 0x1F9D55, kind: "XLSX"), 1, 1),
+        ("Notes.txt", .document(band: 0x8E8E93, kind: "TXT"), 2, 1),
+    ]
+
+    static func finderItem(column: Int, row: Int) -> CGRect {
+        CGRect(x: 390 + CGFloat(column) * 150, y: 142 + CGFloat(row) * 160, width: 120, height: 112)
+    }
+
+    static let invoicesFolder = finderItem(column: 0, row: 0)
+    static let invoicePDF = finderItem(column: 0, row: 1)
+    static let budgetFile = finderItem(column: 1, row: 1)
+    static let usbDrive = CGRect(x: 150, y: 380, width: 200, height: 28)
+
+    static let finder = Scene(name: "finder") { canvas in
+        let ink = NSColor(hex: 0x1D1D1F)
+        let muted = NSColor(hex: 0x8E8E93)
+        canvas.gradient(0, 0, Canvas.width, Canvas.height, from: NSColor(hex: 0x2B8A8A), to: NSColor(hex: 0x1F3A68))
+        canvas.menuBar(["Finder", "File", "Edit", "View", "Go", "Window", "Help"], background: NSColor(hex: 0xF2F2F2), color: ink)
+        canvas.fill(140, 60, 1000, 680, .white, radius: 12)
+        canvas.clipped(toRoundedRect: 140, 60, 1000, 680, radius: 12) {
+            canvas.fill(140, 60, 220, 680, NSColor(hex: 0xEDEDF0))
+        }
+        canvas.trafficLights(x: 160, y: 78)
+        canvas.text("Documents", x: 760, y: 76, size: 16, color: ink, weight: .semibold, anchor: .center)
+        canvas.line(from: CGPoint(x: 360, y: 112), to: CGPoint(x: 1140, y: 112), NSColor(hex: 0xD8D8DC))
+        canvas.text("Favorites", x: 160, y: 128, size: 12, color: muted, weight: .semibold)
+        let favorites = ["Recents", "Applications", "Desktop", "Documents", "Downloads"]
+        for (index, item) in favorites.enumerated() {
+            let top = CGFloat(152 + index * 32)
+            if item == "Documents" { canvas.fill(150, top - 4, 200, 28, NSColor(hex: 0xD6D6DB), radius: 6) }
+            canvas.fill(162, top + 2, 16, 16, NSColor(hex: 0x3D8BFD), radius: 4)
+            canvas.text(item, x: 188, y: top, size: 15, color: ink)
+        }
+        canvas.text("Locations", x: 160, y: 320, size: 12, color: muted, weight: .semibold)
+        for (index, item) in ["Macintosh HD", "KINGSTON"].enumerated() {
+            let top = CGFloat(352 + index * 32)
+            canvas.fill(162, top + 2, 16, 16, NSColor(hex: 0x8E8E93), radius: 3)
+            canvas.text(item, x: 188, y: top, size: 15, color: ink)
+        }
+        canvas.text("\u{23CF}", x: 332, y: 384, size: 14, color: muted, anchor: .center)
+        for item in finderItems {
+            let slot = finderItem(column: item.column, row: item.row)
+            let (centre, top) = (slot.midX, slot.minY + 8)
+            let selected = item.name == "March invoice.pdf"
+            if selected { canvas.fill(centre - 44, top - 6, 88, 84, NSColor(hex: 0xDCDCE0), radius: 8) }
+            switch item.icon {
+            case .folder:
+                canvas.fill(centre - 36, top + 6, 30, 14, NSColor(hex: 0x4AA3E8), radius: 4)
+                canvas.fill(centre - 36, top + 14, 72, 52, NSColor(hex: 0x5AB4F5), radius: 6)
+            case .document(let band, let kind):
+                canvas.fill(centre - 28, top, 56, 70, .white, radius: 3)
+                canvas.outline(centre - 28, top, 56, 70, NSColor(hex: 0xC8C8CC), radius: 3)
+                canvas.fill(centre - 28, top + 40, 56, 16, NSColor(hex: band))
+                canvas.text(kind, x: centre, y: top + 41, size: 10, color: .white, weight: .bold, anchor: .center)
+            }
+            let width = canvas.width(of: item.name, size: 14)
+            if selected { canvas.fill(centre - width / 2 - 6, top + 78, width + 12, 22, NSColor(hex: 0x0A84FF), radius: 5) }
+            canvas.text(item.name, x: centre, y: top + 80, size: 14, color: selected ? .white : ink, anchor: .center)
+        }
+        canvas.line(from: CGPoint(x: 360, y: 706), to: CGPoint(x: 1140, y: 706), NSColor(hex: 0xD8D8DC))
+        canvas.text("7 items, 112 GB available", x: 750, y: 714, size: 13, color: muted, anchor: .center)
+    }
 }
 
 enum Aim {
@@ -606,6 +745,11 @@ extension Case {
     private static let notifications = CGRect(x: 204, y: 332, width: 242, height: 40)
     private static let thirdBubble = CGRect(x: 372, y: 312, width: Canvas().width(of: "Can you send me the slides before 3pm?", size: 20) + 36, height: 48)
     private static let buildTypo = [["reponse", "response", "typo", "misspel", "spelled"]]
+    private static let errorMessage: CGRect = {
+        let canvas = Canvas()
+        let code = ["        print(", "reponse", ".statusCode)"].reduce(90) { $0 + canvas.width(of: $1, size: 18, mono: true) }
+        return CGRect(x: code + 36, y: 329, width: canvas.width(of: "Cannot find 'reponse' in scope", size: 15) + 28, height: 26)
+    }()
 
     static let all: [Case] = [
         Case(name: "error", turns: [Turn(question: "Why won't this build?", scenes: [.xcodeError], mustMention: buildTypo)]),
@@ -666,13 +810,13 @@ extension Case {
         )]),
         Case(name: "errorLine", turns: [Turn(
             question: "Where's the error?", scenes: [.xcodeError],
-            aim: .at(screen: 1, CGRect(x: 0, y: 322, width: 1280, height: 38))
+            aim: .at(screen: 1, CGRect(x: 0, y: 322, width: 1280, height: 38), marks: [.ring, .underline])
         )]),
         Case(name: "otherScreen", turns: [Turn(
             question: "How do I turn my Wi-Fi back on?", scenes: [.chat, Scene.wifiSettings.away], aim: .at(screen: 2, wifiSwitch)
         )]),
         Case(name: "otherMessage", turns: [Turn(
-            question: "Where's Priya's message about the slides?", scenes: [.wifiSettings, Scene.chat.away], aim: .at(screen: 2, thirdBubble)
+            question: "Where's Priya's message about the slides?", scenes: [.wifiSettings, Scene.chat.away], aim: .at(screen: 2, thirdBubble, marks: [.ring, .underline])
         )]),
         Case(name: "inkCell", turns: [Turn(
             question: "What's this number?", scenes: [Scene.spreadsheet.inked([Canvas.loop(around: CGRect(x: 640, y: 228, width: 110, height: 32))])],
@@ -680,15 +824,38 @@ extension Case {
         )]),
         Case(name: "inkChat", turns: [Turn(
             question: "What did she say?", scenes: [Scene.chat.inked([Canvas.loop(around: CGRect(x: 24, y: 372, width: 240, height: 50))])],
-            aim: .at(screen: 1, CGRect(x: 10, y: 362, width: 320, height: 70)), mustMention: [["call"]], mustNotMention: ["slides"]
+            aim: .at(screen: 1, CGRect(x: 10, y: 362, width: 320, height: 70), marks: [.ring, .underline]), mustMention: [["call"]], mustNotMention: ["slides"]
         )]),
         Case(name: "inkUnderline", turns: [Turn(
             question: "What's this for?", scenes: [Scene.wifiSettings.inked([Canvas.underline(246, 362, y: 504)])],
-            aim: .at(screen: 1, CGRect(x: 204, y: 470, width: 242, height: 40)), mustMention: [["screen time"]]
+            aim: .at(screen: 1, CGRect(x: 204, y: 470, width: 242, height: 40), marks: [.ring, .underline]), mustMention: [["screen time"]]
         )]),
         Case(name: "inkIrrelevant", turns: [Turn(
             question: "How many ounces are in a cup?", scenes: [Scene.spreadsheet.inked([Canvas.loop(around: CGRect(x: 640, y: 228, width: 110, height: 32))])],
             aim: .nothing, mustNotMention: ["circle", "red", "drew", "marked", "spreadsheet", "3,100"]
+        )]),
+        Case(name: "spelling", turns: [Turn(
+            question: "Which word did I spell wrong?", scenes: [.letter],
+            aim: .at(screen: 1, Scene.typo, marks: [.underline]), mustMention: [["receive", "recieve"]]
+        )]),
+        Case(name: "articleSetting", turns: [Turn(
+            question: "What setting does this tell me to turn on?", scenes: [.article],
+            aim: .at(screen: 1, Scene.storageSetting, marks: [.underline]), mustMention: [["optimize mac storage"]]
+        )]),
+        Case(name: "errorMessage", turns: [Turn(
+            question: "What does the error message say?", scenes: [.xcodeError],
+            aim: .at(screen: 1, errorMessage, marks: [.underline]), mustMention: [["find"]]
+        )]),
+        Case(name: "moveFile", turns: [Turn(
+            question: "How do I put this PDF in the Invoices folder?", scenes: [.finder],
+            aim: .arrow(from: Scene.invoicePDF, to: Scene.invoicesFolder, screen: 1)
+        )]),
+        Case(name: "copyToDrive", turns: [Turn(
+            question: "How do I copy the budget spreadsheet onto my USB stick?", scenes: [.finder],
+            aim: .arrow(from: Scene.budgetFile, to: Scene.usbDrive, screen: 1)
+        )]),
+        Case(name: "findDrive", turns: [Turn(
+            question: "Where's my USB stick?", scenes: [.finder], aim: .at(screen: 1, Scene.usbDrive), mustMention: [["kingston"]]
         )]),
     ]
 }
